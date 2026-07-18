@@ -185,6 +185,7 @@ impl LineEditor {
         let trimmed = line.trim();
 
         if !trimmed.contains(' ') {
+            // Автодополнение команд
             let mut matches: [&str; 32] = [""; 32];
             let mut n_matches = 0usize;
 
@@ -196,17 +197,31 @@ impl LineEditor {
             }
 
             if n_matches == 1 {
+                // Один матч — дополняем
                 let full = matches[0];
-                let to_append = &full[trimmed.len()..];
-                self.append_str(to_append);
+                // Очищаем текущий ввод
+                for _ in 0..self.len {
+                    console.put_char('\x08');
+                }
+                for _ in 0..self.len {
+                    console.put_char(' ');
+                }
+                for _ in 0..self.len {
+                    console.put_char('\x08');
+                }
+                
+                // Записываем полную команду
+                self.len = 0;
+                self.cursor = 0;
+                self.append_str(full);
                 self.append_str(" ");
-                // Просто допечатываем
-                if let Ok(s) = core::str::from_utf8(&self.buffer[self.cursor..self.len]) {
-                    for ch in s.chars() {
-                        console.put_char(ch);
-                    }
+                
+                // Печатаем на экран
+                if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
+                    console.print(s);
                 }
             } else if n_matches > 1 {
+                // Несколько матчей — показываем список
                 console.put_char('\n');
                 for i in 0..n_matches {
                     console.print("  ");
@@ -219,7 +234,8 @@ impl LineEditor {
                 }
             }
         } else {
-            console.print("\n[File completion not fully implemented]\n");
+            // Автодополнение файлов (упрощённо)
+            console.print("\n[File completion not implemented]\n");
             console.print("vibra> ");
             if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
                 console.print(s);
