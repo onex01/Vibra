@@ -235,10 +235,8 @@ impl Console {
                 self.cursor_col = 0;
             }
             '\x08' => {
-                // Backspace
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
-                    self.draw_char_at(' ', self.cursor_col, self.cursor_row, self.fg_color, self.bg_color);
                 }
             }
             '\t' => {

@@ -1,7 +1,7 @@
 use crate::keyboard::{self, Key};
 use crate::framebuffer::Console;
 use crate::commands;
-use crate::fs::{self, FileType};
+use crate::fs;
 
 const MAX_LINE: usize = 256;
 const HISTORY_SIZE: usize = 16;
@@ -29,7 +29,7 @@ impl LineEditor {
         }
     }
 
-    pub fn read_line(&mut self, console: &mut Console, prompt_len: usize) -> &str {
+    pub fn read_line(&mut self, console: &mut Console, _prompt_len: usize) -> &str {
         self.len = 0;
         self.cursor = 0;
         self.history_idx = self.history_count;
@@ -44,12 +44,26 @@ impl LineEditor {
                     }
                     Key::Backspace => {
                         if self.cursor > 0 {
+                            // Сдвигаем всё влево
                             for i in self.cursor..self.len {
                                 self.buffer[i-1] = self.buffer[i];
                             }
                             self.len -= 1;
                             self.cursor -= 1;
-                            self.redraw(console, prompt_len);
+                            
+                            // Терминальный backspace: удаляем символ
+                            console.put_char('\x08');
+                            console.put_char(' ');
+                            console.put_char('\x08');
+                            
+                            // Перепечатываем остаток строки
+                            for i in self.cursor..self.len {
+                                console.put_char(self.buffer[i] as char);
+                            }
+                            // Возвращаем курсор на место
+                            for _ in self.cursor..self.len {
+                                console.put_char('\x08');
+                            }
                         }
                     }
                     Key::Left => {
@@ -69,7 +83,8 @@ impl LineEditor {
                         if self.history_count > 0 && self.history_idx > 0 {
                             self.history_idx -= 1;
                             self.load_from_history(self.history_idx);
-                            self.redraw(console, prompt_len);
+                            // Перепечатываем всю строку
+                            self.reprint_line(console);
                         }
                     }
                     Key::Down => {
@@ -81,21 +96,33 @@ impl LineEditor {
                             } else {
                                 self.load_from_history(self.history_idx);
                             }
-                            self.redraw(console, prompt_len);
+                            self.reprint_line(console);
                         }
                     }
                     Key::Tab => {
-                        self.tab_complete(console, prompt_len);
+                        self.tab_complete(console);
                     }
                     Key::Char(ch) => {
                         if self.len < MAX_LINE - 1 {
+                            // Вставляем символ
                             for i in (self.cursor..self.len).rev() {
                                 self.buffer[i+1] = self.buffer[i];
                             }
                             self.buffer[self.cursor] = ch as u8;
                             self.len += 1;
                             self.cursor += 1;
-                            self.redraw(console, prompt_len);
+                            
+                            // Просто печатаем символ
+                            console.put_char(ch);
+                            
+                            // Перепечатываем остаток строки
+                            for i in self.cursor..self.len {
+                                console.put_char(self.buffer[i] as char);
+                            }
+                            // Возвращаем курсор
+                            for _ in self.cursor..self.len {
+                                console.put_char('\x08');
+                            }
                         }
                     }
                     _ => {}
@@ -133,34 +160,27 @@ impl LineEditor {
         self.cursor = src_len;
     }
 
-    fn redraw(&self, console: &mut Console, prompt_len: usize) {
-        // 1. Возвращаемся в начало ввода (после prompt)
-        for _ in 0..(self.cursor + prompt_len) {
+    // Перепечатывает текущую строку (для history)
+    fn reprint_line(&self, console: &mut Console) {
+        // Возвращаемся в начало строки
+        for _ in 0..self.len {
             console.put_char('\x08');
         }
-        
-        // 2. Стираем текущий текст (для этого идем до конца строки)
+        // Стираем
         for _ in 0..self.len {
             console.put_char(' ');
         }
-        
-        // 3. Возвращаемся в начало ввода
-        for _ in 0..(self.cursor + prompt_len) {
+        // Возвращаемся
+        for _ in 0..self.len {
             console.put_char('\x08');
         }
-        
-        // 4. Рисуем текст
+        // Рисуем
         if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
             console.print(s);
         }
-        
-        // 5. Возвращаем курсор на правильную позицию
-        for _ in self.cursor..self.len {
-            console.put_char('\x08');
-        }
     }
 
-    fn tab_complete(&mut self, console: &mut Console, prompt_len: usize) {
+    fn tab_complete(&mut self, console: &mut Console) {
         let line = self.as_str();
         let trimmed = line.trim();
 
@@ -180,7 +200,12 @@ impl LineEditor {
                 let to_append = &full[trimmed.len()..];
                 self.append_str(to_append);
                 self.append_str(" ");
-                self.redraw(console, prompt_len);
+                // Просто допечатываем
+                if let Ok(s) = core::str::from_utf8(&self.buffer[self.cursor..self.len]) {
+                    for ch in s.chars() {
+                        console.put_char(ch);
+                    }
+                }
             } else if n_matches > 1 {
                 console.put_char('\n');
                 for i in 0..n_matches {
@@ -194,49 +219,10 @@ impl LineEditor {
                 }
             }
         } else {
-            let parts: [&str; 16] = {
-                let mut arr = [""; 16];
-                let mut n = 0;
-                for p in trimmed.split_whitespace() {
-                    if n < 16 { arr[n] = p; n += 1; }
-                }
-                arr
-            };
-
-            let last_part = parts.iter().rev().find(|s| !s.is_empty()).copied().unwrap_or("");
-            let mut matches: [&str; 32] = [""; 32];
-            let mut n_matches = 0usize;
-
-            for entry in fs::list_entries() {
-                if entry.name().starts_with(last_part) && n_matches < 32 {
-                    matches[n_matches] = entry.name();
-                    n_matches += 1;
-                }
-            }
-
-            if n_matches == 1 {
-                let full = matches[0];
-                let to_append = &full[last_part.len()..];
-                self.append_str(to_append);
-                if matches.iter().take(n_matches).any(|n| {
-                    fs::list_entries().any(|e| e.name() == *n && e.metadata.file_type == FileType::Directory)
-                }) {
-                    self.append_str("/");
-                } else {
-                    self.append_str(" ");
-                }
-                self.redraw(console, prompt_len);
-            } else if n_matches > 1 {
-                console.put_char('\n');
-                for i in 0..n_matches {
-                    console.print("  ");
-                    console.print(matches[i]);
-                }
-                console.put_char('\n');
-                console.print("vibra> ");
-                if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
-                    console.print(s);
-                }
+            console.print("\n[File completion not fully implemented]\n");
+            console.print("vibra> ");
+            if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
+                console.print(s);
             }
         }
     }
