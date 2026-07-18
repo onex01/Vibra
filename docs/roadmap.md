@@ -1,11 +1,15 @@
 # Roadmap — План развития Vibra OS
 
-## Версия 0.3 "Cartridge" (текущая)
+> **Текущая версия:** 0.5 «Nucleus» (см. `src/version.rs`).
+> Заметка по техническим долгам: в `src/main.rs` баннер пока жёстко кодирует
+> «0.4 Photon» — привести к единому источнику истины (`version.rs`) отдельно.
+
+## Версия 0.3 "Cartridge"
 
 ### Цели:
-- [ ] PS/2 клавиатура (базовый ввод)
-- [ ] RamFS (файловая система в памяти)
-- [ ] Простейший shell с командами:
+- [x] PS/2 клавиатура (базовый ввод)
+- [x] RamFS (файловая система в памяти)
+- [x] Простейший shell с командами:
   - `ls` — список файлов
   - `cat` — чтение файла
   - `echo` — запись в файл
@@ -15,10 +19,23 @@
 ## Версия 0.4 "Photon"
 
 ### Цели:
+- [x] Поддержка папок в RamFS
+- [x] Команды: `mkdir`, `cp`, `mv`, `cd`, `edit`, `touch`, `pwd`
+- [x] Свои GDT + TSS + IST-стеки (Double Fault, NMI)
+- [x] IDT: исключения CPU + IRQ0 timer + IRQ1 keyboard, PIC, PIT
+- [x] Подсистема `kernel`: device/driver/module/registry/event
 - [ ] FAT32 драйвер (чтение/запись)
 - [ ] Виртуальная файловая система (VFS)
-- [ ] Поддержка папок
-- [ ] Команды: `mkdir`, `cp`, `mv`, `cd`
+
+## Версия 0.5 "Nucleus" (текущая)
+
+### Цели (этап «Фундамент + память»):
+- [x] PMM с локами + next-fit + `alloc_contiguous` + `alloc_frame_zeroed` + `stats`
+- [x] Heap: собственный free-list аллокатор с коалесценцией (бэкенд PMM + HHDM)
+- [x] Heap-стресс (10k alloc/drop) и shell-команды `heap` / `diag pmtest`
+- [~] Собственные page tables: готовы CR3/PML4 walker и проверка неактивной PML4 с private 4КБ mapping; далее HHDM + ядро 4КБ-страницами + framebuffer — Шаг 4
+- [ ] Проверка NX/WX-страниц (`wxtest`/`nxtest`)
+- [ ] Вытесняющий планировщик (kernel-threads) — следующий этап
 
 ## Версия 1.0 "Nova"
 

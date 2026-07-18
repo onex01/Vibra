@@ -36,15 +36,20 @@ impl IdtEntry {
     }
 
     fn set_handler(&mut self, handler: u64) {
-        // Берём ТЕКУЩИЙ селектор кода: Limine грузит свой GDT,
-        // где 64-битный код вовсе не обязан быть на 0x08.
+        self.set_handler_with_ist(handler, 0);
+    }
+
+    // ist: 1-based индекс в TSS.IST (0 = обычный стек)
+    fn set_handler_with_ist(&mut self, handler: u64, ist: u16) {
+        // Берём ТЕКУЩИЙ селектор кода — IDT строится после gdt::init(),
+        // так что это будет наш KERNEL_CS.
         let cs: u16;
         unsafe { asm!("mov {0:x}, cs", out(reg) cs, options(nomem, nostack, preserves_flags)); }
         self.offset_low = handler as u16;
         self.offset_mid = (handler >> 16) as u16;
         self.offset_high = (handler >> 32) as u32;
         self.selector = cs;
-        self.ist = 0;
+        self.ist = (ist & 0x7) as u8;
         self.type_attr = 0x8E;
         self.zero = 0;
     }
@@ -88,8 +93,10 @@ pub fn init() {
         // ВАЖНО: обработчики используют ABI "x86-interrupt" — компилятор сам
         // сохраняет регистры и завершает обработчик через iretq.
         IDT[0].set_handler(isr_divide_by_zero as *const () as u64);
+        IDT[2].set_handler_with_ist(isr_nmi as *const () as u64, crate::gdt::NMI_IST_INDEX);
         IDT[6].set_handler(isr_invalid_opcode as *const () as u64);
-        IDT[8].set_handler(isr_double_fault as *const () as u64);
+        // Double Fault на отдельном IST-стеке: сработает даже если RSP битый
+        IDT[8].set_handler_with_ist(isr_double_fault as *const () as u64, crate::gdt::DOUBLE_FAULT_IST_INDEX);
         IDT[13].set_handler(isr_general_protection as *const () as u64);
         IDT[14].set_handler(isr_page_fault as *const () as u64);
 
@@ -152,6 +159,12 @@ extern "x86-interrupt" fn isr_divide_by_zero(frame: InterruptStackFrame) {
     println!("\n!!! DIVIDE BY ZERO !!!");
     dump_frame(&frame);
     super::halt_loop();
+}
+
+// NMI: на своём IST-стеке, просто логируем и продолжаем
+extern "x86-interrupt" fn isr_nmi(frame: InterruptStackFrame) {
+    println!("\n[NMI] Non-maskable interrupt received");
+    dump_frame(&frame);
 }
 
 extern "x86-interrupt" fn isr_invalid_opcode(frame: InterruptStackFrame) {

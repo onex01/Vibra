@@ -1,13 +1,12 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
-
-#![feature(cmse_nonsecure_entry)]
 #![deny(improper_ctypes)]
 
 extern crate alloc;
 
 mod serial;
+mod gdt;
 mod memory;
 mod keyboard;
 mod framebuffer;
@@ -20,24 +19,82 @@ mod interrupts;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest};
+use spin::Mutex;
 use commands::CmdResult;
 
 #[used] static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 #[used] static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[used] static MEMORY_MAP_REQUEST: MemmapRequest = MemmapRequest::new();
 
-const OS_VERSION: &str = "0.4";
-const OS_CODENAME: &str = "Photon";
-
 #[inline]
 fn halt() { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
 
-static mut LINE_EDITOR: shell::LineEditor = shell::LineEditor::new();
+// Стресс-тест heap: 10k циклов alloc/drop разного размера.
+// used ДО и ПОСЛЕ должен совпасть — иначе free/коалесценция сломаны.
+fn heap_stress() {
+    use alloc::{vec, vec::Vec};
+    const ITERS: usize = 10_000;
+
+    let (used_before, _) = memory::heap::stats();
+
+    // Паттерн длин 8..256 по модулю — дразним фрагментацию.
+    let mut patterns = [0u8; 256];
+    let mut seed: u8 = 0x5A;
+    for i in 0..256 {
+        seed ^= (i as u8).wrapping_mul(0x9B);
+        patterns[i] = seed;
+    }
+
+    for i in 0..ITERS {
+        let n = 8 + (i % 248); // 8..255
+        let mut v: Vec<u8> = Vec::with_capacity(n);
+        // Заполняем реальными данными, чтобы словить порчу метаданных.
+        let mut idx = i;
+        while v.len() < n {
+            v.push(patterns[idx % 256]);
+            idx = idx.wrapping_add(7);
+        }
+        // Проверка целостности перед drop (ловим запись в чужой блок).
+        let sample = v[n / 2];
+        let expected = patterns[(i + (n / 2) * 7) % 256];
+        if sample != expected {
+            println!("[HEAP] stress: CORRUPTION at iter {} (got {:#x} want {:#x})", i, sample, expected);
+            return;
+        }
+        // drop тут же — RAII освобождает блок.
+        drop(v);
+
+        // Раз в ~2000 итераций держим несколько живых блоков одновременно,
+        // чтобы список реально фрагментировался, а не бегал одним узлом.
+        if i % 2000 == 0 && i != 0 {
+            let held_len = 8 + ((i / 2000) * 37) % 248;
+            let _h = vec![0xCDu8; held_len]; // живёт до конца итерации блока
+            let _ = _h;
+        }
+    }
+
+    let (used_after, _) = memory::heap::stats();
+    if used_after == used_before {
+        println!("[HEAP] stress: {} iters OK (used {} -> {})", ITERS, used_before, used_after);
+    } else {
+        let drift = used_after as i64 - used_before as i64;
+        println!("[HEAP] stress: {} iters LEAK {} ({} -> {})", ITERS, drift, used_before, used_after);
+    }
+}
+
+// LineEditor хранит историю и буфер ввода между командами. Доступ идёт только
+// из основного потока; Mutex убирает небезопасную mutable-ссылку на static и
+// оставляет корректную точку синхронизации для будущего планировщика.
+static LINE_EDITOR: Mutex<shell::LineEditor> = Mutex::new(shell::LineEditor::new());
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     serial::init();
-    println!("Vibra {} \"{}\" booting...", OS_VERSION, OS_CODENAME);
+    println!(
+        "Vibra {} \"{}\" booting...",
+        version::OS_VERSION,
+        version::OS_CODENAME
+    );
 
     let hhdm_response = match HHDM_REQUEST.response() {
         Some(r) => r,
@@ -46,15 +103,14 @@ pub extern "C" fn _start() -> ! {
     let hhdm_offset = hhdm_response.offset;
 
     if let Some(mm) = MEMORY_MAP_REQUEST.response() {
-        memory::init(mm.entries());
+        memory::init(mm.entries(), hhdm_offset);
     } else { println!("[FATAL] Memory map failed"); loop { halt(); } }
 
-    // Memory test
-    if let Some(frame) = memory::pmm::alloc_frame() {
-        let virt = (frame + hhdm_offset as usize) as *mut u8;
-        unsafe { core::ptr::write_volatile(virt, 0xAB); }
-        memory::pmm::free_frame(frame);
-    }
+    // Heap stress: 10k alloc/drop разной длины. Доказывает корректность
+    // free-list'а: used должен вернуться к базовому (показывает работу free
+    // и коалесценции). Делаем до kernel::init — там первые постоянные
+    // аллокации (Vec/String), которые не освобождаются.
+    heap_stress();
 
     keyboard::init();
     fs::init_filesystem();
@@ -71,6 +127,7 @@ pub extern "C" fn _start() -> ! {
     kernel::driver::register("vga-console", "0.1.0", &[kernel::device::DeviceType::Console]);
     kernel::driver::register("fbdev", "0.1.0", &[kernel::device::DeviceType::Display]);
     
+    gdt::init();
     interrupts::init();
     interrupts::enable();
 
@@ -109,7 +166,16 @@ pub extern "C" fn _start() -> ! {
         let prompt = "vibra> ";
         console.print_colored(prompt, framebuffer::COLOR_VIBRA_PROMPT);
         let prompt_len = prompt.len();
-        let line = unsafe { LINE_EDITOR.read_line(&mut console, prompt_len) };
+        // `read_line` возвращает ссылку во внутренний буфер редактора. Копируем
+        // её на стек, затем освобождаем mutex до выполнения команды.
+        let mut line_buffer = [0u8; 256];
+        let line_len = {
+            let mut editor = LINE_EDITOR.lock();
+            let line = editor.read_line(&mut console, prompt_len);
+            line_buffer[..line.len()].copy_from_slice(line.as_bytes());
+            line.len()
+        };
+        let line = core::str::from_utf8(&line_buffer[..line_len]).unwrap_or("");
         let trimmed = line.trim();
 
         if trimmed.is_empty() { continue; }

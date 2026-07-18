@@ -34,7 +34,10 @@ impl LineEditor {
         self.history_idx = self.history_count;
 
         loop {
-            if let Some(key) = keyboard::poll_key() {
+            // Сначала PS/2 (нажатия в окне QEMU), затем COM1. Serial driver
+            // работает polling-ом; PIT будит цикл максимум через 10 мс.
+            let next_key = keyboard::poll_key().or_else(crate::serial::poll_key);
+            if let Some(key) = next_key {
                 match key {
                     Key::Enter => {
                         console.put_char('\n');
@@ -127,8 +130,12 @@ impl LineEditor {
                     _ => {}
                 }
             }
-            // Спим до следующего прерывания вместо busy-loop
-            crate::interrupts::wait();
+            // Если ввода не было, спим до следующего прерывания вместо
+            // busy-loop. После принятого serial-байта не спим: так быстро
+            // разгружаем 16-байтный FIFO UART и не теряем длинные команды.
+            if next_key.is_none() {
+                crate::interrupts::wait();
+            }
         }
     }
 

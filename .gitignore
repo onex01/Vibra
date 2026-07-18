@@ -3,3 +3,5 @@ limine-bin/
 build/
 OVMF.fd
 wget-*
+.mimocode
+.zcode

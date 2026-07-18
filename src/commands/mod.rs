@@ -19,6 +19,8 @@ pub mod pwd;
 pub mod uptime;
 pub mod about;
 pub mod quit;
+pub mod diag;
+pub mod heap;
 
 use crate::framebuffer::Console;
 
@@ -58,6 +60,8 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "sysinfo", help: "show system information",    func: sysinfo::run },
     Command { name: "uptime",  help: "show system uptime",         func: uptime::run },
     Command { name: "about",   help: "show project info",          func: about::run },
+    Command { name: "diag",    help: "kernel diagnostics tests",   func: diag::run },
+    Command { name: "heap",    help: "show heap usage",            func: heap::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 

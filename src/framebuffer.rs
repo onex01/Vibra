@@ -226,6 +226,9 @@ impl Console {
 
     /// Печатает символ в текущей позиции курсора с автопереносом
     pub fn put_char(&mut self, ch: char) {
+        // В debug-сборке serial terminal является зеркалом shell-консоли.
+        // Функция превращается в no-op с --no-default-features.
+        crate::serial::mirror_console_char(ch);
         match ch {
             '\n' => {
                 self.cursor_col = 0;

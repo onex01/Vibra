@@ -7,6 +7,12 @@ edition = "2021"
 limine = "0.6"
 spin = "0.9.8"
 
+[features]
+# В development-сборке shell доступен через COM1. Для образа без serial shell:
+# cargo build --release --no-default-features ...
+default = ["serial-debug"]
+serial-debug = []
+
 [profile.dev]
 panic = "abort"
 

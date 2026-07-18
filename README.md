@@ -73,13 +73,48 @@ make run
 Или использовать скрипт `build.sh`:
 ```bash
 chmod +x build.sh
-./build.sh
+./build.sh setup          # только при первом запуске
+./build.sh debug          # development-сборка + QEMU (serial shell включён)
+./build.sh release        # optimized-сборка без serial shell
+./build.sh secure         # secure + QEMU (без COM1-ввода)
+./build.sh build          # только development-сборка
+./build.sh release-build  # только release-сборка
+./build.sh secure-build   # только защищённая сборка (no serial-debug)
 ```
 
 ### Управление в QEMU
 
 - **Закрыть QEMU:** `Ctrl+A`, затем `X`
 - **Ввод:** печатайте прямо в окне QEMU
+
+### Serial debug shell
+
+Development-сборка по умолчанию (флаг `serial-debug` в Cargo) зеркалит
+framebuffer-консоль в COM1 и принимает shell-команды из терминала.
+Это удобно для автоматизации проверок ядра. PS/2-клавиатура в окне QEMU
+продолжает работать.
+
+Для защищённого образа (без serial shell и COM1-ввода):
+
+```bash
+make run SERIAL_DEBUG=0
+# или
+./build.sh secure
+```
+
+### Профили сборки
+
+| Профиль         | SERIAL_DEBUG | Описание |
+|-----------------|--------------|----------|
+| `debug`         | 1 (вкл)      | Development-сборка с serial shell, отладка через COM1 |
+| `release`       | 0 (выкл)     | Optimized-сборка без serial shell, только framebuffer |
+| `secure`        | 0 (выкл)     | Release без COM1-ввода (для production-использования) |
+
+**Важно:** serial shell — привилегированный интерфейс без аутентификации.
+Не включайте `SERIAL_DEBUG=1` на реальном железе при физически доступном COM-порте.
+
+В этой конфигурации COM1 остаётся каналом логов, но команды из него не читаются
+и framebuffer-консоль в него не зеркалируется.
 
 ---
 
