@@ -1,0 +1,64 @@
+pub mod help;
+pub mod logo;
+pub mod version;
+pub mod ls;
+pub mod touch;
+pub mod cd;
+pub mod mkdir;
+pub mod cat;
+pub mod rm;
+pub mod edit;
+pub mod echo;
+pub mod clear;
+pub mod tasks;
+pub mod sdisk;
+pub mod pwd;
+pub mod about;
+pub mod quit;
+
+use crate::framebuffer::Console;
+
+/// Результат выполнения команды
+pub enum CmdResult {
+    Ok,
+    Continue, // для команд типа clear, которые меняют состояние консоли
+    Exit,
+}
+
+pub type CmdFn = fn(&[&str], &mut Console) -> CmdResult;
+
+pub struct Command {
+    pub name: &'static str,
+    pub help: &'static str,
+    pub func: CmdFn,
+}
+
+pub const COMMANDS: &[Command] = &[
+    Command { name: "help",    help: "show this help",             func: help::run },
+    Command { name: "logo",    help: "show Vibra logo",            func: logo::run },
+    Command { name: "version", help: "show OS/kernel version",     func: version::run },
+    Command { name: "clear",   help: "clear screen",               func: clear::run },
+    Command { name: "ls",      help: "list files and directories", func: ls::run },
+    Command { name: "pwd",     help: "print working directory",    func: pwd::run },
+    Command { name: "touch",   help: "create empty file",          func: touch::run },
+    Command { name: "cd",      help: "change directory",           func: cd::run },
+    Command { name: "mkdir",   help: "create directory",           func: mkdir::run },
+    Command { name: "cat",     help: "print file contents",        func: cat::run },
+    Command { name: "edit",    help: "edit/create file contents",  func: edit::run },
+    Command { name: "echo",    help: "print text to screen",       func: echo::run },
+    Command { name: "rm",      help: "remove file or directory",   func: rm::run },
+    Command { name: "tasks",   help: "show running processes",     func: tasks::run },
+    Command { name: "sdisk",   help: "show disk usage",            func: sdisk::run },
+    Command { name: "quit",    help: "halt the system",            func: |_a, _c| CmdResult::Exit },
+    Command { name: "about",   help: "show project info",          func: about::run },
+    Command { name: "quit",    help: "halt the system",            func: quit::run },
+];
+
+pub fn find_command(name: &str) -> Option<&'static Command> {
+    COMMANDS.iter().find(|c| c.name == name)
+}
+
+/// Для tab-completion: список всех имен команд
+pub fn command_names() -> impl Iterator<Item = &'static str> {
+    COMMANDS.iter().map(|c| c.name)
+}
