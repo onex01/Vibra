@@ -1,5 +1,6 @@
 use super::CmdResult;
 use crate::framebuffer::{Console, COLOR_CYAN, COLOR_YELLOW, COLOR_GREEN};
+use crate::version;
 
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     console.print_colored("Vibra OS - About\n", COLOR_CYAN);
@@ -9,22 +10,34 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     console.print("Vibra OS\n");
     
     console.print_colored("Version: ", COLOR_YELLOW);
-    console.print("0.4 \"Photon\"\n");
+    console.print(version::OS_VERSION);
+    console.print(" \"");
+    console.print(version::OS_CODENAME);
+    console.print("\"\n");
     
     console.print_colored("Kernel:  ", COLOR_YELLOW);
-    console.print("v0.4.0\n");
+    console.print("v");
+    console.print(version::KERNEL_VERSION);
+    console.print(" \"");
+    console.print(version::KERNEL_CODENAME);
+    console.print("\"\n");
     
     console.print_colored("Created: ", COLOR_YELLOW);
-    console.print("2026-07-18\n");
+    console.print(version::YEAR);
+    console.print("\n");
     
     console.print_colored("Author:  ", COLOR_YELLOW);
-    console.print_colored("OneX01\n", COLOR_GREEN);
+    console.print_colored(version::AUTHOR, COLOR_GREEN);
+    console.print("\n");
     
     console.print_colored("License: ", COLOR_YELLOW);
-    console.print("MIT\n\n");
+    console.print(version::LICENSE);
+    console.print("\n\n");
     
     console.print_colored("Description:\n", COLOR_YELLOW);
-    console.print("  Vibra is a hobby operating system written in Rust.\n");
+    console.print("  ");
+    console.print(version::DESCRIPTION);
+    console.print("\n");
     console.print("  Features: modular kernel, graphical console,\n");
     console.print("  RamFS, shell with tab-completion and history.\n\n");
     

@@ -9,7 +9,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     };
     match fs::read_file(name) {
         Ok(data) => {
-            if let Ok(text) = core::str::from_utf8(data) {
+            if let Ok(text) = core::str::from_utf8(&data) {
                 console.print(text);
                 if !text.ends_with('\n') { console.put_char('\n'); }
             } else {

@@ -10,25 +10,21 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
 
     match *path {
         "/" => {
+            fs::set_current_dir("/");
             console.print_colored("Changed to: /\n", COLOR_GREEN);
             return CmdResult::Ok;
         }
         ".." => {
+            // Пока просто остаёмся в корне (полная навигация будет позже)
+            fs::set_current_dir("/");
             console.print_colored("Changed to: ..\n", COLOR_GREEN);
             return CmdResult::Ok;
         }
         _ => {}
     }
 
-    let mut found = false;
-    for entry in fs::list_entries() {
-        if entry.name() == *path && entry.metadata.file_type == crate::fs::FileType::Directory {
-            found = true;
-            break;
-        }
-    }
-
-    if found {
+    if fs::dir_exists(path) {
+        fs::set_current_dir(path);
         console.print_colored("Changed to: ", COLOR_GREEN);
         console.print(path);
         console.put_char('\n');

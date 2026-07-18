@@ -4,6 +4,8 @@ pub mod version;
 pub mod ls;
 pub mod touch;
 pub mod cd;
+pub mod cp;
+pub mod mv;
 pub mod mkdir;
 pub mod cat;
 pub mod rm;
@@ -12,7 +14,9 @@ pub mod echo;
 pub mod clear;
 pub mod tasks;
 pub mod sdisk;
+pub mod sysinfo;
 pub mod pwd;
+pub mod uptime;
 pub mod about;
 pub mod quit;
 
@@ -42,6 +46,8 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "pwd",     help: "print working directory",    func: pwd::run },
     Command { name: "touch",   help: "create empty file",          func: touch::run },
     Command { name: "cd",      help: "change directory",           func: cd::run },
+    Command { name: "cp",      help: "copy file",                  func: cp::run },
+    Command { name: "mv",      help: "move/rename file",           func: mv::run },
     Command { name: "mkdir",   help: "create directory",           func: mkdir::run },
     Command { name: "cat",     help: "print file contents",        func: cat::run },
     Command { name: "edit",    help: "edit/create file contents",  func: edit::run },
@@ -49,7 +55,8 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "rm",      help: "remove file or directory",   func: rm::run },
     Command { name: "tasks",   help: "show running processes",     func: tasks::run },
     Command { name: "sdisk",   help: "show disk usage",            func: sdisk::run },
-    Command { name: "quit",    help: "halt the system",            func: |_a, _c| CmdResult::Exit },
+    Command { name: "sysinfo", help: "show system information",    func: sysinfo::run },
+    Command { name: "uptime",  help: "show system uptime",         func: uptime::run },
     Command { name: "about",   help: "show project info",          func: about::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];

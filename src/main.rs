@@ -1,5 +1,11 @@
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
+
+#![feature(cmse_nonsecure_entry)]
+#![deny(improper_ctypes)]
+
+extern crate alloc;
 
 mod serial;
 mod memory;
@@ -8,6 +14,9 @@ mod framebuffer;
 mod fs;
 mod commands;
 mod shell;
+mod kernel; 
+mod version;
+mod interrupts;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest};
@@ -49,6 +58,24 @@ pub extern "C" fn _start() -> ! {
 
     keyboard::init();
     fs::init_filesystem();
+    kernel::init();
+    
+    // Регистрация устройств
+    kernel::device::register("console", kernel::device::DeviceType::Console);
+    kernel::device::register("keyboard", kernel::device::DeviceType::Keyboard);
+    kernel::device::register("framebuffer", kernel::device::DeviceType::Display);
+    kernel::device::register("ramfs", kernel::device::DeviceType::Disk);
+    kernel::device::register("pit-timer", kernel::device::DeviceType::Timer);
+    
+    kernel::driver::register("ps2-keyboard", "0.1.0", &[kernel::device::DeviceType::Keyboard]);
+    kernel::driver::register("vga-console", "0.1.0", &[kernel::device::DeviceType::Console]);
+    kernel::driver::register("fbdev", "0.1.0", &[kernel::device::DeviceType::Display]);
+    
+    interrupts::init();
+    interrupts::enable();
+
+    println!("[DEBUG] Interrupts enabled, continuing boot...");
+    println!("[DEBUG] About to draw ASCII art...");
 
     let mut console = match FRAMEBUFFER_REQUEST.response() {
         Some(fb_resp) => match fb_resp.framebuffers().first() {
@@ -59,13 +86,23 @@ pub extern "C" fn _start() -> ! {
     };
 
     // Приветствие
-    console.print_colored("\n     __     ___ _           \n", framebuffer::COLOR_CYAN);
+    console.print_colored("\n", framebuffer::COLOR_VIBRA_FG);
+    console.print_colored("     __     ___ _           \n", framebuffer::COLOR_CYAN);
     console.print_colored("     \\ \\   / (_) |__  _ __ __ _ \n", framebuffer::COLOR_CYAN);
     console.print_colored("      \\ \\ / /| | '_ \\| '__/ _` |\n", framebuffer::COLOR_CYAN);
     console.print_colored("       \\ V / | | |_) | | | (_| |\n", framebuffer::COLOR_CYAN);
     console.print_colored("        \\_/  |_|_.__/|_|  \\__,_|\n", framebuffer::COLOR_CYAN);
     console.print("\n");
-    console.print_colored("    Vibra OS v0.4 \"Photon\"\n", framebuffer::COLOR_VIBRA_PROMPT);
+    console.print_colored("    Vibra OS v", framebuffer::COLOR_VIBRA_PROMPT);
+    console.print_colored(version::OS_VERSION, framebuffer::COLOR_VIBRA_PROMPT);
+    console.print_colored(" \"", framebuffer::COLOR_VIBRA_PROMPT);
+    console.print_colored(version::OS_CODENAME, framebuffer::COLOR_VIBRA_PROMPT);
+    console.print_colored("\"\n", framebuffer::COLOR_VIBRA_PROMPT);
+    console.print_colored("    Kernel v", framebuffer::COLOR_VIBRA_FG);
+    console.print_colored(version::KERNEL_VERSION, framebuffer::COLOR_VIBRA_FG);
+    console.print_colored(" \"", framebuffer::COLOR_VIBRA_FG);
+    console.print_colored(version::KERNEL_CODENAME, framebuffer::COLOR_VIBRA_FG);
+    console.print_colored("\"\n", framebuffer::COLOR_VIBRA_FG);
     console.print_colored("    Type 'help' for commands | Tab to autocomplete\n\n", framebuffer::COLOR_VIBRA_FG);
 
     loop {

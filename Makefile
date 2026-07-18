@@ -16,7 +16,7 @@ all: run
 # Сборка ядра И копирование его на диск
 build:
 	@mkdir -p $(BUILD_DIR)
-	$(CARGO) build --release
+	cargo +nightly build --release -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 	@echo "==> Copying kernel to disk image..."
 	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/release/$(KERNEL_NAME) ::/kernel.elf
 	@echo "==> Kernel built and installed!"

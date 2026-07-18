@@ -1,7 +1,6 @@
 use crate::keyboard::{self, Key};
 use crate::framebuffer::Console;
 use crate::commands;
-use crate::fs;
 
 const MAX_LINE: usize = 256;
 const HISTORY_SIZE: usize = 16;

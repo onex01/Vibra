@@ -1,3 +1,5 @@
+use spin::Mutex;
+
 /// Тип файлового объекта
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileType {
@@ -13,8 +15,6 @@ pub struct FileMetadata {
     pub file_type: FileType,
     pub size: usize,
     pub created: u64,
-    pub parent: [u8; 32],
-    pub parent_len: usize,
 }
 
 /// Запись в файловой системе
@@ -34,8 +34,6 @@ impl FsEntry {
                 file_type: FileType::File,
                 size: 0,
                 created: 0,
-                parent: [0u8; 32],
-                parent_len: 0,
             },
             data: [0u8; 4096],
             data_len: 0,
@@ -52,8 +50,6 @@ impl FsEntry {
                 file_type: FileType::Directory,
                 size: 0,
                 created: 0,
-                parent: [0u8; 32],
-                parent_len: 0,
             },
             data: [0u8; 4096],
             data_len: 0,
@@ -69,19 +65,8 @@ impl FsEntry {
         self.metadata.name_len = len;
     }
 
-    pub fn set_parent(&mut self, parent: &str) {
-        let bytes = parent.as_bytes();
-        let len = bytes.len().min(31);
-        self.metadata.parent[..len].copy_from_slice(&bytes[..len]);
-        self.metadata.parent_len = len;
-    }
-
     pub fn name(&self) -> &str {
         core::str::from_utf8(&self.metadata.name[..self.metadata.name_len]).unwrap_or("?")
-    }
-
-    pub fn parent(&self) -> &str {
-        core::str::from_utf8(&self.metadata.parent[..self.metadata.parent_len]).unwrap_or("")
     }
 }
 
@@ -196,48 +181,82 @@ impl RamFs {
     }
 }
 
-static mut FILESYSTEM: RamFs = RamFs::new();
+// Используем Mutex вместо static mut
+static FILESYSTEM: Mutex<RamFs> = Mutex::new(RamFs::new());
 
 pub fn init_filesystem() {
-    unsafe {
-        FILESYSTEM.create_file("readme.txt").ok();
-        FILESYSTEM.write_file("readme.txt", b"Welcome to Vibra OS!\nThis is a simple text file.").ok();
+    let mut fs = FILESYSTEM.lock();
+    
+    let _ = fs.create_file("readme.txt");
+    let _ = fs.write_file("readme.txt", b"Welcome to Vibra OS!\nThis is a simple text file.");
 
-        FILESYSTEM.create_file("version.txt").ok();
-        FILESYSTEM.write_file("version.txt", b"Vibra OS 0.4 Photon\nKernel 0.4.0").ok();
+    let _ = fs.create_file("version.txt");
+    let _ = fs.write_file("version.txt", b"Vibra OS 0.5 Nucleus\nKernel 0.5.0");
 
-        FILESYSTEM.create_file("about.txt").ok();
-        FILESYSTEM.write_file("about.txt", b"Vibra OS\n========\n\nCreated by: OneX01\nDate: 2026-07-18\nLicense: MIT\n\nA hobby OS written in Rust.").ok();
+    let _ = fs.create_file("about.txt");
+    let _ = fs.write_file("about.txt", b"Vibra OS\n========\n\nCreated by: OneX01\nDate: 2026-07-18\nLicense: MIT\n\nA hobby OS written in Rust.");
 
-        FILESYSTEM.create_dir("docs").ok();
-        FILESYSTEM.create_dir("home").ok();
-    }
+    let _ = fs.create_dir("docs");
+    let _ = fs.create_dir("home");
 }
 
-pub fn list_entries() -> impl Iterator<Item = &'static FsEntry> {
-    unsafe { FILESYSTEM.list() }
+pub fn list_entries() -> alloc::vec::Vec<alloc::boxed::Box<FsEntry>> {
+    let fs = FILESYSTEM.lock();
+    fs.list().cloned().map(|e| alloc::boxed::Box::new(e)).collect()
 }
 
 pub fn create_file(name: &str) -> Result<(), &'static str> {
-    unsafe { FILESYSTEM.create_file(name) }
+    let mut fs = FILESYSTEM.lock();
+    fs.create_file(name)
 }
 
 pub fn create_dir(name: &str) -> Result<(), &'static str> {
-    unsafe { FILESYSTEM.create_dir(name) }
+    let mut fs = FILESYSTEM.lock();
+    fs.create_dir(name)
 }
 
 pub fn write_file(name: &str, data: &[u8]) -> Result<(), &'static str> {
-    unsafe { FILESYSTEM.write_file(name, data) }
+    let mut fs = FILESYSTEM.lock();
+    fs.write_file(name, data)
 }
 
-pub fn read_file(name: &str) -> Result<&'static [u8], &'static str> {
-    unsafe { FILESYSTEM.read_file(name) }
+pub fn read_file(name: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    let fs = FILESYSTEM.lock();
+    fs.read_file(name).map(|data| data.to_vec())
 }
 
 pub fn remove_entry(name: &str) -> Result<(), &'static str> {
-    unsafe { FILESYSTEM.remove(name) }
+    let mut fs = FILESYSTEM.lock();
+    fs.remove(name)
 }
 
 pub fn fs_count() -> usize {
-    unsafe { FILESYSTEM.count() }
+    let fs = FILESYSTEM.lock();
+    fs.count()
+}
+
+static CURRENT_DIR: spin::Mutex<[u8; 256]> = spin::Mutex::new([0u8; 256]);
+
+pub fn get_current_dir() -> &'static str {
+    "/"
+}
+
+pub fn set_current_dir(_path: &str) {
+    // Пока заглушка — реальная навигация будет в FAT32
+    let mut dir = CURRENT_DIR.lock();
+    *dir = [0u8; 256];
+}
+
+pub fn dir_exists(name: &str) -> bool {
+    let fs = FILESYSTEM.lock();
+    for entry in fs.list() {
+        if entry.name() == name && entry.metadata.file_type == FileType::Directory {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn list_dir(_path: &str) -> alloc::vec::Vec<alloc::boxed::Box<FsEntry>> {
+    list_entries()
 }
