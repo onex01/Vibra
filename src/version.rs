@@ -8,7 +8,7 @@ pub const OS_VERSION: &str = "0.5";
 pub const OS_CODENAME: &str = "Nucleus";
 
 /// Версия ядра
-pub const KERNEL_VERSION: &str = "0.5.5";
+pub const KERNEL_VERSION: &str = "0.5.6";
 
 /// Кодовое название ядра
 pub const KERNEL_CODENAME: &str = "Tejat";

@@ -1,4 +1,5 @@
 use super::CmdResult;
+use alloc::format;
 use crate::framebuffer::{Console, COLOR_RED};
 use crate::fs;
 
@@ -18,7 +19,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 console.print(" bytes)\n");
             }
         }
-        Err(e) => { console.print_colored("Error: ", COLOR_RED); console.print(e); console.put_char('\n'); }
+        Err(e) => { console.print_colored("Error: ", COLOR_RED); console.print(&format!("{}", e)); console.put_char('\n'); }
     }
     CmdResult::Ok
 }

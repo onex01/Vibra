@@ -1,4 +1,5 @@
 use super::CmdResult;
+use alloc::format;
 use crate::framebuffer::{Console, COLOR_GREEN, COLOR_RED, COLOR_YELLOW};
 use crate::fs;
 
@@ -20,7 +21,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
             if fs::create_file(dest).is_ok() {
                 if let Err(e) = fs::write_file(dest, &data) {
                     console.print_colored("Error writing: ", COLOR_RED);
-                    console.print(e);
+                    console.print(&format!("{}", e));
                     console.put_char('\n');
                     return CmdResult::Ok;
                 }
@@ -28,7 +29,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 // Удаляем исходный файл
                 if let Err(e) = fs::remove_entry(source) {
                     console.print_colored("Error removing source: ", COLOR_RED);
-                    console.print(e);
+                    console.print(&format!("{}", e));
                     console.put_char('\n');
                     return CmdResult::Ok;
                 }
@@ -44,7 +45,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         }
         Err(e) => {
             console.print_colored("Error: ", COLOR_RED);
-            console.print(e);
+            console.print(&format!("{}", e));
             console.put_char('\n');
         }
     }

@@ -113,7 +113,18 @@ pub extern "C" fn _start() -> ! {
     heap_stress();
 
     keyboard::init();
+    
+    // Инициализация файловых систем
     fs::init_filesystem();
+    
+    // Mount VFS (пока только ramfs)
+    use alloc::boxed::Box;
+    use crate::fs::{FileSystem, VfsManager};
+    let mut vfs = VfsManager::new();
+    let mut ramfs = fs::RamFs::new();
+    FileSystem::mount(&mut ramfs).ok();
+    vfs.mount("/", Box::new(ramfs), false).ok();
+    
     kernel::init();
     
     // Регистрация устройств

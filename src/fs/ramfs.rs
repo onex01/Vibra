@@ -1,262 +1,280 @@
-use spin::Mutex;
+// src/fs/ramfs.rs
 
-/// Тип файлового объекта
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum FileType {
-    File,
-    Directory,
-}
+use super::vfs::*;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use alloc::boxed::Box;
 
-/// Метаданные файла
-#[derive(Debug, Clone)]
-pub struct FileMetadata {
-    pub name: [u8; 32],
-    pub name_len: usize,
-    pub file_type: FileType,
-    pub size: usize,
-    pub created: u64,
-}
-
-/// Запись в файловой системе
+/// Внутреннее представление записи
 #[derive(Clone)]
-pub struct FsEntry {
-    pub metadata: FileMetadata,
-    pub data: [u8; 4096],
-    pub data_len: usize,
+struct RamFsEntry {
+    name: String,
+    file_type: FileType,
+    data: Vec<u8>,
+    created: u64,
+    modified: u64,
 }
 
-impl FsEntry {
-    pub fn new_file(name: &str) -> Self {
-        let mut entry = FsEntry {
-            metadata: FileMetadata {
-                name: [0u8; 32],
-                name_len: 0,
-                file_type: FileType::File,
-                size: 0,
-                created: 0,
-            },
-            data: [0u8; 4096],
-            data_len: 0,
-        };
-        entry.set_name(name);
-        entry
+impl RamFsEntry {
+    fn new_file(name: &str) -> Self {
+        RamFsEntry {
+            name: String::from(name),
+            file_type: FileType::File,
+            data: Vec::new(),
+            created: 0,
+            modified: 0,
+        }
     }
-
-    pub fn new_dir(name: &str) -> Self {
-        let mut entry = FsEntry {
-            metadata: FileMetadata {
-                name: [0u8; 32],
-                name_len: 0,
-                file_type: FileType::Directory,
-                size: 0,
-                created: 0,
-            },
-            data: [0u8; 4096],
-            data_len: 0,
-        };
-        entry.set_name(name);
-        entry
-    }
-
-    fn set_name(&mut self, name: &str) {
-        let bytes = name.as_bytes();
-        let len = bytes.len().min(31);
-        self.metadata.name[..len].copy_from_slice(&bytes[..len]);
-        self.metadata.name_len = len;
-    }
-
-    pub fn name(&self) -> &str {
-        core::str::from_utf8(&self.metadata.name[..self.metadata.name_len]).unwrap_or("?")
+    
+    fn new_dir(name: &str) -> Self {
+        RamFsEntry {
+            name: String::from(name),
+            file_type: FileType::Directory,
+            data: Vec::new(),
+            created: 0,
+            modified: 0,
+        }
     }
 }
 
-/// Простая файловая система в памяти
+/// Файловая система в памяти
 pub struct RamFs {
-    entries: [Option<FsEntry>; 64],
-    count: usize,
+    entries: Vec<RamFsEntry>,
+    mounted: bool,
 }
 
 impl RamFs {
-    pub const fn new() -> Self {
-        const NONE: Option<FsEntry> = None;
+    pub fn new() -> Self {
         RamFs {
-            entries: [NONE; 64],
-            count: 0,
+            entries: Vec::new(),
+            mounted: false,
         }
-    }
-
-    pub fn create_file(&mut self, name: &str) -> Result<(), &'static str> {
-        if self.count >= 64 {
-            return Err("File system full");
-        }
-
-        for i in 0..64 {
-            if let Some(entry) = &self.entries[i] {
-                if entry.name() == name {
-                    return Err("File already exists");
-                }
-            }
-        }
-
-        for i in 0..64 {
-            if self.entries[i].is_none() {
-                self.entries[i] = Some(FsEntry::new_file(name));
-                self.count += 1;
-                return Ok(());
-            }
-        }
-
-        Err("No free slots")
-    }
-
-    pub fn create_dir(&mut self, name: &str) -> Result<(), &'static str> {
-        if self.count >= 64 {
-            return Err("File system full");
-        }
-
-        for i in 0..64 {
-            if let Some(entry) = &self.entries[i] {
-                if entry.name() == name {
-                    return Err("Directory already exists");
-                }
-            }
-        }
-
-        for i in 0..64 {
-            if self.entries[i].is_none() {
-                self.entries[i] = Some(FsEntry::new_dir(name));
-                self.count += 1;
-                return Ok(());
-            }
-        }
-
-        Err("No free slots")
-    }
-
-    pub fn write_file(&mut self, name: &str, data: &[u8]) -> Result<(), &'static str> {
-        for i in 0..64 {
-            if let Some(entry) = &mut self.entries[i] {
-                if entry.name() == name && entry.metadata.file_type == FileType::File {
-                    let len = data.len().min(4096);
-                    entry.data[..len].copy_from_slice(&data[..len]);
-                    entry.data_len = len;
-                    entry.metadata.size = len;
-                    return Ok(());
-                }
-            }
-        }
-        Err("File not found")
-    }
-
-    pub fn read_file(&self, name: &str) -> Result<&[u8], &'static str> {
-        for i in 0..64 {
-            if let Some(entry) = &self.entries[i] {
-                if entry.name() == name && entry.metadata.file_type == FileType::File {
-                    return Ok(&entry.data[..entry.data_len]);
-                }
-            }
-        }
-        Err("File not found")
-    }
-
-    pub fn remove(&mut self, name: &str) -> Result<(), &'static str> {
-        for i in 0..64 {
-            if let Some(entry) = &self.entries[i] {
-                if entry.name() == name {
-                    self.entries[i] = None;
-                    self.count -= 1;
-                    return Ok(());
-                }
-            }
-        }
-        Err("Entry not found")
-    }
-
-    pub fn list(&self) -> impl Iterator<Item = &FsEntry> {
-        self.entries.iter().filter_map(|e| e.as_ref())
-    }
-
-    pub fn count(&self) -> usize {
-        self.count
     }
 }
 
-// Используем Mutex вместо static mut
-static FILESYSTEM: Mutex<RamFs> = Mutex::new(RamFs::new());
-
-pub fn init_filesystem() {
-    let mut fs = FILESYSTEM.lock();
+impl FileSystem for RamFs {
+    fn name(&self) -> &str {
+        "ramfs"
+    }
     
-    let _ = fs.create_file("readme.txt");
-    let _ = fs.write_file("readme.txt", b"Welcome to Vibra OS!\nThis is a simple text file.");
-
-    let _ = fs.create_file("version.txt");
-    let _ = fs.write_file("version.txt", b"Vibra OS 0.5 Nucleus\nKernel 0.5.0");
-
-    let _ = fs.create_file("about.txt");
-    let _ = fs.write_file("about.txt", b"Vibra OS\n========\n\nCreated by: OneX01\nDate: 2026-07-18\nLicense: MIT\n\nA hobby OS written in Rust.");
-
-    let _ = fs.create_dir("docs");
-    let _ = fs.create_dir("home");
-}
-
-pub fn list_entries() -> alloc::vec::Vec<alloc::boxed::Box<FsEntry>> {
-    let fs = FILESYSTEM.lock();
-    fs.list().cloned().map(|e| alloc::boxed::Box::new(e)).collect()
-}
-
-pub fn create_file(name: &str) -> Result<(), &'static str> {
-    let mut fs = FILESYSTEM.lock();
-    fs.create_file(name)
-}
-
-pub fn create_dir(name: &str) -> Result<(), &'static str> {
-    let mut fs = FILESYSTEM.lock();
-    fs.create_dir(name)
-}
-
-pub fn write_file(name: &str, data: &[u8]) -> Result<(), &'static str> {
-    let mut fs = FILESYSTEM.lock();
-    fs.write_file(name, data)
-}
-
-pub fn read_file(name: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
-    let fs = FILESYSTEM.lock();
-    fs.read_file(name).map(|data| data.to_vec())
-}
-
-pub fn remove_entry(name: &str) -> Result<(), &'static str> {
-    let mut fs = FILESYSTEM.lock();
-    fs.remove(name)
-}
-
-pub fn fs_count() -> usize {
-    let fs = FILESYSTEM.lock();
-    fs.count()
-}
-
-static CURRENT_DIR: spin::Mutex<[u8; 256]> = spin::Mutex::new([0u8; 256]);
-
-pub fn get_current_dir() -> &'static str {
-    "/"
-}
-
-pub fn set_current_dir(_path: &str) {
-    // Пока заглушка — реальная навигация будет в FAT32
-    let mut dir = CURRENT_DIR.lock();
-    *dir = [0u8; 256];
-}
-
-pub fn dir_exists(name: &str) -> bool {
-    let fs = FILESYSTEM.lock();
-    for entry in fs.list() {
-        if entry.name() == name && entry.metadata.file_type == FileType::Directory {
-            return true;
+    fn mount(&mut self) -> Result<(), FsError> {
+        self.mounted = true;
+        // Создаём корневую директорию
+        if !self.entries.iter().any(|e| e.name == "/") {
+            self.entries.push(RamFsEntry::new_dir("/"));
+        }
+        Ok(())
+    }
+    
+    fn unmount(&mut self) -> Result<(), FsError> {
+        self.mounted = false;
+        Ok(())
+    }
+    
+    fn open(&self, path: &str) -> Result<Box<dyn File>, FsError> {
+        let path = normalize_path(path);
+        
+        for entry in &self.entries {
+            if entry.name == path && entry.file_type == FileType::File {
+                return Ok(Box::new(RamFsFile {
+                    data: entry.data.clone(),
+                    position: 0,
+                    writable: true,
+                }));
+            }
+        }
+        
+        Err(FsError::NotFound)
+    }
+    
+    fn create(&mut self, path: &str) -> Result<Box<dyn File>, FsError> {
+        let path = normalize_path(path);
+        
+        // Проверяем, не существует ли уже
+        if self.entries.iter().any(|e| e.name == path) {
+            return Err(FsError::AlreadyExists);
+        }
+        
+        self.entries.push(RamFsEntry::new_file(&path));
+        
+        Ok(Box::new(RamFsFile {
+            data: Vec::new(),
+            position: 0,
+            writable: true,
+        }))
+    }
+    
+    fn remove(&mut self, path: &str) -> Result<(), FsError> {
+        let path = normalize_path(path);
+        
+        if let Some(pos) = self.entries.iter().position(|e| e.name == path) {
+            self.entries.remove(pos);
+            Ok(())
+        } else {
+            Err(FsError::NotFound)
         }
     }
-    false
+    
+    fn mkdir(&mut self, path: &str) -> Result<(), FsError> {
+        let path = normalize_path(path);
+        
+        if self.entries.iter().any(|e| e.name == path) {
+            return Err(FsError::AlreadyExists);
+        }
+        
+        self.entries.push(RamFsEntry::new_dir(&path));
+        Ok(())
+    }
+    
+    fn rmdir(&mut self, path: &str) -> Result<(), FsError> {
+        let path = normalize_path(path);
+        
+        // Проверяем, пуста ли директория
+        let has_children = self.entries.iter().any(|e| {
+            e.name.starts_with(&path) && e.name != path
+        });
+        
+        if has_children {
+            return Err(FsError::NotEmpty);
+        }
+        
+        if let Some(pos) = self.entries.iter().position(|e| e.name == path) {
+            self.entries.remove(pos);
+            Ok(())
+        } else {
+            Err(FsError::NotFound)
+        }
+    }
+    
+    fn readdir(&mut self, path: &str) -> Result<Vec<DirEntry>, FsError> {
+        let path = normalize_path(path);
+        let mut entries = Vec::new();
+        
+        for entry in &self.entries {
+            // Ищем прямых потомков
+            if entry.name.starts_with(&path) && entry.name != path {
+                let relative = &entry.name[path.len()..];
+                // Только прямые потомки (без '/')
+                if !relative.contains('/') || (relative == "/" && path == "/") {
+                    entries.push(DirEntry {
+                        name: relative.trim_matches('/').to_string(),
+                        file_type: entry.file_type,
+                        size: entry.data.len(),
+                    });
+                }
+            }
+        }
+        
+        Ok(entries)
+    }
+    
+    fn exists(&self, path: &str) -> bool {
+        let path = normalize_path(path);
+        self.entries.iter().any(|e| e.name == path)
+    }
+    
+    fn stat(&self, path: &str) -> Result<FileMetadata, FsError> {
+        let path = normalize_path(path);
+        
+        for entry in &self.entries {
+            if entry.name == path {
+                return Ok(FileMetadata {
+                    name: entry.name.clone(),
+                    file_type: entry.file_type,
+                    size: entry.data.len(),
+                    created: entry.created,
+                    modified: entry.modified,
+                });
+            }
+        }
+        
+        Err(FsError::NotFound)
+    }
 }
 
-pub fn list_dir(_path: &str) -> alloc::vec::Vec<alloc::boxed::Box<FsEntry>> {
-    list_entries()
+/// Файл в RamFS
+pub struct RamFsFile {
+    data: Vec<u8>,
+    position: u64,
+    writable: bool,
+}
+
+impl File for RamFsFile {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, FsError> {
+        let pos = self.position as usize;
+        if pos >= self.data.len() {
+            return Ok(0);
+        }
+        
+        let available = self.data.len() - pos;
+        let to_read = buf.len().min(available);
+        
+        buf[..to_read].copy_from_slice(&self.data[pos..pos + to_read]);
+        self.position += to_read as u64;
+        
+        Ok(to_read)
+    }
+    
+    fn write(&mut self, buf: &[u8]) -> Result<usize, FsError> {
+        if !self.writable {
+            return Err(FsError::ReadOnly);
+        }
+        
+        let pos = self.position as usize;
+        
+        // Расширяем буфер если нужно
+        if pos + buf.len() > self.data.len() {
+            self.data.resize(pos + buf.len(), 0);
+        }
+        
+        self.data[pos..pos + buf.len()].copy_from_slice(buf);
+        self.position += buf.len() as u64;
+        
+        Ok(buf.len())
+    }
+    
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64, FsError> {
+        let new_pos = match pos {
+            SeekFrom::Start(offset) => offset as i64,
+            SeekFrom::Current(offset) => self.position as i64 + offset,
+            SeekFrom::End(offset) => self.data.len() as i64 + offset,
+        };
+        
+        if new_pos < 0 {
+            return Err(FsError::InvalidPath);
+        }
+        
+        self.position = new_pos as u64;
+        Ok(self.position)
+    }
+    
+    fn position(&self) -> u64 {
+        self.position
+    }
+    
+    fn size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+/// Нормализация пути
+fn normalize_path(path: &str) -> String {
+    let mut normalized = String::from("/");
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    
+    for part in parts {
+        if part == "." {
+            continue;
+        } else if part == ".." {
+            // Упрощённая обработка ..
+            continue;
+        } else {
+            if !normalized.ends_with('/') {
+                normalized.push('/');
+            }
+            normalized.push_str(part);
+        }
+    }
+    
+    normalized
 }

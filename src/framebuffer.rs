@@ -179,13 +179,11 @@ impl Console {
 
     /// Очищает весь экран фоновым цветом
     pub fn clear(&mut self) {
-        for y in 0..self.height {
-            for x in 0..self.width {
-                unsafe {
-                    let offset = y * self.pitch + x;
-                    core::ptr::write_volatile(self.fb_addr.add(offset), self.bg_color);
-                }
-            }
+        let total_pixels = self.height * self.pitch;
+        unsafe {
+            // Создаём срез и заполняем его за одну операцию (оптимизируется в memset/stosd)
+            let slice = core::slice::from_raw_parts_mut(self.fb_addr, total_pixels);
+            slice.fill(self.bg_color);
         }
         self.cursor_col = 0;
         self.cursor_row = 0;
@@ -277,26 +275,54 @@ impl Console {
         self.fg_color = old_fg;
     }
 
-    /// Прокрутка экрана на одну строку вверх
-    fn scroll(&mut self) {
-        // Сдвигаем все пиксели вверх на FONT_HEIGHT строк
-        let lines_to_move = FONT_HEIGHT;
-        for y in lines_to_move..self.height {
-            for x in 0..self.width {
-                unsafe {
-                    let src = y * self.pitch + x;
-                    let dst = (y - lines_to_move) * self.pitch + x;
-                    let pixel = core::ptr::read_volatile(self.fb_addr.add(src));
-                    core::ptr::write_volatile(self.fb_addr.add(dst), pixel);
+    /// Устанавливает текущий цвет (остаётся до следующего set_fg / print_colored)
+    pub fn set_fg(&mut self, fg: u32) {
+        self.fg_color = fg;
+    }
+
+    /// Печатает один символ (без mirror в serial — для спец-кодов типа neofetch)
+    pub fn print_char(&mut self, ch: char) {
+        match ch {
+            '\n' => {
+                self.cursor_col = 0;
+                self.cursor_row += 1;
+            }
+            '\r' => {
+                self.cursor_col = 0;
+            }
+            _ => {
+                if (self.cursor_col + 1) * FONT_WIDTH > self.width {
+                    self.cursor_col = 0;
+                    self.cursor_row += 1;
                 }
+                if self.cursor_row * FONT_HEIGHT >= self.height {
+                    self.scroll();
+                    self.cursor_row = self.height / FONT_HEIGHT - 1;
+                }
+                self.draw_char_at(ch, self.cursor_col, self.cursor_row, self.fg_color, self.bg_color);
+                self.cursor_col += 1;
             }
         }
-        // Заполняем последнюю строку фоновым цветом
-        let last_row_start = (self.height - lines_to_move) * self.pitch;
-        for i in 0..(lines_to_move * self.pitch) {
-            unsafe {
-                core::ptr::write_volatile(self.fb_addr.add(last_row_start + i), self.bg_color);
-            }
+    }
+
+    /// Прокрутка экрана на одну строку вверх
+    fn scroll(&mut self) {
+        let lines_to_move = FONT_HEIGHT;
+        let pixels_to_move = (self.height - lines_to_move) * self.pitch;
+        
+        unsafe {
+            // copy безопасно работает с перекрывающимися областями памяти (как memmove)
+            core::ptr::copy(
+                self.fb_addr.add(lines_to_move * self.pitch),
+                self.fb_addr,
+                pixels_to_move,
+            );
+            
+            // Очищаем нижние строки фоновым цветом
+            let bottom_start = pixels_to_move;
+            let bottom_len = lines_to_move * self.pitch;
+            let slice = core::slice::from_raw_parts_mut(self.fb_addr.add(bottom_start), bottom_len);
+            slice.fill(self.bg_color);
         }
         self.cursor_row = self.rows - 1;
     }

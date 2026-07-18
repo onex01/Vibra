@@ -21,6 +21,9 @@ pub mod about;
 pub mod quit;
 pub mod diag;
 pub mod heap;
+pub mod neofetch;
+pub mod mount;
+pub mod test_disk;
 
 use crate::framebuffer::Console;
 
@@ -62,6 +65,9 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "about",   help: "show project info",          func: about::run },
     Command { name: "diag",    help: "kernel diagnostics tests",   func: diag::run },
     Command { name: "heap",    help: "show heap usage",            func: heap::run },
+    Command { name: "neofetch", help: "system info (logo + info)",  func: neofetch::run },
+    Command { name: "mount",   help: "mount filesystems",          func: mount::run },
+    Command { name: "test-disk", help: "test disk operations",     func: test_disk::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 

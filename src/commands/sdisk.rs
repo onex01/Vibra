@@ -10,7 +10,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     let max_entries = 64usize;
     let mut total_size = 0usize;
     for entry in fs::list_entries() {
-        total_size += entry.metadata.size;
+        total_size += entry.size;
     }
 
     console.print("Device : ramfs://\n");

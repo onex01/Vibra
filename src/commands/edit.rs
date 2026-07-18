@@ -1,4 +1,5 @@
 use super::CmdResult;
+use alloc::format;
 use crate::framebuffer::{Console, COLOR_YELLOW, COLOR_RED, COLOR_GREEN, COLOR_CYAN};
 use crate::fs;
 use crate::keyboard::{self, Key};
@@ -12,7 +13,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     if fs::read_file(name).is_err() {
         if let Err(e) = fs::create_file(name) {
             console.print_colored("Error creating file: ", COLOR_RED);
-            console.print(e); console.put_char('\n');
+            console.print(&format!("{}", e)); console.put_char('\n');
             return CmdResult::Ok;
         }
     }
@@ -90,7 +91,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         }
         Err(e) => {
             console.print_colored("\nError saving: ", COLOR_RED);
-            console.print(e); console.put_char('\n');
+            console.print(&format!("{}", e)); console.put_char('\n');
         }
     }
     CmdResult::Ok

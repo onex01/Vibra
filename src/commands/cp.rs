@@ -1,4 +1,5 @@
 use super::CmdResult;
+use alloc::format;
 use crate::framebuffer::{Console, COLOR_GREEN, COLOR_RED, COLOR_YELLOW};
 use crate::fs;
 
@@ -33,14 +34,14 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 }
                 Err(e) => {
                     console.print_colored("Error writing: ", COLOR_RED);
-                    console.print(e);
+                    console.print(&format!("{}", e));
                     console.put_char('\n');
                 }
             }
         }
         Err(e) => {
             console.print_colored("Error reading: ", COLOR_RED);
-            console.print(e);
+            console.print(&format!("{}", e));
             console.put_char('\n');
         }
     }
