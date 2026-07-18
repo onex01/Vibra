@@ -60,11 +60,12 @@ pub fn init() {
         outb(PIC2_DATA, ICW4_8086);
         io_wait();
         
-        // Маскируем ВСЕ IRQ для диагностики
-        outb(PIC1_DATA, 0xFF);
+        // Разрешаем только IRQ0 (таймер) и IRQ1 (клавиатура),
+        // остальные маскируем. Бит = 1 означает "замаскировано".
+        outb(PIC1_DATA, 0b1111_1100);
         outb(PIC2_DATA, 0xFF);
         
-        println!("[PIC] PIC initialized. All IRQs masked for testing.");
+        println!("[PIC] PIC initialized. IRQ0 (timer) + IRQ1 (keyboard) unmasked.");
     }
 }
 

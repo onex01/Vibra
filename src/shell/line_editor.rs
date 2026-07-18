@@ -127,7 +127,8 @@ impl LineEditor {
                     _ => {}
                 }
             }
-            core::hint::spin_loop();
+            // Спим до следующего прерывания вместо busy-loop
+            crate::interrupts::wait();
         }
     }
 

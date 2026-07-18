@@ -4,8 +4,8 @@ use crate::interrupts;
 
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     let ticks = interrupts::idt::ticks();
-    // PIT по умолчанию работает на ~18.2 Hz
-    let seconds = ticks / 18;
+    // PIT запрограммирован на TIMER_HZ (см. idt.rs)
+    let seconds = ticks / interrupts::idt::TIMER_HZ;
     let minutes = seconds / 60;
     let hours = minutes / 60;
     

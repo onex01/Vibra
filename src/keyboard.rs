@@ -106,6 +106,9 @@ pub fn init() {
     println!("[KEYBOARD] PS/2 keyboard ready (interrupt-driven)");
 }
 
+// Вызывается ТОЛЬКО из ISR (прерывания уже выключены аппаратно),
+// поэтому лок здесь безопасен — главное, чтобы основной код
+// не держал его с включёнными прерываниями (см. poll_key).
 pub fn handle_interrupt(scancode: u8) {
     let mut state = KEYBOARD_STATE.lock();
     
@@ -119,37 +122,41 @@ pub fn handle_interrupt(scancode: u8) {
 }
 
 pub fn poll_key() -> Option<Key> {
-    let mut state = KEYBOARD_STATE.lock();
-    let scancode = state.pop_scancode()?;
-    
-    if scancode == SCANCODE_EXTENDED {
-        state.extended_key = true;
-        return None;
-    }
-    
-    if state.extended_key {
-        state.extended_key = false;
+    // Лок делится с ISR — берём его только с выключенными прерываниями,
+    // иначе IRQ1 во время удержания лока приведёт к дедлоку.
+    crate::interrupts::without_interrupts(|| {
+        let mut state = KEYBOARD_STATE.lock();
+        let scancode = state.pop_scancode()?;
+
+        if scancode == SCANCODE_EXTENDED {
+            state.extended_key = true;
+            return None;
+        }
+
+        if state.extended_key {
+            state.extended_key = false;
+            if scancode & 0x80 != 0 { return None; }
+            return Some(match scancode {
+                0x4B => Key::Left,
+                0x4D => Key::Right,
+                0x48 => Key::Up,
+                0x50 => Key::Down,
+                _ => Key::Unknown,
+            });
+        }
+
         if scancode & 0x80 != 0 { return None; }
-        return Some(match scancode {
-            0x4B => Key::Left,
-            0x4D => Key::Right,
-            0x48 => Key::Up,
-            0x50 => Key::Down,
-            _ => Key::Unknown,
-        });
-    }
-    
-    if scancode & 0x80 != 0 { return None; }
-    
-    let table = if state.shift_pressed { &SHIFT_KEYS } else { &NORMAL_KEYS };
-    if let Some(ch) = table[scancode as usize] {
-        Some(match ch {
-            '\n' => Key::Enter,
-            '\x08' => Key::Backspace,
-            '\t' => Key::Tab,
-            _ => Key::Char(ch),
-        })
-    } else {
-        None
-    }
+
+        let table = if state.shift_pressed { &SHIFT_KEYS } else { &NORMAL_KEYS };
+        if let Some(ch) = table[scancode as usize] {
+            Some(match ch {
+                '\n' => Key::Enter,
+                '\x08' => Key::Backspace,
+                '\t' => Key::Tab,
+                _ => Key::Char(ch),
+            })
+        } else {
+            None
+        }
+    })
 }
