@@ -36,6 +36,7 @@
 - [~] Собственные page tables: готовы CR3/PML4 walker и проверка неактивной PML4 с private 4КБ mapping; далее HHDM + ядро 4КБ-страницами + framebuffer — Шаг 4
 - [ ] Проверка NX/WX-страниц (`wxtest`/`nxtest`)
 - [ ] Вытесняющий планировщик (kernel-threads) — следующий этап
+- [ ] Базовый драйвер AHCI (для QEMU) или VirtIO Block (гораздо проще для начала).
 
 ### Фаза 0 — Починка сборки (ядро 0.5.6) — СДЕЛАНО
 Ядро не собиралось: 36 ошибок компиляции в WIP-коде VFS (`src/fs/`, `src/commands/`).
@@ -67,6 +68,8 @@
 - [ ] Задел под APIC: MMIO `hhdm+0xFEE00000` / `hhdm+0xFEC00000` (4КиБ, PCD)
 - [ ] Активация: EFER.NXE (бит 11) ДО `mov cr3`; всё до `interrupts::enable()`
 - [ ] W^X-подтест в `diag`: запись в `.rodata` → аккуратный PAGE FAULT
+- [ ] Подсистема ввода: унифицированные структуры событий (Key, MouseMove, MouseClick).
+- [ ] Виртуальные устройства 
 
 ### Фаза 2 — Вытесняющий планировщик (ядро → 0.7.0)
 - [ ] `src/task/mod.rs` (TCB, Scheduler, spawn/yield/sleep/exit) + `src/task/switch.rs`
@@ -79,6 +82,8 @@
 - [ ] `src/interrupts/apic.rs`: LAPIC (SVR, EOI) + IO APIC (GSI1 → вектор 33 для клавиатуры)
 - [ ] LAPIC-таймер, калибровка по PIT-каналу 2 (polling порта 0x61), те же 100 Гц
 - [ ] 8259: только ремап + полная маскировка (`mask_all()`); без PIC-fallback
+- [ ] Чтение CMOS/RTC для инициализации времени.
+- [ ] Системный вызов sys_clock_gettime и sys_nanosleep.
 
 ### Фаза 4 — Ring 3 + syscall (ядро → 0.8.0)
 - [ ] syscall/sysret (GDT уже спроектирована: USER_DS=0x1B, USER_CS=0x23, STAR[63:48]=0x13)
@@ -87,6 +92,11 @@
 - [ ] `src/task/user.rs`: user-задача (код 0x400000 RO+X, стек NX+RW), вход через iretq
 - [ ] TSS.rsp0 обновляется при переключении задач (иначе triple fault на первом IRQ в ring 3)
 - [ ] `isr_page_fault`: user-фолт убивает задачу, а не вешает ОС; команда `usertest`
+- [ ] Реализация sys_mmap (MAP_ANONYMOUS) и sys_munmap для динамического выделения памяти в user-space.
+- [ ] Парсер ELF64 в ядре.
+- [ ] Создание user-space процесса из ELF-файла с диска (через VFS).
+- [ ] Простой механизм IPC (например, message passing или shared memory через sys_mmap с флагом MAP_SHARED).
+- [ ] Системный сервис или syscall для буфера обмена.
 
 ## Версия 1.0 "Nova"
 
