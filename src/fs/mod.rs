@@ -40,25 +40,45 @@ pub fn init_filesystem() {
     let mut ramfs = LEGACY_RAMFS.lock();
     ramfs.mount().ok();
 
-    // Создаём стандартную структуру каталогов (как в Linux)
+    // Уникальная структура каталогов Vibra OS
+    // Не копирует Linux/Windows —有自己的 стиль
     let dirs = [
-        "/bin", "/boot", "/dev", "/etc", "/home",
-        "/mnt", "/proc", "/root", "/sys", "/tmp", "/var",
-        "/boot/config", "/home/root", "/sys/kernel",
+        // Ядро и система
+        "/os", "/os/kernel", "/os/boot", "/os/services",
+        // Устройства
+        "/dev",
+        // Конфигурация (вместо /etc — короче и стильно)
+        "/cfg",
+        // Библиотеки
+        "/lib",
+        // Приложения (вместо /usr/bin — понятнее)
+        "/apps", "/apps/bin", "/apps/data",
+        // Пользователи
+        "/home", "/home/root",
+        // Данные
+        "/var", "/var/log", "/var/cache",
+        // Временное
+        "/tmp",
+        // Точки монтирования
+        "/mnt",
+        // Виртуальные ФС
+        "/proc", "/sys", "/sys/kernel",
     ];
     for dir in &dirs {
         ramfs.mkdir(dir).ok();
     }
 
-    // Создаём системные файлы напрямую через ramfs (без write_file — deadlock)
-    let files: [(&str, &[u8]); 7] = [
-        ("/etc/hostname", b"vibra"),
-        ("/etc/passwd", b"root:x:0:0:root:/root:/bin/sh\n"),
-        ("/etc/fstab", b"# device  mount  type  options  dump  pass\n/         ramfs  rw    0        0     0\n/dev      devtmpfs rw 0        0     0\n/proc     procfs  ro   0        0     0\n/sys      sysfs   ro   0        0     0\n"),
+    // Системные файлы
+    let files: [(&str, &[u8]); 9] = [
+        ("/cfg/hostname", b"vibra"),
+        ("/cfg/passwd", b"root:x:0:0:root:/home/root:/bin/sh\n"),
+        ("/cfg/fstab", b"# device  mount  type  options  dump  pass\n/         ramfs  rw    0        0     0\n/dev      devtmpfs rw 0        0     0\n/proc     procfs  ro   0        0     0\n/sys      sysfs   ro   0        0     0\n"),
+        ("/os/kernel/version", b"0.6.0\n"),
+        ("/os/kernel/name", b"Vibra\n"),
+        ("/os/boot/loader", b"Limine (UEFI)\n"),
         ("/proc/version", b"Vibra OS 0.6 (Nucleus) kernel\n"),
         ("/proc/meminfo", b"MemTotal: 256 MB\nMemFree: 198 MB\n"),
         ("/proc/uptime", b"0\n"),
-        ("/sys/kernel/version", b"0.6.0\n"),
     ];
 
     for (path, data) in &files {
@@ -68,7 +88,7 @@ pub fn init_filesystem() {
         }
     }
 
-    // Принудительная инициализация Lazy для детерминированного порядка
+    // Принудительная инициализация Lazy
     Lazy::force(&VFS_MANAGER);
     Lazy::force(&DISK_MANAGER);
 }

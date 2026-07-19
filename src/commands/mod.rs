@@ -24,6 +24,7 @@ pub mod df;
 pub mod kstat;
 pub mod uname;
 pub mod reboot;
+pub mod tree;
 
 use crate::framebuffer::Console;
 
@@ -68,6 +69,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "kstat",    help: "show interrupt statistics", func: kstat::run },
     Command { name: "uname",    help: "system information",        func: uname::run },
     Command { name: "reboot",   help: "reboot the system",        func: reboot::run },
+    Command { name: "tree",     help: "show directory tree",      func: tree::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 
