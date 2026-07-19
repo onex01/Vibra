@@ -1,85 +1,104 @@
-// VirtIO Block Driver — базовый драйвер для QEMU VirtIO Block Device.
-//
-// VirtIO использует shared memory descriptors (VRing) для обмена данными
-// между guest и host. Для QEMU: -device virtio-blk-device.
-//
-// Регистры (MMIO):
-//   0x00: MagicValue (ro) = 0x74726976 ("virt")
-//   0x04: Version (ro) = 2
-//   0x08: DeviceID (ro) = 2 (block)
-//   0x0c: VendorID (ro)
-//   0x10: DeviceFeatures (ro)
-//   0x14: DeviceFeaturesSel (wo)
-//   0x20: DriverFeatures (wo)
-//   0x24: DriverFeaturesSel (wo)
-//   0x30: QueueSel (wo)
-//   0x34: QueueSizeMax (ro)
-//   0x44: QueueReady (rw)
-//   0x50: QueueNotify (wo)
-//   0x60: InterruptStatus (ro)
-//   0x70: Status (rw)
-//   0x80: QueueDescLow/High (wo)
-//   0x90: QueueDriverLow/High (wo)
-//   0xa0: QueueDeviceLow/High (wo)
-//   0xfe: ConfigGeneration (ro)
-//   0x100: Config (rw)
+// VirtIO Block Driver — с VRing I/O для чтения/записи секторов.
 
-use alloc::vec::Vec;
 use spin::Mutex;
-
-const VIRTIO_MMIO_BASE: u64 = 0x0a000000; // QEMU default for virtio-mmio
 
 const MAGIC: u32 = 0x74726976;
 const VERSION: u32 = 2;
 const DEVICE_ID_BLOCK: u32 = 2;
+const SECTOR_SIZE: usize = 512;
 
-// Feature bits
-const VIRTIO_BLK_F_SIZE_MAX: u32 = 1;
-const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
-const VIRTIO_BLK_F_GEOMETRY: u32 = 4;
-const VIRTIO_BLK_F_BLK_SIZE: u32 = 6;
-const VIRTIO_BLK_F_FLUSH: u32 = 9;
-const VIRTIO_BLK_F_TOPOLOGY: u32 = 10;
-
-// Status bits
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
-const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
-const VIRTIO_STATUS_FAILED: u8 = 128;
 
-// Request types
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
-const VIRTIO_BLK_T_FLUSH: u32 = 4;
-
-/// VRing Descriptor
-#[repr(C, packed)]
-struct VirtqDesc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
-}
 
 const VRING_DESC_F_NEXT: u16 = 1;
 const VRING_DESC_F_WRITE: u16 = 2;
 
-/// VirtIO Block request header
 #[repr(C, packed)]
-struct VirtioBlkReq {
-    req_type: u32,
-    reserved: u32,
-    sector: u64,
+struct VirtqDesc { addr: u64, len: u32, flags: u16, next: u16 }
+
+#[repr(C, packed)]
+struct VirtioBlkReq { req_type: u32, reserved: u32, sector: u64 }
+
+struct VirtQueue {
+    descriptors: *mut VirtqDesc,
+    avail_ring: *mut u16,
+    used_ring: *mut u32,
+    queue_size: u16,
+    free_head: u16,
+    num_free: u16,
+    next_avail: u16,
 }
 
-/// VirtIO Block request status
-#[repr(C, packed)]
-struct VirtioBlkResp {
-    status: u8,
-}
+unsafe impl Send for VirtQueue {}
 
-const SECTOR_SIZE: usize = 512;
+impl VirtQueue {
+    fn new(queue_size: u16, hhdm: u64) -> Option<Self> {
+        let desc_sz = (queue_size as usize) * 16;
+        let avail_sz = 6 + (queue_size as usize) * 2;
+        let used_sz = 6 + (queue_size as usize) * 8;
+        let total = (desc_sz + avail_sz + used_sz + 4095) & !4095;
+
+        let phys = crate::memory::pmm::alloc_contiguous(total / 4096)?;
+        let virt = hhdm + phys as u64;
+
+        unsafe {
+            let ptr = virt as *mut u8;
+            for i in 0..total { core::ptr::write_volatile(ptr.add(i), 0); }
+
+            let descriptors = virt as *mut VirtqDesc;
+            let avail_ring = (virt as *mut u8).add(desc_sz) as *mut u16;
+            let used_ring = (virt as *mut u8).add(desc_sz + avail_sz) as *mut u32;
+
+            let mut q = VirtQueue { descriptors, avail_ring, used_ring, queue_size, free_head: 0, num_free: queue_size, next_avail: 0 };
+            for i in 0..(queue_size - 1) { (*descriptors.add(i as usize)).next = i + 1; }
+            (*descriptors.add((queue_size - 1) as usize)).next = 0xFFFF;
+            Some(q)
+        }
+    }
+
+    fn alloc_desc(&mut self) -> Option<u16> {
+        if self.num_free == 0 { return None; }
+        let idx = self.free_head;
+        unsafe { self.free_head = (*self.descriptors.add(idx as usize)).next; }
+        self.num_free -= 1;
+        Some(idx)
+    }
+
+    fn free_desc(&mut self, idx: u16) {
+        unsafe { (*self.descriptors.add(idx as usize)).next = self.free_head; }
+        self.free_head = idx;
+        self.num_free += 1;
+    }
+
+    fn add_buf(&mut self, desc_idx: u16) {
+        unsafe {
+            let idx = core::ptr::read_volatile(self.avail_ring.add(1));
+            let ring = (idx as usize) % (self.queue_size as usize);
+            core::ptr::write_volatile(self.avail_ring.add(2 + ring), desc_idx);
+            core::ptr::write_volatile(self.avail_ring.add(1), idx + 1);
+        }
+    }
+
+    fn kick(&self, base: u64) {
+        unsafe { core::ptr::write_volatile((base + 0x50) as *mut u32, 0); }
+    }
+
+    fn poll_used(&mut self) -> Option<u16> {
+        unsafe {
+            let used_idx = core::ptr::read_volatile(self.used_ring.add(1)) as u16;
+            if used_idx != self.next_avail {
+                let ring = (self.next_avail as usize) % (self.queue_size as usize);
+                let id = core::ptr::read_volatile(self.used_ring.add(2 + ring * 2));
+                self.next_avail += 1;
+                Some(id as u16)
+            } else { None }
+        }
+    }
+}
 
 pub struct VirtioBlock {
     base: u64,
@@ -88,125 +107,162 @@ pub struct VirtioBlock {
     disk_size: u64,
     sector_count: u64,
     ready: bool,
+    queue: Option<VirtQueue>,
 }
 
 impl VirtioBlock {
     pub fn new(base: u64) -> Self {
-        Self {
-            base,
-            queue_size: 0,
-            status: 0,
-            disk_size: 0,
-            sector_count: 0,
-            ready: false,
-        }
+        Self { base, queue_size: 0, status: 0, disk_size: 0, sector_count: 0, ready: false, queue: None }
     }
 
-    unsafe fn read32(&self, offset: u64) -> u32 {
-        let ptr = (self.base + offset) as *const u32;
-        core::ptr::read_volatile(ptr)
-    }
+    unsafe fn r32(&self, o: u64) -> u32 { core::ptr::read_volatile((self.base + o) as *const u32) }
+    unsafe fn w32(&self, o: u64, v: u32) { core::ptr::write_volatile((self.base + o) as *mut u32, v); }
+    unsafe fn r8(&self, o: u64) -> u8 { core::ptr::read_volatile((self.base + o) as *const u8) }
+    unsafe fn w8(&self, o: u64, v: u8) { core::ptr::write_volatile((self.base + o) as *mut u8, v); }
 
-    unsafe fn write32(&self, offset: u64, val: u32) {
-        let ptr = (self.base + offset) as *mut u32;
-        core::ptr::write_volatile(ptr, val);
-    }
-
-    unsafe fn read8(&self, offset: u64) -> u8 {
-        let ptr = (self.base + offset) as *const u8;
-        core::ptr::read_volatile(ptr)
-    }
-
-    unsafe fn write8(&self, offset: u64, val: u8) {
-        let ptr = (self.base + offset) as *mut u8;
-        core::ptr::write_volatile(ptr, val);
-    }
-
-    /// Попытка обнаружить и инициализировать устройство
     pub fn probe(&mut self) -> Result<(), &'static str> {
         unsafe {
-            let magic = self.read32(0x00);
-            if magic != MAGIC {
-                return Err("not a VirtIO device (bad magic)");
-            }
+            if self.r32(0) != MAGIC { return Err("bad magic"); }
+            if self.r32(4) != VERSION { return Err("bad version"); }
+            if self.r32(8) != DEVICE_ID_BLOCK { return Err("not block device"); }
 
-            let version = self.read32(0x04);
-            if version != VERSION {
-                return Err("unsupported VirtIO version");
-            }
-
-            let device_id = self.read32(0x08);
-            if device_id != DEVICE_ID_BLOCK {
-                return Err("not a block device");
-            }
-
-            // ACKNOWLEDGE + DRIVER
             self.status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
-            self.write8(0x70, self.status);
+            self.w8(0x70, self.status);
 
-            // Read device features
-            self.write32(0x14, 0); // DeviceFeaturesSel = 0
-            let features_lo = self.read32(0x10);
+            self.w32(0x14, 0); self.r32(0x10); // read features
+            self.w32(0x24, 0); self.w32(0x20, 0); // write features
 
-            // Negotiate features (disable everything complex for now)
-            let driver_features: u32 = 0; // Accept no features for simplicity
-            self.write32(0x24, 0); // DriverFeaturesSel = 0
-            self.write32(0x20, driver_features);
+            self.w32(0x30, 0); // QueueSel = 0
+            self.queue_size = self.r32(0x34) as u16;
+            if self.queue_size == 0 { return Err("queue size 0"); }
 
-            // DRIVER_OK
-            self.status |= VIRTIO_STATUS_DRIVER_OK;
-            self.write8(0x70, self.status);
+            let hhdm = crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+            if let Some(queue) = VirtQueue::new(self.queue_size, hhdm) {
+                self.queue = Some(queue);
+                let q = self.queue.as_ref().unwrap();
+                let desc_p = (q.descriptors as u64) - hhdm;
+                let avail_p = (q.avail_ring as u64) - hhdm;
+                let used_p = (q.used_ring as u64) - hhdm;
+                self.w32(0x80, desc_p as u32); self.w32(0x84, (desc_p >> 32) as u32);
+                self.w32(0x90, avail_p as u32); self.w32(0x94, (avail_p >> 32) as u32);
+                self.w32(0xa0, used_p as u32); self.w32(0xa4, (used_p >> 32) as u32);
+                self.w32(0x44, 1); // QueueReady
+            }
 
-            // Read config: capacity (sector count)
-            // Config starts at offset 0x100
-            let capacity_lo = self.read32(0x100);
-            let capacity_hi = self.read32(0x104);
-            self.sector_count = ((capacity_hi as u64) << 32) | (capacity_lo as u64);
+            let cap_lo = self.r32(0x100); let cap_hi = self.r32(0x104);
+            self.sector_count = ((cap_hi as u64) << 32) | (cap_lo as u64);
             self.disk_size = self.sector_count * SECTOR_SIZE as u64;
 
-            crate::println!("[VIRTIO-BLK] Found at {:#x}: {} sectors ({} MB)",
-                self.base, self.sector_count, self.disk_size / (1024 * 1024));
+            crate::println!("[VIRTIO-BLK] {:#x}: {} sectors ({} MB) qsz={}",
+                self.base, self.sector_count, self.disk_size / (1024 * 1024), self.queue_size);
 
+            self.status |= VIRTIO_STATUS_DRIVER_OK;
+            self.w8(0x70, self.status);
             self.ready = true;
         }
         Ok(())
     }
 
-    pub fn is_ready(&self) -> bool {
-        self.ready
+    pub fn read_sectors(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        if !self.ready { return Err("not ready"); }
+        let q = self.queue.as_mut().ok_or("no queue")?;
+        let hhdm = crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+
+        let h = q.alloc_desc().ok_or("no desc")?;
+        let d = q.alloc_desc().ok_or("no desc")?;
+        let s = q.alloc_desc().ok_or("no desc")?;
+
+        unsafe {
+            let hdr = q.descriptors.add(h as usize);
+            let hdr_v = hhdm + (*hdr).addr;
+            let req = hdr_v as *mut VirtioBlkReq;
+            (*req).req_type = VIRTIO_BLK_T_IN; (*req).sector = sector;
+            (*hdr).len = 16; (*hdr).flags = VRING_DESC_F_NEXT; (*hdr).next = d;
+
+            let dat = q.descriptors.add(d as usize);
+            (*dat).addr = (buf.as_ptr() as u64) - hhdm;
+            (*dat).len = buf.len() as u32;
+            (*dat).flags = VRING_DESC_F_NEXT | VRING_DESC_F_WRITE;
+            (*dat).next = s;
+
+            let st = q.descriptors.add(s as usize);
+            let st_v = hhdm + (*st).addr;
+            (*st).addr = (st_v - hhdm) as u64;
+            (*st).len = 1; (*st).flags = VRING_DESC_F_WRITE; (*st).next = 0xFFFF;
+        }
+
+        q.add_buf(h); q.kick(self.base);
+        loop { if q.poll_used().is_some() { break; } core::hint::spin_loop(); }
+
+        unsafe {
+            let st = q.descriptors.add(s as usize);
+            let st_v = hhdm + (*st).addr;
+            let status = core::ptr::read_volatile(st_v as *const u8);
+            if status != 0 { return Err("read failed"); }
+        }
+
+        q.free_desc(h); q.free_desc(d); q.free_desc(s);
+        Ok(())
     }
 
-    pub fn disk_size(&self) -> u64 {
-        self.disk_size
+    pub fn write_sectors(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
+        if !self.ready { return Err("not ready"); }
+        let q = self.queue.as_mut().ok_or("no queue")?;
+        let hhdm = crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+
+        let h = q.alloc_desc().ok_or("no desc")?;
+        let d = q.alloc_desc().ok_or("no desc")?;
+        let s = q.alloc_desc().ok_or("no desc")?;
+
+        unsafe {
+            let hdr = q.descriptors.add(h as usize);
+            let hdr_v = hhdm + (*hdr).addr;
+            let req = hdr_v as *mut VirtioBlkReq;
+            (*req).req_type = VIRTIO_BLK_T_OUT; (*req).sector = sector;
+            (*hdr).len = 16; (*hdr).flags = VRING_DESC_F_NEXT; (*hdr).next = d;
+
+            let dat = q.descriptors.add(d as usize);
+            (*dat).addr = (buf.as_ptr() as u64) - hhdm;
+            (*dat).len = buf.len() as u32;
+            (*dat).flags = VRING_DESC_F_NEXT;
+            (*dat).next = s;
+
+            let st = q.descriptors.add(s as usize);
+            let st_v = hhdm + (*st).addr;
+            (*st).addr = (st_v - hhdm) as u64;
+            (*st).len = 1; (*st).flags = VRING_DESC_F_WRITE; (*st).next = 0xFFFF;
+        }
+
+        q.add_buf(h); q.kick(self.base);
+        loop { if q.poll_used().is_some() { break; } core::hint::spin_loop(); }
+
+        unsafe {
+            let st = q.descriptors.add(s as usize);
+            let st_v = hhdm + (*st).addr;
+            let status = core::ptr::read_volatile(st_v as *const u8);
+            if status != 0 { return Err("write failed"); }
+        }
+
+        q.free_desc(h); q.free_desc(d); q.free_desc(s);
+        Ok(())
     }
 
-    pub fn sector_count(&self) -> u64 {
-        self.sector_count
-    }
+    pub fn is_ready(&self) -> bool { self.ready }
+    pub fn disk_size(&self) -> u64 { self.disk_size }
 }
 
-/// Глобальный экземпляр VirtIO Block
 static VIRTIO_BLK: Mutex<Option<VirtioBlock>> = Mutex::new(None);
 
-/// Попытка обнаружить VirtIO Block на стандартных MMIO адресах
 pub fn probe_devices() {
-    // QEMU virt board: virtio-mmio始于 0x0a000000
     let bases: [u64; 4] = [0x0a000000, 0x0a001000, 0x0a002000, 0x0a003000];
-
     for &base in &bases {
         unsafe {
             let magic = core::ptr::read_volatile(base as *const u32);
             if magic == MAGIC {
                 let mut dev = VirtioBlock::new(base);
                 match dev.probe() {
-                    Ok(()) => {
-                        *VIRTIO_BLK.lock() = Some(dev);
-                        crate::println!("[VIRTIO-BLK] Device ready at {:#x}", base);
-                        return;
-                    }
-                    Err(e) => {
-                        crate::println!("[VIRTIO-BLK] Device at {:#x}: {}", base, e);
-                    }
+                    Ok(()) => { *VIRTIO_BLK.lock() = Some(dev); return; }
+                    Err(e) => { crate::println!("[VIRTIO-BLK] {:#x}: {}", base, e); }
                 }
             }
         }
@@ -214,22 +270,12 @@ pub fn probe_devices() {
     crate::println!("[VIRTIO-BLK] No block devices found");
 }
 
-/// Прочитать сектор с диска (заглушка — требует VRing)
-pub fn read_sector(_sector: u64, _buf: &mut [u8]) -> Result<(), &'static str> {
-    let dev = VIRTIO_BLK.lock();
-    if dev.is_none() {
-        return Err("no VirtIO block device");
-    }
-    // TODO: implement VRing-based I/O
-    Err("readSector not yet implemented (needs VRing)")
+pub fn read_sector(sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+    let mut dev = VIRTIO_BLK.lock();
+    dev.as_mut().ok_or("no device")?.read_sectors(sector, buf)
 }
 
-/// Записать сектор на диск (заглушка)
-pub fn write_sector(_sector: u64, _buf: &[u8]) -> Result<(), &'static str> {
-    let dev = VIRTIO_BLK.lock();
-    if dev.is_none() {
-        return Err("no VirtIO block device");
-    }
-    // TODO: implement VRing-based I/O
-    Err("writeSector not yet implemented (needs VRing)")
+pub fn write_sector(sector: u64, buf: &[u8]) -> Result<(), &'static str> {
+    let mut dev = VIRTIO_BLK.lock();
+    dev.as_mut().ok_or("no device")?.write_sectors(sector, buf)
 }
