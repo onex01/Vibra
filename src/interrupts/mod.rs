@@ -1,12 +1,19 @@
 pub mod idt;
 pub mod pic;
+pub mod apic;
 
 use crate::println;
 
 pub fn init() {
     println!("[INTR] Initializing interrupt subsystem...");
+
+    // Детект APIC (информация)
+    apic::init();
+
+    // PIC — основной контроллер прерываний
     pic::init();
     idt::init();
+
     println!("[INTR] Interrupts enabled!");
 }
 
