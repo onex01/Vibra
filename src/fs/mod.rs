@@ -230,10 +230,8 @@ pub fn mount_fat32(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
 }
 
 /// Монтировать EXT2/3/4 диск (опционально readonly)
-pub fn mount_ext(path: &str, _disk: Box<dyn DiskIo>, readonly: bool) -> Result<(), FsError> {
-    // EXT2 требует чтения суперблока
-    // Пока упрощённая реализация
-    let mut extfs = Ext2Fs::new()?;
+pub fn mount_ext(path: &str, disk: Box<dyn DiskIo>, readonly: bool) -> Result<(), FsError> {
+    let mut extfs = Ext2Fs::new(disk)?;
     extfs.mount()?;
     mount_fs(path, Box::new(extfs), readonly)
 }

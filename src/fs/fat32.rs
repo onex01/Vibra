@@ -55,9 +55,7 @@ struct FatDirEntry {
 }
 
 impl FatDirEntry {
-    fn is_valid(&self) -> bool {
-        self.name[0] != 0x00 && self.name[0] != 0xE5
-    }
+    fn is_valid(&self) -> bool { self.name[0] != 0x00 && self.name[0] != 0xE5 }
     fn is_directory(&self) -> bool { (self.attributes & 0x10) != 0 }
     fn is_file(&self) -> bool { !self.is_directory() && (self.attributes & 0x08) == 0 }
     fn is_long_name(&self) -> bool { (self.attributes & 0x0F) == 0x0F }
@@ -102,19 +100,26 @@ impl Fat32Fs {
 
         let fat_start = boot.reserved_sectors as u64;
         let fat_size = boot.fat_size_32 as u64;
-        let data_start = fat_start + (boot.fat_count as u64 * fat_size) + (boot.root_entry_count as u64 * 32 + 511) / 512;
+        let data_start = fat_start + (boot.fat_count as u64 * fat_size)
+            + ((boot.root_entry_count as u64 * 32 + 511) / 512);
         let cluster_size = boot.bytes_per_sector as u32 * boot.sectors_per_cluster as u32;
 
-        Ok(Self { disk: spin::Mutex::new(disk), boot, fat_start_sector: fat_start, data_start_sector: data_start, cluster_size, mounted: false })
+        Ok(Self {
+            disk: spin::Mutex::new(disk),
+            boot,
+            fat_start_sector: fat_start,
+            data_start_sector: data_start,
+            cluster_size,
+            mounted: false,
+        })
     }
 
-    /// Чтение кластера с диска
     fn read_cluster(&self, cluster: u32, buf: &mut [u8]) -> Result<(), FsError> {
-        let sector = self.data_start_sector + ((cluster - 2) as u64) * self.boot.sectors_per_cluster as u64;
+        let sector = self.data_start_sector
+            + ((cluster - 2) as u64) * self.boot.sectors_per_cluster as u64;
         self.disk.lock().read(sector, buf).map_err(|_| FsError::IoError)
     }
 
-    /// Получить следующий кластер из FAT
     fn next_cluster(&self, cluster: u32) -> Result<u32, FsError> {
         let fat_offset = cluster as u64 * 4;
         let fat_sector = self.fat_start_sector + fat_offset / 512;
@@ -123,21 +128,21 @@ impl Fat32Fs {
         let mut buf = [0u8; 512];
         self.disk.lock().read(fat_sector, &mut buf).map_err(|_| FsError::IoError)?;
 
-        let next = u32::from_le_bytes([buf[entry_offset], buf[entry_offset+1], buf[entry_offset+2], buf[entry_offset+3]]) & 0x0FFFFFFF;
+        let next = u32::from_le_bytes([
+            buf[entry_offset], buf[entry_offset+1],
+            buf[entry_offset+2], buf[entry_offset+3],
+        ]) & 0x0FFFFFFF;
 
         if next >= 0x0FFFFFF8 { Err(FsError::NotFound) } else { Ok(next) }
     }
 
-    /// Прочитать все кластеры цепочки
     fn read_chain(&self, start_cluster: u32) -> Result<Vec<u8>, FsError> {
         let mut data = Vec::new();
         let mut cluster = start_cluster;
         let mut cluster_buf = vec![0u8; self.cluster_size as usize];
-
         loop {
             self.read_cluster(cluster, &mut cluster_buf)?;
             data.extend_from_slice(&cluster_buf);
-
             match self.next_cluster(cluster) {
                 Ok(next) => cluster = next,
                 Err(_) => break,
@@ -146,46 +151,34 @@ impl Fat32Fs {
         Ok(data)
     }
 
-    /// Прочитать директорию по кластеру
     fn read_dir_cluster(&self, cluster: u32) -> Result<Vec<FatDirEntry>, FsError> {
         let data = self.read_chain(cluster)?;
         let mut entries = Vec::new();
         let mut i = 0;
-
         while i + 32 <= data.len() {
             let entry: FatDirEntry = unsafe { core::ptr::read(data[i..].as_ptr() as *const _) };
             if !entry.is_valid() {
-                if entry.name[0] == 0x00 { break; } // End of directory
-                i += 32;
-                continue;
+                if entry.name[0] == 0x00 { break; }
+                i += 32; continue;
             }
-            if !entry.is_long_name() {
-                entries.push(entry);
-            }
+            if !entry.is_long_name() { entries.push(entry); }
             i += 32;
         }
         Ok(entries)
     }
 
-    /// Найти файл/директорию по имени в директории
     fn find_in_dir(&self, dir_cluster: u32, name: &str) -> Result<FatDirEntry, FsError> {
         let entries = self.read_dir_cluster(dir_cluster)?;
-        let target = name.to_uppercase();
-
         for entry in &entries {
             let entry_name = entry.get_name();
-            if entry_name.to_uppercase() == target || entry_name.eq_ignore_ascii_case(&target) {
-                return Ok(*entry);
-            }
+            if entry_name.eq_ignore_ascii_case(name) { return Ok(*entry); }
         }
         Err(FsError::NotFound)
     }
 
-    /// Рекурсивно найти путь
     fn find_path(&self, path: &str) -> Result<FatDirEntry, FsError> {
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         if parts.is_empty() {
-            // Корень — возвращаем "виртуальную" запись для root
             return Ok(FatDirEntry {
                 name: [b' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 attributes: 0x10,
@@ -197,12 +190,9 @@ impl Fat32Fs {
         }
 
         let mut current_cluster = self.boot.root_cluster;
-
         for (i, part) in parts.iter().enumerate() {
             let entry = self.find_in_dir(current_cluster, part)?;
-            if i == parts.len() - 1 {
-                return Ok(entry);
-            }
+            if i == parts.len() - 1 { return Ok(entry); }
             if entry.is_directory() {
                 current_cluster = entry.get_cluster();
             } else {
@@ -213,7 +203,7 @@ impl Fat32Fs {
     }
 }
 
-/// Файл FAT32
+/// FAT32 файл
 pub struct Fat32File {
     data: Vec<u8>,
     position: u64,
@@ -250,10 +240,8 @@ impl FileSystem for Fat32Fs {
 
     fn open(&self, path: &str) -> Result<Box<dyn File>, FsError> {
         let entry = self.find_path(path)?;
-
         if entry.is_file() {
-            let cluster = entry.get_cluster();
-            let data = self.read_chain(cluster)?;
+            let data = self.read_chain(entry.get_cluster())?;
             let size = entry.file_size as usize;
             let data = if size < data.len() { data[..size].to_vec() } else { data };
             Ok(Box::new(Fat32File { data, position: 0 }))
@@ -284,7 +272,6 @@ impl FileSystem for Fat32Fs {
         for e in &fat_entries {
             let name = e.get_name();
             if name == "." || name == ".." || name.is_empty() { continue; }
-
             let file_type = if e.is_directory() { FileType::Directory } else { FileType::File };
             let perms = if e.is_directory() { 0o755 } else { 0o644 };
 
@@ -306,20 +293,13 @@ impl FileSystem for Fat32Fs {
 
     fn stat(&self, path: &str) -> Result<FileMetadata, FsError> {
         let entry = self.find_path(path)?;
-
         let name = entry.get_name();
         let file_type = if entry.is_directory() { FileType::Directory } else { FileType::File };
         let perms = if entry.is_directory() { 0o755 } else { 0o644 };
 
         Ok(FileMetadata {
-            name,
-            file_type,
-            size: entry.file_size as usize,
-            permissions: Permissions::new(perms),
-            uid: 0,
-            gid: 0,
-            created: 0,
-            modified: 0,
+            name, file_type, size: entry.file_size as usize,
+            permissions: Permissions::new(perms), uid: 0, gid: 0, created: 0, modified: 0,
         })
     }
 }
