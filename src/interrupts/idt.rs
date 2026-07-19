@@ -100,11 +100,16 @@ pub fn init() {
         IDT[13].set_handler(isr_general_protection as *const () as u64);
         IDT[14].set_handler(isr_page_fault as *const () as u64);
 
-        // Аппаратные прерывания (после ремапа PIC: 32..47)
+        // Аппаратные прерывания
+        // PIC-based (fallback): 32..47
         IDT[pic::PIC1_OFFSET as usize + 0].set_handler(isr_timer as *const () as u64);     // IRQ0
         IDT[pic::PIC1_OFFSET as usize + 1].set_handler(isr_keyboard as *const () as u64);  // IRQ1
         IDT[pic::PIC1_OFFSET as usize + 7].set_handler(isr_spurious_master as *const () as u64); // IRQ7
         IDT[pic::PIC2_OFFSET as usize + 7].set_handler(isr_spurious_slave as *const () as u64);  // IRQ15
+
+        // APIC vectors
+        IDT[48].set_handler(isr_lapic_timer as *const () as u64);  // LAPIC timer
+        IDT[36].set_handler(isr_serial as *const () as u64);       // Serial (IRQ4 via IO APIC)
 
         let idt_ptr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -114,7 +119,7 @@ pub fn init() {
         asm!("lidt [{}]", in(reg) &idt_ptr, options(readonly, nostack));
 
         init_pit();
-        println!("[IDT] IDT loaded (exceptions + IRQ0 timer @ {} Hz + IRQ1 keyboard)", TIMER_HZ);
+        println!("[IDT] IDT loaded (PIC + APIC vectors)");
     }
 }
 
@@ -135,6 +140,21 @@ extern "x86-interrupt" fn isr_keyboard(_frame: InterruptStackFrame) {
     let scancode = unsafe { inb(0x60) };
     crate::keyboard::handle_interrupt(scancode);
     unsafe { pic::eoi(1); }
+}
+
+// APIC timer handler (vector 48)
+extern "x86-interrupt" fn isr_lapic_timer(_frame: InterruptStackFrame) {
+    TICKS.fetch_add(1, Ordering::Relaxed);
+    // EOI в LAPIC (не PIC!)
+    crate::interrupts::apic::eoi();
+}
+
+// Serial port handler (IRQ4 via IO APIC, vector 36)
+extern "x86-interrupt" fn isr_serial(_frame: InterruptStackFrame) {
+    // Читаем данные из serial port
+    let _data = unsafe { inb(0x3F8) };
+    // EOI в LAPIC
+    crate::interrupts::apic::eoi();
 }
 
 // Ложное (spurious) IRQ7: EOI отправлять НЕ нужно

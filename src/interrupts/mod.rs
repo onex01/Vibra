@@ -7,10 +7,12 @@ use crate::println;
 pub fn init() {
     println!("[INTR] Initializing interrupt subsystem...");
 
-    // Детект APIC (информация)
-    apic::init();
+    // Детект APIC
+    if apic::has_apic() {
+        println!("[INTR] APIC detected (PIC remains primary for serial stability)");
+    }
 
-    // PIC — основной контроллер прерываний
+    // PIC — основной контроллер (serial polling работает только через PIC)
     pic::init();
     idt::init();
 

@@ -75,3 +75,9 @@ pub unsafe fn eoi(irq: u8) {
     }
     outb(PIC1_COMMAND, PIC_EOI);
 }
+
+/// Замаскировать все IRQ на PIC (для использования APIC)
+pub unsafe fn mask_all() {
+    outb(PIC1_DATA, 0xFF); // Маскируем все 8 IRQ на мастер PIC
+    outb(PIC2_DATA, 0xFF); // Маскируем все 8 IRQ на ведомый PIC
+}
