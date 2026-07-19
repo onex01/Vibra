@@ -1,6 +1,8 @@
 use crate::keyboard::{self, Key};
 use crate::framebuffer::Console;
 use crate::commands;
+use alloc::string::String;
+use alloc::format;
 
 const MAX_LINE: usize = 256;
 const HISTORY_SIZE: usize = 16;
@@ -260,11 +262,103 @@ impl LineEditor {
                 }
             }
         } else {
-            // Автодополнение файлов (упрощённо)
-            console.print("\n[File completion not implemented]\n");
-            // Печатаем prompt + текущий буфер
-            if let Ok(prompt_str) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
-                console.print(prompt_str);
+            // Автодополнение путей файлов/каталогов
+            self.complete_path(console);
+        }
+    }
+
+    /// Автодополнение пути к файлу/каталогу
+    fn complete_path(&mut self, console: &mut Console) {
+        // Копируем данные в стековый буфер чтобы избежать borrow conflict
+        let mut line_buf = [0u8; 256];
+        let line_len = self.len;
+        let copy_len = line_len.min(255);
+        line_buf[..copy_len].copy_from_slice(&self.buffer[..copy_len]);
+        let line = core::str::from_utf8(&line_buf[..copy_len]).unwrap_or("");
+        let parts: alloc::vec::Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            return;
+        }
+
+        let partial = parts[1];
+        let current_dir = crate::fs::get_current_dir();
+
+        // Определяем директорию для поиска
+        let (search_dir, prefix) = if partial.is_empty() || !partial.contains('/') {
+            (current_dir.clone(), String::new())
+        } else {
+            if let Some(last_slash) = partial.rfind('/') {
+                let dir_part = &partial[..last_slash];
+                let name_part = &partial[last_slash + 1..];
+                let full_dir = if dir_part.starts_with('/') {
+                    String::from(dir_part)
+                } else if current_dir == "/" {
+                    format!("/{}", dir_part)
+                } else {
+                    format!("{}/{}", current_dir, dir_part)
+                };
+                (full_dir, String::from(name_part))
+            } else {
+                (current_dir.clone(), String::from(partial))
+            }
+        };
+
+        // Ищем совпадения
+        let entries = crate::fs::list_dir(&search_dir);
+        let mut matches: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+
+        for entry in &entries {
+            if entry.name.starts_with(&prefix) {
+                let mut full = String::new();
+                if !search_dir.ends_with('/') {
+                    full.push_str(&search_dir);
+                }
+                full.push_str(&entry.name);
+                if entry.file_type == crate::fs::FileType::Directory {
+                    full.push('/');
+                }
+                matches.push(full);
+            }
+        }
+
+        if matches.len() == 1 {
+            // Один матч — дополняем
+            let completion = &matches[0];
+            let total = self.prompt_len + self.len;
+            for _ in 0..total {
+                console.put_char('\x08');
+            }
+            for _ in 0..total {
+                console.put_char(' ');
+            }
+            for _ in 0..total {
+                console.put_char('\x08');
+            }
+
+            // Очищаем буфер и записываем новую строку
+            self.len = 0;
+            self.cursor = 0;
+            self.append_str(parts[0]);
+            self.append_str(" ");
+            self.append_str(completion);
+
+            // Печатаем prompt + строку
+            if let Ok(p) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
+                console.print(p);
+            }
+            if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
+                console.print(s);
+            }
+        } else if matches.len() > 1 {
+            // Несколько совпадений — показываем список
+            console.put_char('\n');
+            for m in &matches {
+                console.print("  ");
+                console.print(m);
+            }
+            console.put_char('\n');
+            if let Ok(p) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
+                console.print(p);
             }
             if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
                 console.print(s);

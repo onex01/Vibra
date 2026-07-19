@@ -8,7 +8,7 @@ pub const OS_VERSION: &str = "0.6.1";
 pub const OS_CODENAME: &str = "Vega";
 
 /// Версия ядра
-pub const KERNEL_VERSION: &str = "0.6.3";
+pub const KERNEL_VERSION: &str = "0.6.4";
 
 /// Кодовое название ядра
 pub const KERNEL_CODENAME: &str = "Wave";
