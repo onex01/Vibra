@@ -34,6 +34,7 @@ pub mod free;
 pub mod ps;
 pub mod chmod;
 pub mod hostname;
+pub mod date;
 
 use crate::framebuffer::Console;
 
@@ -88,6 +89,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "ps",       help: "show running processes",    func: ps::run },
     Command { name: "chmod",    help: "change file permissions",   func: chmod::run },
     Command { name: "hostname", help: "show/set system hostname",  func: hostname::run },
+    Command { name: "date",     help: "show current time",        func: date::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 
