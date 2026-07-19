@@ -1,8 +1,6 @@
 # Roadmap — План развития Vibra OS
 
-> **Текущая версия:** 0.5 «Nucleus» (см. `src/version.rs`).
-> Заметка по техническим долгам: в `src/main.rs` баннер пока жёстко кодирует
-> «0.4 Photon» — привести к единому источнику истины (`version.rs`) отдельно.
+> **Текущая версия:** 0.6 «Nucleus» (см. `src/version.rs`).
 
 ## Версия 0.3 "Cartridge"
 
@@ -27,49 +25,32 @@
 - [ ] FAT32 драйвер (чтение/запись)
 - [ ] Виртуальная файловая система (VFS)
 
-## Версия 0.5 "Nucleus" (текущая)
+## Версия 0.5 "Nucleus"
 
-### Цели (этап «Фундамент + память»):
+### Цели:
 - [x] PMM с локами + next-fit + `alloc_contiguous` + `alloc_frame_zeroed` + `stats`
 - [x] Heap: собственный free-list аллокатор с коалесценцией (бэкенд PMM + HHDM)
 - [x] Heap-стресс (10k alloc/drop) и shell-команды `heap` / `diag pmtest`
-- [~] Собственные page tables: готовы CR3/PML4 walker и проверка неактивной PML4 с private 4КБ mapping; далее HHDM + ядро 4КБ-страницами + framebuffer — Шаг 4
+- [x] Собственные page tables: CR3/PML4 walker и проверка неактивной PML4 с private 4КБ mapping
 - [ ] Проверка NX/WX-страниц (`wxtest`/`nxtest`)
 - [ ] Вытесняющий планировщик (kernel-threads) — следующий этап
 - [ ] Базовый драйвер AHCI (для QEMU) или VirtIO Block (гораздо проще для начала).
 
-### Фаза 0 — Починка сборки (ядро 0.5.6) — СДЕЛАНО
-Ядро не собиралось: 36 ошибок компиляции в WIP-коде VFS (`src/fs/`, `src/commands/`).
-Из-за этого «не работали прерывания» — сам код прерываний (`src/interrupts/`) исправен.
+## Версия 0.6 "Nucleus" (текущая)
 
-Что исправлено (работа над VFS сохранена, не откачена):
-- [x] Импорты `alloc` (`Box`/`Vec`/`vec`) в `fs/disk.rs`, `fs/mod.rs`, `commands/mount.rs`, `commands/test_disk.rs`
-- [x] Глобальные менеджеры без `Option`: `Lazy<VfsManager>` и `Lazy<Mutex<DiskManager>>` (`fs/mod.rs`)
-- [x] `MountTable::find_fs` возвращает `(usize, String)` вместо ссылок из локальных переменных; добавлены `get`/`get_mut`/`is_mounted`; удалён битый `VfsManager::find_fs`
-- [x] Удалён дублирующий трейт `DiskIo` в `fat32.rs` — теперь `Fat32Fs` хранит `Box<dyn DiskIo>` из `disk.rs`
-- [x] Удалён дубликат `DiskManager` в `disk.rs` (канон — `disk_manager.rs`) и мёртвый `legacy_fs.rs`
-- [x] Исправлено затенение `disk` в `test_disk.rs` (диск добавлялся сам в себя)
-- [x] Вычищены warnings в затронутых файлах; остались только «never used» для VFS-API (подключится в следующих фазах)
-
-Проверка: `cargo +nightly build` — 0 ошибок; `make build` — ядро установлено в `build/hdd.img`.
-Регресс-тест в QEMU (`make run`): `mount`, `test-disk ram 4`, `test-disk list`, `touch a; ls; cat a`, `diag`, `heap`.
-
-## План Kernel-First (следующие фазы)
-
-> Полный план с деталями: `.mimocode/plans/1784391303907-hidden-island.md`.
-> Стратегия: сначала мощное ядро, GUI/приложения — после (v1.0+).
-
-### Фаза 1 — Собственные page tables (ядро → 0.6.0) — СЛЕДУЮЩАЯ
-- [ ] Новый файл `src/memory/vmm.rs`: построить свой PML4 с нуля (не копию Limine)
-- [ ] Символы границ секций в `linker.ld` (`__text_start/end`, `__rodata_*`, `__data_*`, `__bss_end`)
-- [ ] `ExecutableAddressRequest` из limine для phys/virt базы ядра
-- [ ] W^X: `.text` — исполняемый/RO, `.rodata` — NX/RO, `.data/.bss` — NX/RW
-- [ ] HHDM 2МиБ-страницами по memmap; ОБЯЗАТЕЛЬНО замапить BOOTLOADER_RECLAIMABLE (там стек Limine — иначе triple fault) и framebuffer
-- [ ] Задел под APIC: MMIO `hhdm+0xFEE00000` / `hhdm+0xFEC00000` (4КиБ, PCD)
-- [ ] Активация: EFER.NXE (бит 11) ДО `mov cr3`; всё до `interrupts::enable()`
-- [ ] W^X-подтест в `diag`: запись в `.rodata` → аккуратный PAGE FAULT
+### Цели (Фаза 1 — Собственные page tables):
+- [x] Новый файл `src/memory/vmm.rs`: построить свой PML4 с нуля (не копию Limine)
+- [x] Символы границ секций в `linker.ld` (`__text_start/end`, `__rodata_*`, `__data_*`, `__bss_end`)
+- [x] `ExecutableAddressRequest` из limine для phys/virt базы ядра
+- [x] W^X: `.text` — исполняемый/RO, `.rodata` — NX/RO, `.data/.bss` — NX/RW
+- [x] HHDM 2МиБ-страницами по memmap; ОБЯЗАТЕЛЬНО замапить BOOTLOADER_RECLAIMABLE (там стек Limine — иначе triple fault) и framebuffer
+- [x] Задел под APIC: MMIO `hhdm+0xFEE00000` / `hhdm+0xFEC00000` (4КиБ, PCD)
+- [x] Активация: EFER.NXE (бит 11) ДО `mov cr3`; всё до `interrupts::enable()`
+- [x] W^X-подтест в `diag`: запись в `.rodata` → аккуратный PAGE FAULT
 - [ ] Подсистема ввода: унифицированные структуры событий (Key, MouseMove, MouseClick).
 - [ ] Виртуальные устройства 
+
+## План Kernel-First (следующие фазы)
 
 ### Фаза 2 — Вытесняющий планировщик (ядро → 0.7.0)
 - [ ] `src/task/mod.rs` (TCB, Scheduler, spawn/yield/sleep/exit) + `src/task/switch.rs`

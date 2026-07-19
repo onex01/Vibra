@@ -18,13 +18,14 @@ mod version;
 mod interrupts;
 
 use core::panic::PanicInfo;
-use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest};
+use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
 use spin::Mutex;
 use commands::CmdResult;
 
 #[used] static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 #[used] static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[used] static MEMORY_MAP_REQUEST: MemmapRequest = MemmapRequest::new();
+#[used] static EXECUTABLE_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
 #[inline]
 fn halt() { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
@@ -138,6 +139,54 @@ pub extern "C" fn _start() -> ! {
     kernel::driver::register("vga-console", "0.1.0", &[kernel::device::DeviceType::Console]);
     kernel::driver::register("fbdev", "0.1.0", &[kernel::device::DeviceType::Display]);
     
+    // === VMM: Построить и активировать собственные page tables ===
+    // Получаем адреса ядра от Limine
+    let exec_addr_response = EXECUTABLE_ADDR_REQUEST.response();
+    let (kernel_phys_base, kernel_virt_base) = match exec_addr_response {
+        Some(addr) => (addr.physical_base, addr.virtual_base),
+        None => {
+            println!("[VMM] WARNING: ExecutableAddressRequest failed, using defaults");
+            (0xffffffff80000000u64, 0xffffffff80000000u64) // fallback
+        }
+    };
+    println!("[VMM] Kernel phys={:#x}, virt={:#x}", kernel_phys_base, kernel_virt_base);
+
+    // Получаем framebuffer — fb.address() возвращает виртуальный адрес через HHDM
+    let (fb_virt, fb_size) = match FRAMEBUFFER_REQUEST.response() {
+        Some(fb_resp) => match fb_resp.framebuffers().first() {
+            Some(fb) => (fb.address() as u64, (fb.pitch as u64) * fb.height),
+            None => (0, 0),
+        },
+        None => (0, 0),
+    };
+    let fb_phys = if fb_virt != 0 { fb_virt - hhdm_offset } else { 0 };
+    println!("[VMM] Framebuffer virt={:#x} phys={:#x}, size={:#x}", fb_virt, fb_phys, fb_size);
+
+    // Получаем memory map
+    let memory_map_entries = match MEMORY_MAP_REQUEST.response() {
+        Some(mm) => mm.entries(),
+        None => { println!("[FATAL] Memory map failed for VMM"); loop { halt(); } }
+    };
+
+    // Инициализация VMM: построить новые page tables и активировать
+    match memory::vmm::init(
+        memory_map_entries,
+        hhdm_offset,
+        kernel_phys_base,
+        kernel_virt_base,
+        fb_phys,
+        fb_size,
+    ) {
+        Some(_pml4_phys) => {
+            println!("[VMM] Initialization complete!");
+        }
+        None => {
+            println!("[VMM] FATAL: Failed to initialize VMM!");
+            loop { halt(); }
+        }
+    }
+
+    // GDT и IDT строим ПОСЛЕ переключения page tables
     gdt::init();
     interrupts::init();
     interrupts::enable();

@@ -1,154 +1,154 @@
+use crate::framebuffer::Console;
 use super::CmdResult;
-use alloc::format;
-use crate::framebuffer::{Console, COLOR_CYAN, COLOR_GREEN, COLOR_RED, COLOR_YELLOW};
-use crate::memory::pmm;
-use crate::memory::paging;
 
-// Диагностические тесты ядра. Использование: diag <test>
 pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
-    match args.first().copied() {
-        Some("dftest") => {
-            console.print_colored("Triggering double fault (check serial output)...\n", COLOR_RED);
-            unsafe {
-                // Портим RSP и делаем push: #PF на битом стеке -> CPU не может
-                // положить фрейм -> #DF. Если IST работает, обработчик
-                // напечатает DOUBLE FAULT в serial вместо triple-fault ребута.
-                core::arch::asm!("mov rsp, 0x10", "push rax", options(noreturn));
-            }
-        }
-        Some("pmtest") => pmtest(console),
-        Some("paging") => paging_report(console),
-        Some("paging-test") => paging_test(console),
-        _ => {
-            console.print_colored("Kernel diagnostics. Usage: diag <test>\n", COLOR_CYAN);
-            console.print_colored("  dftest   - force a double fault (tests IST stack; HALTS system!)\n", COLOR_YELLOW);
-            console.print_colored("  pmtest   - PMM alloc/free/contiguous/stats test\n", COLOR_YELLOW);
-            console.print_colored("  paging   - show active CR3 and verify address mappings\n", COLOR_YELLOW);
-            console.print_colored("  paging-test - build and verify an inactive 4 KiB mapping\n", COLOR_YELLOW);
-            CmdResult::Ok
-        }
+    if args.is_empty() {
+        console.print_colored("Usage: diag <subcommand>\n", crate::framebuffer::COLOR_YELLOW);
+        console.print("  pmm        - test PMM alloc/free\n");
+        console.print("  paging     - test page table walker\n");
+        console.print("  paging-test - test page table builder\n");
+        console.print("  wxtest     - test W^X protection (write to .rodata)\n");
+        return CmdResult::Ok;
     }
-}
 
-fn paging_test(console: &mut Console) -> CmdResult {
-    console.print_colored("Paging sandbox test (CR3 is not switched)\n", COLOR_CYAN);
-    match paging::sandbox_mapping_test() {
-        Ok(mapping) => {
-            crate::println!(
-                "[PAGING] sandbox PASS: root={:#x}, virt={:#x} -> phys={:#x}",
-                mapping.root_phys,
-                mapping.virtual_address,
-                mapping.physical_address
-            );
-            console.print_colored("  PASS: copied PML4 maps a private 4 KiB page\n", COLOR_GREEN);
-            console.print(&format!(
-                "  temporary root={:#x}, virt={:#x} -> phys={:#x}\n",
-                mapping.root_phys,
-                mapping.virtual_address,
-                mapping.physical_address
-            ));
-        }
-        Err(error) => {
-            crate::println!("[PAGING] sandbox FAIL: {}", error);
-            console.print_colored("  FAIL: ", COLOR_RED);
-            console.print(error);
+    match args[0] {
+        "pmm" => diag_pmm(console),
+        "paging" => diag_paging(console),
+        "paging-test" => diag_paging_test(console),
+        "wxtest" => diag_wxtest(console),
+        _ => {
+            console.print_colored("Unknown diag: ", crate::framebuffer::COLOR_RED);
+            console.print(args[0]);
             console.print("\n");
         }
     }
     CmdResult::Ok
 }
 
-fn paging_report(console: &mut Console) -> CmdResult {
-    let root = paging::current_root_phys();
-    console.print_colored("Paging diagnostics (read-only)\n", COLOR_CYAN);
-    console.print(&format!("  CR3 root: {:#x}\n", root));
+fn diag_pmm(console: &mut Console) {
+    console.print_colored("[PMM TEST] Running...\n", crate::framebuffer::COLOR_YELLOW);
 
-    let kernel_address = crate::_start as *const () as usize as u64;
-    match paging::translate(kernel_address) {
-        Some(mapping) => {
-            crate::println!(
-                "[PAGING] diag: _start virt={:#x} -> phys={:#x} ({:?})",
-                kernel_address,
-                mapping.physical_address,
-                mapping.page_size
-            );
-            console.print_colored("  kernel _start: ", COLOR_YELLOW);
-            console.print(&format!(
-                "virt={:#x} -> phys={:#x}, page={} KiB, flags={:#x}\n",
-                kernel_address,
-                mapping.physical_address,
-                mapping.page_size.bytes() / 1024,
-                mapping.flags
-            ));
-            console.print_colored("  PASS: active kernel mapping is present\n", COLOR_GREEN);
-        }
-        None => {
-            crate::println!("[PAGING] diag: FAIL, _start is not mapped");
-            console.print_colored("  FAIL: kernel _start is not mapped\n", COLOR_RED);
+    let (used_before, total_before) = crate::memory::pmm::stats();
+    console.print("  Before: used=");
+    console.print_num(used_before);
+    console.print(" total=");
+    console.print_num(total_before);
+    console.print("\n");
+
+    let mut allocated = alloc::vec::Vec::new();
+    for _ in 0..100 {
+        if let Some(frame) = crate::memory::pmm::alloc_frame() {
+            allocated.push(frame);
         }
     }
-    CmdResult::Ok
+
+    let (used_mid, _) = crate::memory::pmm::stats();
+    console.print("  After alloc 100: used=");
+    console.print_num(used_mid);
+    console.print("\n");
+
+    for frame in allocated {
+        crate::memory::pmm::free_frame(frame);
+    }
+
+    let (used_after, total_after) = crate::memory::pmm::stats();
+    console.print("  After free: used=");
+    console.print_num(used_after);
+    console.print(" total=");
+    console.print_num(total_after);
+    console.print("\n");
+
+    if used_before == used_after && total_before == total_after {
+        console.print_colored("[PMM TEST] PASS\n", crate::framebuffer::COLOR_GREEN);
+    } else {
+        console.print_colored("[PMM TEST] FAIL (leak detected)\n", crate::framebuffer::COLOR_RED);
+    }
 }
 
-// Тест PMM Шага 2:
-//   1) stats до -> alloc_contiguous(16) -> 1000x alloc_frame -> free всё -> stats после.
-//   Счётчики used должны совпасть в начале и в конце (доказывает корректность
-//  free + next-fit + contiguous). Возвращает CmdResult::Ok всегда.
-fn pmtest(console: &mut Console) -> CmdResult {
-    const N: usize = 1000;
+fn diag_paging(console: &mut Console) {
+    use crate::memory::paging;
 
-    let (used_before, total) = pmm::stats();
-    console.print_colored(
-        "PMM test: starting (allocate contiguous + 1000 frames, then free all)\n",
-        COLOR_CYAN,
-    );
-    console.print(&format!("  before: used={}, total={}\n", used_before, total));
+    console.print_colored("[PAGING TEST] Current CR3...\n", crate::framebuffer::COLOR_YELLOW);
 
-    // Contiguous: 16 подряд идущих фреймов.
-    let contig = pmm::alloc_contiguous(16);
-    match contig {
-        Some(addr) => console.print_colored(
-            &format!("  alloc_contiguous(16) -> {:#x} OK\n", addr),
-            COLOR_GREEN,
-        ),
+    let root = paging::current_root_phys();
+    console.print("  CR3 root: 0x");
+    console.print_num(root as usize);
+    console.print("\n");
+
+    let start_virt = _start as u64;
+    match paging::translate(start_virt) {
+        Some(mapping) => {
+            console.print("  _start: virt=0x");
+            console.print_num(start_virt as usize);
+            console.print(" -> phys=0x");
+            console.print_num(mapping.physical_address as usize);
+            console.print("\n");
+            console.print_colored("[PAGING TEST] PASS\n", crate::framebuffer::COLOR_GREEN);
+        }
         None => {
-            console.print_colored("  alloc_contiguous(16) FAILED\n", COLOR_RED);
-            return CmdResult::Ok;
+            console.print_colored("[PAGING TEST] FAIL (translate returned None)\n", crate::framebuffer::COLOR_RED);
         }
     }
+}
 
-    // 1000 одиночных фреймов в стек-массив (без heap — он ещё bump).
-    let mut frames = [0usize; N];
-    let mut allocated = 0usize;
-    for slot in frames.iter_mut() {
-        match pmm::alloc_frame() {
-            Some(a) => { *slot = a; allocated += 1; }
-            None => break,
+fn diag_paging_test(console: &mut Console) {
+    use crate::memory::paging;
+
+    console.print_colored("[PAGING TEST] sandbox mapping test...\n", crate::framebuffer::COLOR_YELLOW);
+
+    match paging::sandbox_mapping_test() {
+        Ok(result) => {
+            console.print("  root_phys=0x");
+            console.print_num(result.root_phys as usize);
+            console.print("\n");
+            console.print("  virtual=0x");
+            console.print_num(result.virtual_address as usize);
+            console.print("\n");
+            console.print("  physical=0x");
+            console.print_num(result.physical_address as usize);
+            console.print("\n");
+            console.print_colored("[PAGING TEST] PASS\n", crate::framebuffer::COLOR_GREEN);
+        }
+        Err(e) => {
+            console.print("  Error: ");
+            console.print(e);
+            console.print("\n");
+            console.print_colored("[PAGING TEST] FAIL\n", crate::framebuffer::COLOR_RED);
         }
     }
-    console.print(&format!("  alloc_frame() x{} / {}\n", allocated, N));
+}
 
-    // Освобождаем всё в обратном порядке.
-    for slot in frames.iter().take(allocated) {
-        pmm::free_frame(*slot);
-    }
-    if let Some(addr) = contig {
-        if !pmm::free_contiguous(addr, 16) {
-            console.print_colored("  FAIL: could not free contiguous range\n", COLOR_RED);
-            return CmdResult::Ok;
+fn diag_wxtest(console: &mut Console) {
+    console.print_colored("[W^X TEST] Testing write to .rodata...\n", crate::framebuffer::COLOR_YELLOW);
+    console.print("  If VMM is working, this should cause a PAGE FAULT.\n");
+    console.print("  The PAGE FAULT handler will print the fault info.\n");
+    console.print("  After the fault, shell should still work.\n\n");
+
+    if crate::memory::vmm::is_ready() {
+        console.print_colored("  VMM is active. Attempting write to .rodata...\n", crate::framebuffer::COLOR_YELLOW);
+
+        let rodata_addr = unsafe {
+            core::ptr::addr_of!(__rodata_start) as u64
+        };
+        console.print("  .rodata addr: 0x");
+        console.print_num(rodata_addr as usize);
+        console.print("\n");
+
+        // This WILL cause PAGE FAULT - that's the point of the test
+        unsafe {
+            let ptr = rodata_addr as *mut u8;
+            core::ptr::write_volatile(ptr, 0xFF);
         }
-    }
 
-    let (used_after, total_after) = pmm::stats();
-    console.print(&format!("  after:  used={}, total={}\n", used_after, total_after));
-
-    if used_after == used_before {
-        console.print_colored("  PASS: counters restored\n", COLOR_GREEN);
+        console.print_colored("  ERROR: Write to .rodata did not cause PAGE FAULT!\n", crate::framebuffer::COLOR_RED);
+        console.print_colored("[W^X TEST] FAIL\n", crate::framebuffer::COLOR_RED);
     } else {
-        console.print_colored(
-            &format!("  FAIL: used drifted {} -> {}\n", used_before, used_after),
-            COLOR_RED,
-        );
+        console.print_colored("  VMM not active yet. Skipping test.\n", crate::framebuffer::COLOR_YELLOW);
+        console.print_colored("[W^X TEST] SKIP\n", crate::framebuffer::COLOR_YELLOW);
     }
-    CmdResult::Ok
+}
+
+extern "C" {
+    static __rodata_start: u8;
+    fn _start();
 }

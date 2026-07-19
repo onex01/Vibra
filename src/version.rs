@@ -2,16 +2,16 @@
 /// Изменяй версии ТОЛЬКО здесь!
 
 /// Версия ОС
-pub const OS_VERSION: &str = "0.5";
+pub const OS_VERSION: &str = "0.6";
 
 /// Кодовое название ОС
-pub const OS_CODENAME: &str = "Nucleus";
+pub const OS_CODENAME: &str = "Vega";
 
 /// Версия ядра
-pub const KERNEL_VERSION: &str = "0.5.6";
+pub const KERNEL_VERSION: &str = "0.6.0";
 
 /// Кодовое название ядра
-pub const KERNEL_CODENAME: &str = "Tejat";
+pub const KERNEL_CODENAME: &str = "Wave";
 
 /// Автор проекта
 pub const AUTHOR: &str = "OneX01";

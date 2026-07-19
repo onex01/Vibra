@@ -9,17 +9,20 @@
 use crate::memory::pmm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-const ENTRY_PRESENT: u64 = 1 << 0;
-const ENTRY_WRITABLE: u64 = 1 << 1;
-const ENTRY_HUGE_PAGE: u64 = 1 << 7;
-const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+pub(crate) const ENTRY_PRESENT: u64 = 1 << 0;
+pub(crate) const ENTRY_WRITABLE: u64 = 1 << 1;
+pub(crate) const ENTRY_USER: u64 = 1 << 2;
+pub(crate) const ENTRY_PCD: u64 = 1 << 3;
+pub(crate) const ENTRY_HUGE_PAGE: u64 = 1 << 7;
+pub(crate) const ENTRY_NX: u64 = 1 << 63;
+pub(crate) const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const PAGE_4K_MASK: u64 = 0xfff;
 const PAGE_2M_MASK: u64 = 0x1f_ffff;
 const PAGE_1G_MASK: u64 = 0x3fff_ffff;
 const PAGE_2M_ADDRESS_MASK: u64 = ADDRESS_MASK & !PAGE_2M_MASK;
 const PAGE_1G_ADDRESS_MASK: u64 = ADDRESS_MASK & !PAGE_1G_MASK;
 
-static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageSize {
@@ -182,14 +185,14 @@ const fn index(address: u64, shift: u8) -> usize {
 /// `table_phys` взят из present entry предыдущего уровня либо из CR3; HHDM
 /// делает этот физический адрес доступным ядру. Volatile-read не позволяет
 /// компилятору кешировать содержимое таблицы страниц.
-unsafe fn read_entry(table_phys: u64, entry_index: usize) -> Option<u64> {
+pub(crate) unsafe fn read_entry(table_phys: u64, entry_index: usize) -> Option<u64> {
     let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
     let table = (hhdm + table_phys) as *const u64;
     let entry = core::ptr::read_volatile(table.add(entry_index));
     if entry & ENTRY_PRESENT != 0 { Some(entry) } else { None }
 }
 
-unsafe fn write_entry(table_phys: u64, entry_index: usize, value: u64) {
+pub(crate) unsafe fn write_entry(table_phys: u64, entry_index: usize, value: u64) {
     let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
     let table = (hhdm + table_phys) as *mut u64;
     core::ptr::write_volatile(table.add(entry_index), value);
@@ -217,7 +220,7 @@ unsafe fn read_raw_entry(table_phys: u64, entry_index: usize) -> u64 {
     core::ptr::read_volatile(table.add(entry_index))
 }
 
-fn allocate_zeroed_phys(hhdm: u64) -> Option<u64> {
+pub(crate) fn allocate_zeroed_phys(hhdm: u64) -> Option<u64> {
     pmm::alloc_frame_zeroed(hhdm).map(|virtual_address| virtual_address - hhdm)
 }
 

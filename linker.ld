@@ -14,26 +14,33 @@ SECTIONS
 {
     . = 0xffffffff80000000;
 
+    __text_start = .;
     .text : {
         *(.text .text.*)
     } :text
+    __text_end = .;
 
     . += CONSTANT(MAXPAGESIZE);
 
+    __rodata_start = .;
     .rodata : {
         *(.rodata .rodata.*)
     } :rodata
+    __rodata_end = .;
 
     . += CONSTANT(MAXPAGESIZE);
 
+    __data_start = .;
     .data : {
         *(.data .data.*)
     } :data
 
+    __bss_start = .;
     .bss : {
         *(COMMON)
         *(.bss .bss.*)
     } :data
+    __bss_end = .;
 
     /DISCARD/ : {
         *(.eh_frame)
