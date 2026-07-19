@@ -165,13 +165,13 @@ impl FileSystem for RamFs {
         let mut entries = Vec::new();
         
         for entry in &self.entries {
-            // Ищем прямых потомков
             if entry.name.starts_with(&path) && entry.name != path {
                 let relative = &entry.name[path.len()..];
-                // Только прямые потомки (без '/')
-                if !relative.contains('/') || (relative == "/" && path == "/") {
+                let relative = relative.trim_start_matches('/');
+                
+                if !relative.is_empty() && !relative.contains('/') {
                     entries.push(DirEntry {
-                        name: relative.trim_matches('/').to_string(),
+                        name: relative.to_string(),
                         file_type: entry.file_type,
                         size: entry.data.len(),
                     });
