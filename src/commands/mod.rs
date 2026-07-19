@@ -22,6 +22,7 @@ pub mod mount;
 pub mod test_disk;
 pub mod df;
 pub mod kstat;
+pub mod uname;
 
 use crate::framebuffer::Console;
 
@@ -64,6 +65,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "mount",   help: "mount filesystems",          func: mount::run },
     Command { name: "test-disk", help: "test disk operations",     func: test_disk::run },
     Command { name: "kstat",    help: "show interrupt statistics", func: kstat::run },
+    Command { name: "uname",    help: "system information",        func: uname::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 

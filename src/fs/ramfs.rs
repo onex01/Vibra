@@ -50,6 +50,20 @@ impl RamFs {
             mounted: false,
         }
     }
+
+    /// Записать данные в файл напрямую (для init)
+    pub fn write_data(&mut self, path: &str, data: &[u8]) -> Result<(), FsError> {
+        let path = normalize_path(path);
+        
+        for entry in &mut self.entries {
+            if entry.name == path && entry.file_type == FileType::File {
+                entry.data.clear();
+                entry.data.extend_from_slice(data);
+                return Ok(());
+            }
+        }
+        Err(FsError::NotFound)
+    }
 }
 
 impl FileSystem for RamFs {
