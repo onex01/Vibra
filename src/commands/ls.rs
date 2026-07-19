@@ -1,87 +1,96 @@
 use super::CmdResult;
-use crate::framebuffer::{Console, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN};
+use crate::framebuffer::{Console, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN, COLOR_WHITE, COLOR_RED};
 use crate::fs;
 use alloc::string::String;
 
 pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
+    let show_all = args.iter().any(|a| *a == "-a" || *a == "-la" || *a == "-al");
+    let long_format = args.iter().any(|a| *a == "-l" || *a == "-la" || *a == "-al");
+
     let path = if args.is_empty() {
         fs::get_current_dir()
     } else {
         let mut s = String::new();
-        s.push_str(args[0]);
-        s
-    };
-
-    console.print_colored("Directory: ", COLOR_YELLOW);
-    console.print(&path);
-    console.print("\n\n");
-
-    // Показываем корень с подробной информацией
-    if path == "/" {
-        console.print_colored("Mode    Type  Size    Name\n", COLOR_CYAN);
-        console.print_colored("------  ----  ------  ----\n", COLOR_CYAN);
-
-        // Стандартные каталоги
-        let dirs: [(&str, &str); 11] = [
-            ("/bin",     "drwxr-xr-x  0  bin     "),
-            ("/boot",    "drwxr-xr-x  0  boot    "),
-            ("/dev",     "drwxr-xr-x  0  dev     "),
-            ("/etc",     "drwxr-xr-x  0  etc     "),
-            ("/home",    "drwxr-xr-x  0  home    "),
-            ("/mnt",     "drwxr-xr-x  0  mnt     "),
-            ("/proc",    "drwxr-xr-x  0  proc    "),
-            ("/root",    "drwx------  0  root    "),
-            ("/sys",     "drwxr-xr-x  0  sys     "),
-            ("/tmp",     "drwxrwxrwx  0  tmp     "),
-            ("/var",     "drwxr-xr-x  0  var     "),
-        ];
-
-        for (mode, name) in &dirs {
-            console.print_colored(mode, COLOR_GREEN);
-            console.print("  ");
-            console.print(name);
-            console.print("\n");
-        }
-
-        // Файлы в корне
-        let files = fs::list_dir("/");
-        for entry in &files {
-            match entry.file_type {
-                fs::FileType::Directory => {
-                    // Уже показаны выше
-                }
-                fs::FileType::File => {
-                    console.print("-rw-r--r--  ");
-                    console.print_num(entry.size);
-                    console.print("  ");
-                    console.print(&entry.name);
-                    console.print("\n");
-                }
+        // Находим первый аргумент, не начинающийся с "-"
+        for a in args {
+            if !a.starts_with('-') {
+                s.push_str(a);
+                break;
             }
         }
-    } else {
-        // Простой вывод для не-корневых каталогов
-        let count = fs::fs_count();
-        console.print_colored("Total: ", COLOR_YELLOW);
-        console.print_num(count);
-        console.print(" entries\n\n");
+        if s.is_empty() { fs::get_current_dir() } else { s }
+    };
 
-        for entry in fs::list_dir(&path) {
+    let entries = fs::list_dir(&path);
+
+    if long_format {
+        // Long format: drwxr-xr-x 1 root root 4096 Jan 1 00:00 dirname
+        console.print_colored("total ", COLOR_YELLOW);
+        console.print_num(entries.len());
+        console.print("\n");
+
+        for entry in &entries {
             match entry.file_type {
                 fs::FileType::Directory => {
-                    console.print_colored("[DIR] ", COLOR_GREEN);
-                    console.print(&entry.name);
+                    console.print_colored("drwxr-xr-x", COLOR_GREEN);
                 }
                 fs::FileType::File => {
-                    console.print("      ");
+                    console.print_colored("-rw-r--r--", COLOR_WHITE);
+                }
+            }
+            console.print(" 1 root root ");
+
+            // Размер
+            if entry.size < 10 {
+                console.print("    ");
+            } else if entry.size < 100 {
+                console.print("   ");
+            } else if entry.size < 1000 {
+                console.print("  ");
+            } else {
+                console.print(" ");
+            }
+            console.print_num(entry.size);
+
+            console.print(" Jan  1 00:00 ");
+
+            match entry.file_type {
+                fs::FileType::Directory => {
+                    console.print_colored(&entry.name, COLOR_GREEN);
+                }
+                fs::FileType::File => {
                     console.print(&entry.name);
-                    console.print(" (");
-                    console.print_num(entry.size);
-                    console.print(" bytes)");
                 }
             }
             console.put_char('\n');
         }
+    } else {
+        // Short format: multiple columns
+        let mut col = 0;
+        for entry in &entries {
+            match entry.file_type {
+                fs::FileType::Directory => {
+                    console.print_colored(&entry.name, COLOR_GREEN);
+                    console.print("  ");
+                }
+                fs::FileType::File => {
+                    console.print(&entry.name);
+                    // Показываем размер для файлов
+                    console.print("/");
+                    console.print_num(entry.size);
+                    console.print("  ");
+                }
+            }
+            col += 1;
+            if col >= 4 {
+                console.put_char('\n');
+                col = 0;
+            }
+        }
+        if col > 0 {
+            console.put_char('\n');
+        }
     }
+
     CmdResult::Ok
 }

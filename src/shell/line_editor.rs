@@ -13,6 +13,8 @@ pub struct LineEditor {
     history_lens: [usize; HISTORY_SIZE],
     history_count: usize,
     history_idx: usize,
+    prompt_buf: [u8; 128], // буфер для prompt строки
+    prompt_len: usize,
 }
 
 impl LineEditor {
@@ -25,14 +27,16 @@ impl LineEditor {
             history_lens: [0; HISTORY_SIZE],
             history_count: 0,
             history_idx: 0,
+            prompt_buf: [0; 128],
+            prompt_len: 0,
         }
     }
 
-    pub fn read_line(&mut self, console: &mut Console, _prompt_len: usize) -> &str {
+    pub fn read_line(&mut self, console: &mut Console, prompt_len: usize) -> &str {
         self.len = 0;
         self.cursor = 0;
         self.history_idx = self.history_count;
-
+        self.prompt_len = prompt_len;
         loop {
             // Сначала PS/2 (нажатия в окне QEMU), затем COM1. Serial driver
             // работает polling-ом; PIT будит цикл максимум через 10 мс.
@@ -143,6 +147,14 @@ impl LineEditor {
         core::str::from_utf8(&self.buffer[..self.len]).unwrap_or("")
     }
 
+    /// Установить prompt строку (для tab completion)
+    pub fn set_prompt(&mut self, prompt: &str) {
+        let bytes = prompt.as_bytes();
+        let len = bytes.len().min(self.prompt_buf.len());
+        self.prompt_buf[..len].copy_from_slice(&bytes[..len]);
+        self.prompt_len = len;
+    }
+
     fn save_to_history(&mut self) {
         if self.len == 0 { return; }
         if self.history_count < HISTORY_SIZE {
@@ -206,14 +218,15 @@ impl LineEditor {
             if n_matches == 1 {
                 // Один матч — дополняем
                 let full = matches[0];
-                // Очищаем текущий ввод
-                for _ in 0..self.len {
+                // Очищаем текущий ввод (учитывая длину prompt)
+                let total = self.prompt_len + self.len;
+                for _ in 0..total {
                     console.put_char('\x08');
                 }
-                for _ in 0..self.len {
+                for _ in 0..total {
                     console.put_char(' ');
                 }
-                for _ in 0..self.len {
+                for _ in 0..total {
                     console.put_char('\x08');
                 }
                 
@@ -223,7 +236,10 @@ impl LineEditor {
                 self.append_str(full);
                 self.append_str(" ");
                 
-                // Печатаем на экран
+                // Печатаем prompt + команду
+                if let Ok(prompt_str) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
+                    console.print(prompt_str);
+                }
                 if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
                     console.print(s);
                 }
@@ -235,7 +251,10 @@ impl LineEditor {
                     console.print(matches[i]);
                 }
                 console.put_char('\n');
-                console.print("vibra> ");
+                // Печатаем prompt + текущий буфер
+                if let Ok(prompt_str) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
+                    console.print(prompt_str);
+                }
                 if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
                     console.print(s);
                 }
@@ -243,7 +262,10 @@ impl LineEditor {
         } else {
             // Автодополнение файлов (упрощённо)
             console.print("\n[File completion not implemented]\n");
-            console.print("vibra> ");
+            // Печатаем prompt + текущий буфер
+            if let Ok(prompt_str) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
+                console.print(prompt_str);
+            }
             if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
                 console.print(s);
             }

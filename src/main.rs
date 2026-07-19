@@ -240,14 +240,32 @@ pub extern "C" fn _start() -> ! {
     console.print_colored("    Type 'help' for commands | Tab to autocomplete\n\n", framebuffer::COLOR_VIBRA_FG);
 
     loop {
-        let prompt = "vibra> ";
-        console.print_colored(prompt, framebuffer::COLOR_VIBRA_PROMPT);
-        let prompt_len = prompt.len();
-        // `read_line` возвращает ссылку во внутренний буфер редактора. Копируем
-        // её на стек, затем освобождаем mutex до выполнения команды.
+        // Динамический prompt: vibra:/path>
+        let current_dir = fs::get_current_dir();
+        let mut prompt_buf = [0u8; 128];
+        let prompt_str = {
+            let mut pos = 0;
+            for b in b"vibra:" {
+                if pos < prompt_buf.len() { prompt_buf[pos] = *b; pos += 1; }
+            }
+            for b in current_dir.as_bytes() {
+                if pos < prompt_buf.len() { prompt_buf[pos] = *b; pos += 1; }
+            }
+            for b in b"> " {
+                if pos < prompt_buf.len() { prompt_buf[pos] = *b; pos += 1; }
+            }
+            core::str::from_utf8(&prompt_buf[..pos]).unwrap_or("vibra> ")
+        };
+        let prompt_len = prompt_str.len();
+
+        console.print_colored(prompt_str, framebuffer::COLOR_VIBRA_PROMPT);
+
+        // Копируем prompt в буфер редактора для tab completion
         let mut line_buffer = [0u8; 256];
         let line_len = {
             let mut editor = LINE_EDITOR.lock();
+            // Копируем prompt в prompt_buf редактора
+            editor.set_prompt(prompt_str);
             let line = editor.read_line(&mut console, prompt_len);
             line_buffer[..line.len()].copy_from_slice(line.as_bytes());
             line.len()
