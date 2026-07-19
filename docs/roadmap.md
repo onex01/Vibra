@@ -32,23 +32,28 @@
 - [x] Heap: собственный free-list аллокатор с коалесценцией (бэкенд PMM + HHDM)
 - [x] Heap-стресс (10k alloc/drop) и shell-команды `heap` / `diag pmtest`
 - [x] Собственные page tables: CR3/PML4 walker и проверка неактивной PML4 с private 4КБ mapping
-- [ ] Проверка NX/WX-страниц (`wxtest`/`nxtest`)
-- [ ] Вытесняющий планировщик (kernel-threads) — следующий этап
-- [ ] Базовый драйвер AHCI (для QEMU) или VirtIO Block (гораздо проще для начала).
+- [x] Проверка NX/WX-страниц (`wxtest`/`nxtest`)
+- [x] Вытесняющий планировщик (заглушка) — следующий этап
+- [x] Базовый драйвер VirtIO Block (probe + config read)
 
 ## Версия 0.6 "Nucleus" (текущая)
 
-### Цели (Фаза 1 — Собственные page tables):
-- [x] Новый файл `src/memory/vmm.rs`: построить свой PML4 с нуля (не копию Limine)
-- [x] Символы границ секций в `linker.ld` (`__text_start/end`, `__rodata_*`, `__data_*`, `__bss_end`)
-- [x] `ExecutableAddressRequest` из limine для phys/virt базы ядра
-- [x] W^X: `.text` — исполняемый/RO, `.rodata` — NX/RO, `.data/.bss` — NX/RW
-- [x] HHDM 2МиБ-страницами по memmap; ОБЯЗАТЕЛЬНО замапить BOOTLOADER_RECLAIMABLE (там стек Limine — иначе triple fault) и framebuffer
-- [x] Задел под APIC: MMIO `hhdm+0xFEE00000` / `hhdm+0xFEC00000` (4КиБ, PCD)
-- [x] Активация: EFER.NXE (бит 11) ДО `mov cr3`; всё до `interrupts::enable()`
-- [x] W^X-подтест в `diag`: запись в `.rodata` → аккуратный PAGE FAULT
-- [ ] Подсистема ввода: унифицированные структуры событий (Key, MouseMove, MouseClick).
-- [ ] Виртуальные устройства 
+### Цели (Фаза 1 — VMM):
+- [x] VMM: копирование PML4 Limine + переключение CR3
+- [x] EFER.NXE + CR0.WP включены
+- [x] Символы секций в linker.ld
+- [x] `ExecutableAddressRequest` из Limine
+- [x] Подсистема ввода: `src/input.rs` (Key, MouseMove, MouseClick)
+- [x] Виртуальные устройства: `src/devices/` (VirtIO Block, Net, PC Speaker)
+- [x] Планировщик задач (заглушка): `src/task/mod.rs` (round-robin)
+- [x] W^X-подтест в `diag wxtest`
+
+### Фаза 1.1 — Исправления и улучшения:
+- [ ] Исправить PS/2 keyboard input через framebuffer
+- [ ] W^X remap поверх скопированного PML4 (demote 2MB → 4KB)
+- [ ] VirtIO Block: полная реализация VRing I/O
+- [ ] FAT32 драйвер (чтение/запись)
+- [ ] VFS: улучшения и интеграция с VirtIO
 
 ## План Kernel-First (следующие фазы)
 
