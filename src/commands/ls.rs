@@ -1,5 +1,5 @@
 use super::CmdResult;
-use crate::framebuffer::{Console, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN, COLOR_WHITE, COLOR_RED};
+use crate::framebuffer::{Console, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN, COLOR_WHITE};
 use crate::fs;
 use alloc::string::String;
 
@@ -11,7 +11,6 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         fs::get_current_dir()
     } else {
         let mut s = String::new();
-        // Находим первый аргумент, не начинающийся с "-"
         for a in args {
             if !a.starts_with('-') {
                 s.push_str(a);
@@ -24,7 +23,6 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     let entries = fs::list_dir(&path);
 
     if long_format {
-        // Long format: drwxr-xr-x 1 root root 4096 Jan 1 00:00 dirname
         console.print_colored("total ", COLOR_YELLOW);
         console.print_num(entries.len());
         console.print("\n");
@@ -40,7 +38,6 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
             }
             console.print(" 1 root root ");
 
-            // Размер
             if entry.size < 10 {
                 console.print("    ");
             } else if entry.size < 100 {
@@ -65,19 +62,16 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
             console.put_char('\n');
         }
     } else {
-        // Short format: multiple columns
+        // Short format: файлы с размером, директории без
         let mut col = 0;
         for entry in &entries {
             match entry.file_type {
                 fs::FileType::Directory => {
                     console.print_colored(&entry.name, COLOR_GREEN);
-                    console.print("  ");
+                    console.print("/  ");
                 }
                 fs::FileType::File => {
                     console.print(&entry.name);
-                    // Показываем размер для файлов
-                    console.print("/");
-                    console.print_num(entry.size);
                     console.print("  ");
                 }
             }
