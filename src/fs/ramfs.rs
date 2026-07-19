@@ -170,10 +170,14 @@ impl FileSystem for RamFs {
                 let relative = relative.trim_start_matches('/');
                 
                 if !relative.is_empty() && !relative.contains('/') {
+                    let perms = if entry.file_type == FileType::Directory { 0o755 } else { 0o644 };
                     entries.push(DirEntry {
                         name: relative.to_string(),
                         file_type: entry.file_type,
                         size: entry.data.len(),
+                        permissions: Permissions::new(perms),
+                        uid: 0,
+                        gid: 0,
                     });
                 }
             }
@@ -192,10 +196,14 @@ impl FileSystem for RamFs {
         
         for entry in &self.entries {
             if entry.name == path {
+                let perms = if entry.file_type == FileType::Directory { 0o755 } else { 0o644 };
                 return Ok(FileMetadata {
                     name: entry.name.clone(),
                     file_type: entry.file_type,
                     size: entry.data.len(),
+                    permissions: Permissions::new(perms),
+                    uid: 0,
+                    gid: 0,
                     created: entry.created,
                     modified: entry.modified,
                 });

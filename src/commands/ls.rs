@@ -35,6 +35,12 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 fs::FileType::File => {
                     console.print_colored("-rw-r--r--", COLOR_WHITE);
                 }
+                fs::FileType::Symlink => {
+                    console.print_colored("lrwxrwxrwx", COLOR_CYAN);
+                }
+                fs::FileType::Device => {
+                    console.print_colored("crw-rw-rw-", COLOR_YELLOW);
+                }
             }
             console.print(" 1 root root ");
 
@@ -58,6 +64,9 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 fs::FileType::File => {
                     console.print(&entry.name);
                 }
+                _ => {
+                    console.print(&entry.name);
+                }
             }
             console.put_char('\n');
         }
@@ -70,7 +79,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                     console.print_colored(&entry.name, COLOR_GREEN);
                     console.print("/  ");
                 }
-                fs::FileType::File => {
+                fs::FileType::File | fs::FileType::Symlink | fs::FileType::Device => {
                     console.print(&entry.name);
                     console.print("  ");
                 }

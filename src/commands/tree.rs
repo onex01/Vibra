@@ -55,10 +55,9 @@ fn print_tree(console: &mut Console, path: &str, prefix: &str, dirs: &mut usize,
                     sub_path.push('/');
                 }
                 sub_path.push_str(&entry.name);
-
                 print_tree(console, &sub_path, &format!("{}{}", prefix, new_prefix), dirs, files);
             }
-            fs::FileType::File => {
+            fs::FileType::File | fs::FileType::Symlink | fs::FileType::Device => {
                 *files += 1;
                 console.print(prefix);
                 console.print(connector);
