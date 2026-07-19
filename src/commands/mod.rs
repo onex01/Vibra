@@ -1,5 +1,4 @@
 pub mod help;
-pub mod logo;
 pub mod version;
 pub mod ls;
 pub mod touch;
@@ -13,11 +12,8 @@ pub mod edit;
 pub mod echo;
 pub mod clear;
 pub mod tasks;
-pub mod sdisk;
-pub mod sysinfo;
 pub mod pwd;
 pub mod uptime;
-pub mod about;
 pub mod quit;
 pub mod diag;
 pub mod heap;
@@ -46,7 +42,6 @@ pub struct Command {
 
 pub const COMMANDS: &[Command] = &[
     Command { name: "help",    help: "show this help",             func: help::run },
-    Command { name: "logo",    help: "show Vibra logo",            func: logo::run },
     Command { name: "version", help: "show OS/kernel version",     func: version::run },
     Command { name: "clear",   help: "clear screen",               func: clear::run },
     Command { name: "ls",      help: "list files and directories", func: ls::run },
@@ -62,10 +57,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "rm",      help: "remove file or directory",   func: rm::run },
     Command { name: "tasks",   help: "show running processes",     func: tasks::run },
     Command { name: "df",      help: "show disk/filesystem usage", func: df::run },
-    Command { name: "sdisk",   help: "show disk usage",            func: sdisk::run },
-    Command { name: "sysinfo", help: "show system information",    func: sysinfo::run },
     Command { name: "uptime",  help: "show system uptime",         func: uptime::run },
-    Command { name: "about",   help: "show project info",          func: about::run },
     Command { name: "diag",    help: "kernel diagnostics tests",   func: diag::run },
     Command { name: "heap",    help: "show heap usage",            func: heap::run },
     Command { name: "neofetch", help: "system info (logo + info)",  func: neofetch::run },
