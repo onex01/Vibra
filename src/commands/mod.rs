@@ -24,6 +24,7 @@ pub mod heap;
 pub mod neofetch;
 pub mod mount;
 pub mod test_disk;
+pub mod df;
 
 use crate::framebuffer::Console;
 
@@ -59,6 +60,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "echo",    help: "print text to screen",       func: echo::run },
     Command { name: "rm",      help: "remove file or directory",   func: rm::run },
     Command { name: "tasks",   help: "show running processes",     func: tasks::run },
+    Command { name: "df",      help: "show disk/filesystem usage", func: df::run },
     Command { name: "sdisk",   help: "show disk usage",            func: sdisk::run },
     Command { name: "sysinfo", help: "show system information",    func: sysinfo::run },
     Command { name: "uptime",  help: "show system uptime",         func: uptime::run },
