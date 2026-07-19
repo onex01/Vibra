@@ -143,8 +143,14 @@ pub fn create_file(name: &str) -> Result<(), FsError> {
 pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
     let ramfs = LEGACY_RAMFS.lock();
     let path = combine_path(&get_current_dir(), name);
+    
+    // Debug: show path
+    crate::println!("[FS] read_file: path='{}', combined='{}'", name, path);
+    
     let mut file = ramfs.open(&path)?;
     let size = file.size();
+    crate::println!("[FS] read_file: size={}", size);
+    
     let mut buf = alloc::vec![0u8; size];
     if size > 0 {
         file.read(&mut buf)?;
