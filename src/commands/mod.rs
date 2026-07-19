@@ -30,6 +30,7 @@ pub mod whoami;
 pub mod su;
 pub mod id;
 pub mod passwd;
+pub mod free;
 
 use crate::framebuffer::Console;
 
@@ -80,6 +81,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "id",       help: "show user/group ids",       func: id::run },
     Command { name: "su",       help: "switch user",               func: su::run },
     Command { name: "passwd",   help: "change password",           func: passwd::run },
+    Command { name: "free",     help: "show memory usage",         func: free::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 
