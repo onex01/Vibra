@@ -1,24 +1,12 @@
 pub mod idt;
 pub mod pic;
-pub mod apic;
 
 use crate::println;
 
 pub fn init() {
     println!("[INTR] Initializing interrupt subsystem...");
-
-    // Проверяем наличие APIC
-    if apic::has_apic() {
-        println!("[INTR] APIC detected, using APIC");
-        pic::init(); // PIC для fallback
-        apic::init();
-        idt::init();
-    } else {
-        println!("[INTR] No APIC, using PIC");
-        pic::init();
-        idt::init();
-    }
-
+    pic::init();
+    idt::init();
     println!("[INTR] Interrupts enabled!");
 }
 
