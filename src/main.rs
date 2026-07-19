@@ -204,6 +204,10 @@ pub extern "C" fn _start() -> ! {
     interrupts::init();
     interrupts::enable();
 
+    // Повторная инициализация PS/2 после PIC remap
+    // Это критично: keyboard::init() вызывается ДО PIC remap
+    crate::keyboard::post_init();
+
     println!("[DEBUG] Interrupts enabled, continuing boot...");
     println!("[DEBUG] About to draw ASCII art...");
 

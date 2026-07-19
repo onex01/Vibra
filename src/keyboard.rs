@@ -103,7 +103,89 @@ const SCANCODE_EXTENDED: u8 = 0xE0;
 static KEYBOARD_STATE: Mutex<KeyboardState> = Mutex::new(KeyboardState::new());
 
 pub fn init() {
-    println!("[KEYBOARD] PS/2 keyboard ready (interrupt-driven)");
+    // Инициализация PS/2 контроллера (8042)
+    unsafe {
+        // Очищаем буфер контроллера
+        while (inb(0x64) & 1) != 0 {
+            inb(0x60);
+        }
+
+        // Читаем command byte
+        outb(0x64, 0x20);
+        io_wait();
+        let cmd = inb(0x60);
+
+        // Устанавливаем правильное значение command byte:
+        // bit 0 = 1 (IRQ1 enable - keyboard)
+        // bit 1 = 1 (IRQ12 enable - mouse)
+        // bit 2 = 1 (system flag)
+        // bit 4 = 1 (enable keyboard)
+        // bit 5 = 1 (enable mouse)
+        // bit 6 = 1 (scan code translation to Set 1)
+        // bit 3 = 0 (DON'T ignore keyboard clock!)
+        // bit 7 = 0 (reserved)
+        let new_cmd: u8 = 0x6D; // 0110_1101
+
+        if cmd != new_cmd {
+            outb(0x64, 0x60); // Write command byte
+            io_wait();
+            outb(0x60, new_cmd);
+            println!("[KEYBOARD] PS/2 cmd byte: {:#x} -> {:#x}", cmd, new_cmd);
+        } else {
+            println!("[KEYBOARD] PS/2 cmd byte OK ({:#x})", cmd);
+        }
+
+        // Flush any pending data
+        while (inb(0x64) & 1) != 0 {
+            inb(0x60);
+        }
+    }
+}
+
+/// Повторная инициализация PS/2 после PIC remap и IDT setup.
+/// Вызывается из main.rs ПОСЛЕ interrupts::enable().
+pub fn post_init() {
+    unsafe {
+        // Убеждаемся что IRQ1 всё ещё включён
+        outb(0x64, 0x20);
+        io_wait();
+        let cmd = inb(0x60);
+
+        if cmd & 0x01 == 0 {
+            // IRQ1 выключен — включаем
+            let new_cmd = cmd | 0x01;
+            outb(0x64, 0x60);
+            io_wait();
+            outb(0x60, new_cmd);
+            println!("[KEYBOARD] post_init: IRQ1 re-enabled (cmd: {:#x} -> {:#x})", cmd, new_cmd);
+        } else {
+            println!("[KEYBOARD] post_init: IRQ1 OK (cmd: {:#x})", cmd);
+        }
+
+        // Flush pending data
+        while (inb(0x64) & 1) != 0 {
+            inb(0x60);
+        }
+
+        println!("[KEYBOARD] post_init complete");
+    }
+}
+
+#[inline]
+unsafe fn inb(port: u16) -> u8 {
+    let val: u8;
+    core::arch::asm!("in al, dx", out("al") val, in("dx") port, options(nostack, preserves_flags));
+    val
+}
+
+#[inline]
+unsafe fn outb(port: u16, val: u8) {
+    core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nostack, preserves_flags));
+}
+
+#[inline]
+unsafe fn io_wait() {
+    outb(0x80, 0);
 }
 
 // Вызывается ТОЛЬКО из ISR (прерывания уже выключены аппаратно),
