@@ -16,6 +16,8 @@ mod shell;
 mod kernel; 
 mod version;
 mod interrupts;
+mod input;
+mod devices;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
@@ -114,6 +116,13 @@ pub extern "C" fn _start() -> ! {
     heap_stress();
 
     keyboard::init();
+
+    // Подсистема ввода (унифицированные события)
+    input::init();
+
+    // Виртуальные устройства
+    devices::init();
+    devices::virtio_block::probe_devices();
     
     // Инициализация файловых систем
     fs::init_filesystem();
