@@ -109,7 +109,14 @@ pub fn init() {
 // Вызывается ТОЛЬКО из ISR (прерывания уже выключены аппаратно),
 // поэтому лок здесь безопасен — главное, чтобы основной код
 // не держал его с включёнными прерываниями (см. poll_key).
+static mut KB_IRQ_COUNT: u64 = 0;
+
+pub fn irq_count() -> u64 {
+    unsafe { KB_IRQ_COUNT }
+}
+
 pub fn handle_interrupt(scancode: u8) {
+    unsafe { KB_IRQ_COUNT += 1; }
     let mut state = KEYBOARD_STATE.lock();
     
     state.push_scancode(scancode);
