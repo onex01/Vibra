@@ -19,6 +19,7 @@ mod interrupts;
 mod input;
 mod devices;
 mod task;
+mod users;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
@@ -140,6 +141,9 @@ pub extern "C" fn _start() -> ! {
 
     // Планировщик задач (заглушка)
     task::init();
+
+    // Система пользователей
+    users::init();
     
     // Регистрация устройств
     kernel::device::register("console", kernel::device::DeviceType::Console);

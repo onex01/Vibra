@@ -18,14 +18,6 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
 }
 
 fn print_stats(console: &mut Console) {
-    // === Заголовок ===
-    console.print_colored("╔══════════════════════════════════════════════════════════════╗\n", COLOR_CYAN);
-    console.print_colored("║", COLOR_CYAN);
-    console.print_colored("                    VIBRA SYSTEM MONITOR                      ", COLOR_WHITE);
-    console.print_colored("║\n", COLOR_CYAN);
-    console.print_colored("╚══════════════════════════════════════════════════════════════╝\n", COLOR_CYAN);
-    console.put_char('\n');
-
     // === CPU ===
     print_cpu_info(console);
 

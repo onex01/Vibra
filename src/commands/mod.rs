@@ -26,6 +26,10 @@ pub mod uname;
 pub mod reboot;
 pub mod tree;
 pub mod top;
+pub mod whoami;
+pub mod su;
+pub mod id;
+pub mod passwd;
 
 use crate::framebuffer::Console;
 
@@ -72,6 +76,10 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "reboot",   help: "reboot the system",        func: reboot::run },
     Command { name: "tree",     help: "show directory tree",      func: tree::run },
     Command { name: "top",      help: "system monitor (htop-like)", func: top::run },
+    Command { name: "whoami",   help: "show current user",         func: whoami::run },
+    Command { name: "id",       help: "show user/group ids",       func: id::run },
+    Command { name: "su",       help: "switch user",               func: su::run },
+    Command { name: "passwd",   help: "change password",           func: passwd::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 
