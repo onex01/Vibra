@@ -37,7 +37,59 @@ static DISK_MANAGER: Lazy<Mutex<DiskManager>> = Lazy::new(|| {
 
 /// Инициализация файловой системы (вызывается из main.rs)
 pub fn init_filesystem() {
-    LEGACY_RAMFS.lock().mount().ok();
+    let mut ramfs = LEGACY_RAMFS.lock();
+    ramfs.mount().ok();
+
+    // Создаём стандартную структуру каталогов (как в Linux)
+    let dirs = [
+        "/bin", "/boot", "/dev", "/etc", "/home",
+        "/mnt", "/proc", "/root", "/sys", "/tmp", "/var",
+        "/boot/config", "/home/root",
+    ];
+    for dir in &dirs {
+        ramfs.mkdir(dir).ok();
+    }
+
+    // Создаём базовые системные файлы
+    // /etc/hostname
+    ramfs.create("/etc/hostname").ok();
+    if let Ok(mut f) = ramfs.open("/etc/hostname") {
+        let _ = f.write(b"vibra");
+    }
+
+    // /etc/passwd (упрощённый)
+    ramfs.create("/etc/passwd").ok();
+    if let Ok(mut f) = ramfs.open("/etc/passwd") {
+        let _ = f.write(b"root:x:0:0:root:/root:/bin/sh\n");
+    }
+
+    // /etc/fstab
+    ramfs.create("/etc/fstab").ok();
+    if let Ok(mut f) = ramfs.open("/etc/fstab") {
+        let _ = f.write(b"# device  mount  type  options  dump  pass\n/         ramfs  rw    0        0     0\n/dev      devtmpfs rw 0        0     0\n/proc     procfs  ro   0        0     0\n/sys      sysfs   ro   0        0     0\n");
+    }
+
+    // /proc/version
+    ramfs.create("/proc/version").ok();
+    if let Ok(mut f) = ramfs.open("/proc/version") {
+        let _ = f.write(b"Vibra OS 0.6 (Nucleus) kernel");
+    }
+
+    // /proc/meminfo (упрощённый)
+    ramfs.create("/proc/meminfo").ok();
+    if let Ok(mut f) = ramfs.open("/proc/meminfo") {
+        let _ = f.write(b"MemTotal: 256 MB\nMemFree: 198 MB\n");
+    }
+
+    // /proc/uptime
+    ramfs.create("/proc/uptime").ok();
+
+    // /sys/kernel/version
+    ramfs.mkdir("/sys/kernel").ok();
+    ramfs.create("/sys/kernel/version").ok();
+    if let Ok(mut f) = ramfs.open("/sys/kernel/version") {
+        let _ = f.write(b"0.6.0");
+    }
 
     // Принудительная инициализация Lazy для детерминированного порядка
     Lazy::force(&VFS_MANAGER);
