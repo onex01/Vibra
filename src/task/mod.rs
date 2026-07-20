@@ -1,12 +1,13 @@
-// Task Scheduler — round-robin планировщик kernel threads.
+// Task Scheduler — cooperative round-robin планировщик kernel threads.
 //
-// Фаза 2: полноценный планировщик с timer-based preemption.
-// Квант: 1 тик (10мс при PIT 100Hz).
+// Фаза 2: кооперативный планировщик с yield points.
+// Задачи добровольно уступают управление через yield().
+// Когда появится timer-based preemption, будет добавлен context switch.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Состояние задачи
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,11 +46,9 @@ pub struct Task {
     pub name: String,
     pub state: TaskState,
     pub priority: Priority,
-    pub stack_ptr: u64,
-    pub stack_base: u64,
-    pub stack_size: usize,
     pub time_slices: u64,
-    pub wake_time: Option<u64>, // Для sleep
+    pub wake_time: Option<u64>,
+    pub entry: Option<fn()>,
 }
 
 /// Планировщик
@@ -63,7 +62,6 @@ pub struct Scheduler {
 }
 
 static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
-static TOTAL_TASKS: AtomicU32 = AtomicU32::new(0);
 
 /// Инициализация планировщика
 pub fn init() {
@@ -71,45 +69,42 @@ pub fn init() {
         tasks: Vec::new(),
         current_task: None,
         tick_count: 0,
-        quantum: 1,
-        next_id: 1,
+        quantum: 10, // 10 тиков = 100мс между переключениями
+        next_id: 0,
         context_switches: 0,
     };
 
-    // Создаём задачу kshell (текущий поток)
+    // Задача 0 = kshell (текущий поток)
     scheduler.tasks.push(Task {
         id: 0,
         name: String::from("kshell"),
         state: TaskState::Running,
         priority: Priority::High,
-        stack_ptr: 0,
-        stack_base: 0,
-        stack_size: 0,
         time_slices: 0,
         wake_time: None,
+        entry: None,
     });
     scheduler.current_task = Some(0);
 
-    // Создаём idle задачу
+    // Задача 1 = idle
     scheduler.tasks.push(Task {
         id: 1,
         name: String::from("idle"),
         state: TaskState::Ready,
         priority: Priority::Low,
-        stack_ptr: 0,
-        stack_base: 0,
-        stack_size: 0,
         time_slices: 0,
         wake_time: None,
+        entry: None,
     });
 
+    scheduler.next_id = 2;
+
     *SCHEDULER.lock() = Some(scheduler);
-    TOTAL_TASKS.store(2, Ordering::Relaxed);
-    crate::println!("[SCHED] Task scheduler initialized (round-robin, quantum=1 tick)");
+    crate::println!("[SCHED] Task scheduler initialized (cooperative, quantum=10 ticks)");
 }
 
-/// Создать задачу
-pub fn spawn(name: &str, priority: Priority) -> Option<u32> {
+/// Создать задачу с функцией入口
+pub fn spawn(name: &str, entry: fn(), priority: Priority) -> Option<u32> {
     let mut sched_guard = SCHEDULER.lock();
     if let Some(ref mut sched) = *sched_guard {
         let id = sched.next_id;
@@ -120,16 +115,13 @@ pub fn spawn(name: &str, priority: Priority) -> Option<u32> {
             name: String::from(name),
             state: TaskState::Ready,
             priority,
-            stack_ptr: 0,
-            stack_base: 0,
-            stack_size: 0,
             time_slices: 0,
             wake_time: None,
+            entry: Some(entry),
         };
 
         sched.tasks.push(task);
-        TOTAL_TASKS.fetch_add(1, Ordering::Relaxed);
-        crate::println!("[SCHED] Task '{}' (id={}) created, priority={:?}", name, id, priority);
+        crate::println!("[SCHED] Task '{}' (id={}) spawned, priority={:?}", name, id, priority);
         Some(id)
     } else {
         None
@@ -150,7 +142,7 @@ pub fn exit_task(id: u32) {
     }
 }
 
-/// Поставить задачу в сон
+/// Поставить задачу в сон на N тиков
 pub fn sleep_task(id: u32, ticks: u64) {
     let mut sched_guard = SCHEDULER.lock();
     if let Some(ref mut sched) = *sched_guard {
@@ -178,6 +170,22 @@ pub fn wake_task(id: u32) {
     }
 }
 
+/// Yield — уступить управление другой задаче
+pub fn yield_now() {
+    let mut sched_guard = SCHEDULER.lock();
+    if let Some(ref mut sched) = *sched_guard {
+        let current = sched.current_task.unwrap_or(0);
+        sched.tasks[current].state = TaskState::Ready;
+        sched.tasks[current].time_slices = 0;
+
+        // Выбираем следующую задачу
+        let next = (current + 1) % sched.tasks.len();
+        sched.tasks[next].state = TaskState::Running;
+        sched.current_task = Some(next);
+        sched.context_switches += 1;
+    }
+}
+
 /// Количество задач
 pub fn task_count() -> usize {
     let sched_guard = SCHEDULER.lock();
@@ -188,7 +196,7 @@ pub fn task_count() -> usize {
     }
 }
 
-/// Получить список задач для отображения
+/// Список задач
 pub fn list_tasks() -> Vec<(u32, String, &'static str)> {
     let sched_guard = SCHEDULER.lock();
     let mut result = Vec::new();
@@ -221,16 +229,21 @@ pub fn timer_tick() {
         // Удаляем zombie задачи
         sched.tasks.retain(|t| t.state != TaskState::Zombie);
 
-        // Round-robin: если прошёл квант — переключаем
-        if sched.tick_count % sched.quantum == 0 {
+        // Round-robin: каждый quantum тиков переключаем
+        if sched.tick_count % sched.quantum == 0 && sched.tasks.len() > 1 {
+            let current = sched.current_task.unwrap_or(0);
+            sched.tasks[current].state = TaskState::Ready;
+            sched.tasks[current].time_slices += 1;
+
+            let next = (current + 1) % sched.tasks.len();
+            sched.tasks[next].state = TaskState::Running;
+            sched.current_task = Some(next);
             sched.context_switches += 1;
-            // В реальной реализации здесь был бы context switch
-            // Пока просто логируем
         }
     }
 }
 
-/// Статистика планировщика
+/// Статистика
 pub fn stats() -> (u64, u64, usize) {
     let sched_guard = SCHEDULER.lock();
     if let Some(ref sched) = *sched_guard {
