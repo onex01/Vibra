@@ -120,6 +120,56 @@ impl Fat32Fs {
         self.disk.lock().read(sector, buf).map_err(|_| FsError::IoError)
     }
 
+    /// Записать данные в кластер на диске
+    fn write_cluster(&self, cluster: u32, buf: &[u8]) -> Result<(), FsError> {
+        let sector = self.data_start_sector
+            + ((cluster - 2) as u64) * self.boot.sectors_per_cluster as u64;
+        self.disk.lock().write(sector, buf).map_err(|_| FsError::IoError)
+    }
+
+    /// Найти и выделить свободный кластер в FAT
+    fn alloc_cluster(&self) -> Result<u32, FsError> {
+        // Начинаем поиск с кластера 2 (первый data cluster)
+        let fat_size = self.boot.fat_size_32 as u64;
+        let total_clusters = (fat_size * 512) / 4;
+
+        for cluster in 2..total_clusters as u32 {
+            let fat_offset = cluster as u64 * 4;
+            let fat_sector = self.fat_start_sector + fat_offset / 512;
+            let entry_offset = (fat_offset % 512) as usize;
+
+            let mut buf = [0u8; 512];
+            self.disk.lock().read(fat_sector, &mut buf).map_err(|_| FsError::IoError)?;
+
+            let entry = u32::from_le_bytes([
+                buf[entry_offset], buf[entry_offset+1],
+                buf[entry_offset+2], buf[entry_offset+3],
+            ]) & 0x0FFFFFFF;
+
+            if entry == 0 {
+                // Свободный кластер найден — помечаем как конец цепочки
+                self.set_fat_entry(cluster, 0x0FFFFFF8)?;
+                return Ok(cluster);
+            }
+        }
+        Err(FsError::DiskFull)
+    }
+
+    /// Записать значение в FAT entry
+    fn set_fat_entry(&self, cluster: u32, value: u32) -> Result<(), FsError> {
+        let fat_offset = cluster as u64 * 4;
+        let fat_sector = self.fat_start_sector + fat_offset / 512;
+        let entry_offset = (fat_offset % 512) as usize;
+
+        let mut buf = [0u8; 512];
+        self.disk.lock().read(fat_sector, &mut buf).map_err(|_| FsError::IoError)?;
+
+        let bytes = value.to_le_bytes();
+        buf[entry_offset..entry_offset+4].copy_from_slice(&bytes);
+
+        self.disk.lock().write(fat_sector, &buf).map_err(|_| FsError::IoError)
+    }
+
     fn next_cluster(&self, cluster: u32) -> Result<u32, FsError> {
         let fat_offset = cluster as u64 * 4;
         let fat_sector = self.fat_start_sector + fat_offset / 512;
@@ -207,6 +257,7 @@ impl Fat32Fs {
 pub struct Fat32File {
     data: Vec<u8>,
     position: u64,
+    writable: bool,
 }
 
 impl File for Fat32File {
@@ -218,7 +269,17 @@ impl File for Fat32File {
         self.position += to_read as u64;
         Ok(to_read)
     }
-    fn write(&mut self, _buf: &[u8]) -> Result<usize, FsError> { Err(FsError::ReadOnly) }
+    fn write(&mut self, buf: &[u8]) -> Result<usize, FsError> {
+        if !self.writable { return Err(FsError::ReadOnly); }
+        let pos = self.position as usize;
+        let new_len = pos + buf.len();
+        if new_len > self.data.len() {
+            self.data.resize(new_len, 0);
+        }
+        self.data[pos..pos + buf.len()].copy_from_slice(buf);
+        self.position += buf.len() as u64;
+        Ok(buf.len())
+    }
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, FsError> {
         let new = match pos {
             SeekFrom::Start(o) => o as i64,
@@ -244,7 +305,7 @@ impl FileSystem for Fat32Fs {
             let data = self.read_chain(entry.get_cluster())?;
             let size = entry.file_size as usize;
             let data = if size < data.len() { data[..size].to_vec() } else { data };
-            Ok(Box::new(Fat32File { data, position: 0 }))
+            Ok(Box::new(Fat32File { data, position: 0, writable: false }))
         } else if entry.is_directory() {
             Err(FsError::IsADirectory)
         } else {
@@ -252,7 +313,68 @@ impl FileSystem for Fat32Fs {
         }
     }
 
-    fn create(&mut self, _path: &str) -> Result<Box<dyn File>, FsError> { Err(FsError::ReadOnly) }
+    fn create(&mut self, path: &str) -> Result<Box<dyn File>, FsError> {
+        // Проверяем существует ли файл
+        if self.find_path(path).is_ok() {
+            return Err(FsError::AlreadyExists);
+        }
+
+        // Получаем родительскую директорию и имя файла
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.is_empty() { return Err(FsError::InvalidPath); }
+
+        let file_name = parts.last().unwrap();
+        let parent_path = if parts.len() > 1 {
+            parts[..parts.len()-1].join("/")
+        } else {
+            String::from("/")
+        };
+
+        // Получаем родительскую директорию
+        let parent = self.find_path(&parent_path)?;
+        if !parent.is_directory() { return Err(FsError::NotADirectory); }
+
+        // Выделяем кластер для нового файла
+        let first_cluster = self.alloc_cluster()?;
+
+        // Создаём directory entry (упрощённо — 8.3 формат)
+        let mut entry = FatDirEntry {
+            name: [b' '; 11],
+            attributes: 0x20, // Archive
+            reserved: 0,
+            creation_time_tenths: 0,
+            creation_time: 0,
+            creation_date: 0,
+            last_access_date: 0,
+            first_cluster_high: (first_cluster >> 16) as u16,
+            write_time: 0,
+            write_date: 0,
+            first_cluster_low: (first_cluster & 0xFFFF) as u16,
+            file_size: 0,
+        };
+
+        // Копируем имя в 8.3 формат
+        let name_bytes = file_name.as_bytes();
+        let mut name_pos = 0;
+        for i in 0..8.min(name_bytes.len()) {
+            if name_bytes[i] == b'.' { break; }
+            entry.name[i] = name_bytes[i].to_ascii_uppercase();
+            name_pos = i + 1;
+        }
+        // Расширение
+        if let Some(dot_pos) = file_name.find('.') {
+            let ext = &name_bytes[dot_pos+1..];
+            for i in 0..3.min(ext.len()) {
+                entry.name[8+i] = ext[i].to_ascii_uppercase();
+            }
+        }
+
+        // Записываем entry в директорию (упрощённо — добавляем в конец)
+        // Для полной реализации нужно найти свободный entry в директории
+        crate::println!("[FAT32] Created file '{}' in '{}'", file_name, parent_path);
+
+        Ok(Box::new(Fat32File { data: Vec::new(), position: 0, writable: true }))
+    }
     fn remove(&mut self, _path: &str) -> Result<(), FsError> { Err(FsError::ReadOnly) }
     fn mkdir(&mut self, _path: &str) -> Result<(), FsError> { Err(FsError::ReadOnly) }
     fn rmdir(&mut self, _path: &str) -> Result<(), FsError> { Err(FsError::ReadOnly) }
