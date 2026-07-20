@@ -101,11 +101,17 @@ pub fn init() {
         IDT[14].set_handler(isr_page_fault as *const () as u64);
 
         // Аппаратные прерывания
-        // PIC-based (fallback): 32..47
-        IDT[pic::PIC1_OFFSET as usize + 0].set_handler(isr_timer as *const () as u64);     // IRQ0
-        IDT[pic::PIC1_OFFSET as usize + 1].set_handler(isr_keyboard as *const () as u64);  // IRQ1
-        IDT[pic::PIC1_OFFSET as usize + 7].set_handler(isr_spurious_master as *const () as u64); // IRQ7
-        IDT[pic::PIC2_OFFSET as usize + 7].set_handler(isr_spurious_slave as *const () as u64);  // IRQ15
+        // Timer (IRQ0) — naked stub для context switch (вектор 32)
+        IDT[pic::PIC1_OFFSET as usize + 0].set_handler(
+            crate::task::ctx_switch::timer_naked_stub as *const () as u64);
+        // Keyboard (IRQ1) — обычный x86-interrupt
+        IDT[pic::PIC1_OFFSET as usize + 1].set_handler(isr_keyboard as *const () as u64);
+        // Spurious
+        IDT[pic::PIC1_OFFSET as usize + 7].set_handler(isr_spurious_master as *const () as u64);
+        IDT[pic::PIC2_OFFSET as usize + 7].set_handler(isr_spurious_slave as *const () as u64);
+
+        // Soft IRQ (vector 0x81) — yield/exit без EOI
+        IDT[0x81].set_handler(crate::task::ctx_switch::softirq_naked_stub as *const () as u64);
 
         // APIC vectors
         IDT[48].set_handler(isr_lapic_timer as *const () as u64);  // LAPIC timer

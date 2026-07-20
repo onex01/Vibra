@@ -34,8 +34,8 @@ fn print_stats(console: &mut Console) {
 fn print_cpu_info(console: &mut Console) {
     console.print_colored("┌─── CPU ──────────────────────────────────────────────────────┐\n", COLOR_YELLOW);
 
-    let ticks = crate::interrupts::idt::ticks();
-    let uptime_secs = ticks / 100; // PIT 100 Hz
+    let (sched_ticks, _, _) = crate::task::stats();
+    let uptime_secs = sched_ticks / 100; // PIT 100 Hz
     let uptime_mins = uptime_secs / 60;
     let uptime_hours = uptime_mins / 60;
 
@@ -53,18 +53,16 @@ fn print_cpu_info(console: &mut Console) {
     // Пока просто показываем что таймер работает
     console.print_colored("│ ", COLOR_YELLOW);
     console.print_colored("Timer ticks: ", COLOR_WHITE);
-    console.print_num(ticks as usize);
+    console.print_num(sched_ticks as usize);
     console.print_colored(" (100 Hz)                          │\n", COLOR_YELLOW);
 
     // Показываем "загрузку" — на основе количества тиков относительно uptime
     let load_pct = if uptime_secs > 0 {
-        // Простая эвристика: если тики идут нормально — CPU загружен
-        // В реальной ОС это считалось бы по idle тикам
         let expected_ticks = uptime_secs * 100;
-        if ticks > expected_ticks {
+        if sched_ticks > expected_ticks {
             100
         } else {
-            (ticks * 100) / expected_ticks.max(1)
+            (sched_ticks * 100) / expected_ticks.max(1)
         }
     } else {
         0
@@ -178,31 +176,36 @@ fn print_processes(console: &mut Console) {
     console.print_colored("┌─── Processes ────────────────────────────────────────────────┐\n", COLOR_CYAN);
 
     let task_count = crate::task::task_count();
+    let (ticks, ctx_sw, _) = crate::task::stats();
+    let tasks = crate::task::list_tasks();
 
     console.print_colored("│ ", COLOR_CYAN);
     console.print_colored("Tasks: ", COLOR_WHITE);
     console.print_num(task_count);
-    console.print(" total");
+    console.print("  Switches: ");
+    console.print_num(ctx_sw as usize);
     console.put_char('\n');
 
-    // Показываем информацию о текущих задачах
     console.print_colored("│ ", COLOR_CYAN);
-    console.print_colored("PID  STATE     NAME                    STACK", COLOR_WHITE);
-    console.put_char('\n');
+    console.print_colored("PID  STATE     NAME\n", COLOR_WHITE);
 
-    // kshell (главный поток)
-    console.print_colored("│ ", COLOR_CYAN);
-    console.print_colored("  1  ", COLOR_GREEN);
-    console.print_colored("Running   ", COLOR_GREEN);
-    console.print("kshell                     main");
-    console.put_char('\n');
-
-    // idle (если есть)
-    if task_count > 1 {
+    for (id, name, state) in &tasks {
         console.print_colored("│ ", COLOR_CYAN);
-        console.print_colored("  2  ", COLOR_YELLOW);
-        console.print_colored("Sleeping  ", COLOR_YELLOW);
-        console.print("idle                       hlt-loop");
+        if *id < 10 { console.print(" "); }
+        console.print("  ");
+        console.print_num(*id as usize);
+        console.print("  ");
+
+        match *state {
+            "Running" => console.print_colored(state, COLOR_GREEN),
+            "Ready" => console.print_colored(state, COLOR_YELLOW),
+            _ => console.print_colored(state, COLOR_WHITE),
+        }
+
+        let padding = 8 - state.len();
+        for _ in 0..padding { console.put_char(' '); }
+
+        console.print(name);
         console.put_char('\n');
     }
 
