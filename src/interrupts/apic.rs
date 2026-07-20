@@ -151,17 +151,19 @@ unsafe fn init_ioapic() {
 
 /// Настроить маршрутизацию IRQ
 unsafe fn ioapic_redirect(irq: u32, vector: u32, destination: u32) {
-    let low = vector & 0xFF;
+    // LOW word: vector + flags (mask cleared = unmasked)
+    let low = (vector & 0xFF) | 0; // mask bit 16 = 0 → unmasked
     let high = (destination & 0xFF) << 24;
     let irq = irq as u64;
     ioapic_write(IOAPIC_REDIRECTION + irq * 2, low);
     ioapic_write(IOAPIC_REDIRECTION + irq * 2 + 1, high);
 }
 
-/// Полная инициализация APIC (замена PIC)
+/// Полная инициализация APIC
+/// Стратегия: PIC остаётся для PIT timer (надёжно), IO APIC для клавиатуры.
 pub fn init() {
     if !has_apic() {
-        println!("[APIC] No APIC detected, PIC will be used");
+        println!("[APIC] No APIC detected, using PIC only");
         return;
     }
 
@@ -170,19 +172,18 @@ pub fn init() {
     unsafe {
         init_lapic();
         init_ioapic();
-        init_lapic_timer();
     }
 
-    // Маскируем только IRQ1 на PIC (клавиатура — IO APIC берёт на себя)
-    // IRQ0 (таймер) остаётся на PIC для wake-up shell loop
+    // Маскируем только IRQ1 на PIC — клавиатура теперь через IO APIC
+    // IRQ0 (таймер) остаётся на PIC
     unsafe {
         crate::interrupts::pic::mask_irq1();
     }
 
-    // Устанавливаем флаг: APIC активен для keyboard
+    // Устанавливаем флаг: APIC активен
     APIC_ACTIVE.store(true, Ordering::SeqCst);
 
-    println!("[APIC] APIC initialized (PIC timer, IO APIC keyboard)");
+    println!("[APIC] Hybrid mode: PIC timer(32) + IO APIC keyboard(33)");
 }
 
 /// Получить вектор LAPIC таймера (для IDT)
