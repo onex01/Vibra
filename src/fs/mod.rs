@@ -5,6 +5,9 @@ pub mod fat32;
 pub mod ext2;
 pub mod disk;
 pub mod disk_manager;
+pub mod procfs;
+pub mod sysfs;
+pub mod devtmpfs;
 
 pub use vfs::*;
 pub use ramfs::RamFs;
@@ -41,27 +44,13 @@ pub fn init_filesystem() {
     ramfs.mount().ok();
 
     // Уникальная структура каталогов Vibra OS
-    // Не копирует Linux/Windows —有自己的 стиль
     let dirs = [
-        // Ядро и система
         "/os", "/os/kernel", "/os/boot", "/os/services",
-        // Устройства
-        "/dev",
-        // Конфигурация (вместо /etc — короче и стильно)
-        "/cfg",
-        // Библиотеки
-        "/lib",
-        // Приложения (вместо /usr/bin — понятнее)
+        "/dev", "/cfg", "/lib",
         "/apps", "/apps/bin", "/apps/data",
-        // Пользователи
         "/home", "/home/root",
-        // Данные
         "/var", "/var/log", "/var/cache",
-        // Временное
-        "/tmp",
-        // Точки монтирования
-        "/mnt",
-        // Виртуальные ФС
+        "/tmp", "/mnt",
         "/proc", "/sys", "/sys/kernel",
     ];
     for dir in &dirs {
@@ -69,16 +58,14 @@ pub fn init_filesystem() {
     }
 
     // Системные файлы
-    let files: [(&str, &[u8]); 9] = [
+    let files: [(&str, &[u8]); 7] = [
         ("/cfg/hostname", b"vibra"),
         ("/cfg/passwd", b"root:x:0:0:root:/home/root:/bin/sh\n"),
         ("/cfg/fstab", b"# device  mount  type  options  dump  pass\n/         ramfs  rw    0        0     0\n/dev      devtmpfs rw 0        0     0\n/proc     procfs  ro   0        0     0\n/sys      sysfs   ro   0        0     0\n"),
         ("/os/kernel/version", b"0.6.0\n"),
         ("/os/kernel/name", b"Vibra\n"),
         ("/os/boot/loader", b"Limine (UEFI)\n"),
-        ("/proc/version", b"Vibra OS 0.6 (Nucleus) kernel\n"),
-        ("/proc/meminfo", b"MemTotal: 256 MB\nMemFree: 198 MB\n"),
-        ("/proc/uptime", b"0\n"),
+        ("/os/boot/config", b"timeout: 0\ngraphics: yes\n"),
     ];
 
     for (path, data) in &files {
@@ -87,6 +74,33 @@ pub fn init_filesystem() {
             let _ = ramfs.write_data(path, data);
         }
     }
+
+    // Инициализируем виртуальные ФС и монтируем в VFS
+    let vfs = &VFS_MANAGER;
+
+    // /proc — procfs
+    let procfs = procfs::ProcFs::new();
+    match vfs.mount("/proc", Box::new(procfs), true) {
+        Ok(()) => crate::println!("[FS] procfs mounted at /proc"),
+        Err(e) => crate::println!("[FS] procfs mount failed: {:?}", e),
+    }
+
+    // /sys — sysfs
+    let sysfs = sysfs::SysFs::new();
+    match vfs.mount("/sys", Box::new(sysfs), true) {
+        Ok(()) => crate::println!("[FS] sysfs mounted at /sys"),
+        Err(e) => crate::println!("[FS] sysfs mount failed: {:?}", e),
+    }
+
+    // /dev — devtmpfs
+    let devtmpfs = devtmpfs::DevTmpFs::new();
+    match vfs.mount("/dev", Box::new(devtmpfs), false) {
+        Ok(()) => crate::println!("[FS] devtmpfs mounted at /dev"),
+        Err(e) => crate::println!("[FS] devtmpfs mount failed: {:?}", e),
+    }
+
+    // / — root ramfs
+    // (уже смонтирован через LEGACY_RAMFS)
 
     // Принудительная инициализация Lazy
     Lazy::force(&VFS_MANAGER);
@@ -125,6 +139,12 @@ pub fn list_entries() -> Vec<DirEntry> {
 }
 
 pub fn list_dir(path: &str) -> Vec<DirEntry> {
+    // Сначала пробуем VFS
+    if let Ok(entries) = vfs_readdir(path) {
+        return entries;
+    }
+
+    // Fallback: legacy RamFS
     let mut ramfs = LEGACY_RAMFS.lock();
     if let Ok(entries) = ramfs.readdir(path) {
         entries
@@ -141,16 +161,21 @@ pub fn create_file(name: &str) -> Result<(), FsError> {
 }
 
 pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
+    // Сначала пробуем VFS (включая procfs/sysfs/devtmpfs)
+    if let Ok(mut file) = vfs_open(name) {
+        let size = file.size();
+        let mut buf = alloc::vec![0u8; size];
+        if size > 0 {
+            file.read(&mut buf)?;
+        }
+        return Ok(buf);
+    }
+
+    // Fallback: legacy RamFS
     let ramfs = LEGACY_RAMFS.lock();
     let path = combine_path(&get_current_dir(), name);
-    
-    // Debug: show path
-    crate::println!("[FS] read_file: path='{}', combined='{}'", name, path);
-    
     let mut file = ramfs.open(&path)?;
     let size = file.size();
-    crate::println!("[FS] read_file: size={}", size);
-    
     let mut buf = alloc::vec![0u8; size];
     if size > 0 {
         file.read(&mut buf)?;
@@ -184,6 +209,12 @@ pub fn remove_entry(name: &str) -> Result<(), FsError> {
 }
 
 pub fn dir_exists(path: &str) -> bool {
+    // Сначала пробуем VFS
+    if vfs_exists(path) {
+        return true;
+    }
+
+    // Fallback: legacy RamFS
     let ramfs = LEGACY_RAMFS.lock();
     let full_path = combine_path(&get_current_dir(), path);
     if let Ok(meta) = ramfs.stat(&full_path) {
