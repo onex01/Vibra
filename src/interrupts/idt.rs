@@ -131,7 +131,12 @@ pub fn ticks() -> u64 {
 
 extern "x86-interrupt" fn isr_timer(_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, Ordering::Relaxed);
-    unsafe { pic::eoi(0); }
+    // EOI: APIC если активен, иначе PIC
+    if crate::interrupts::apic::is_active() {
+        crate::interrupts::apic::eoi();
+    } else {
+        unsafe { pic::eoi(0); }
+    }
 }
 
 extern "x86-interrupt" fn isr_keyboard(_frame: InterruptStackFrame) {
@@ -139,13 +144,18 @@ extern "x86-interrupt" fn isr_keyboard(_frame: InterruptStackFrame) {
     // не выдаст следующее прерывание
     let scancode = unsafe { inb(0x60) };
     crate::keyboard::handle_interrupt(scancode);
-    unsafe { pic::eoi(1); }
+    // EOI: APIC если активен, иначе PIC
+    if crate::interrupts::apic::is_active() {
+        crate::interrupts::apic::eoi();
+    } else {
+        unsafe { pic::eoi(1); }
+    }
 }
 
 // APIC timer handler (vector 48)
 extern "x86-interrupt" fn isr_lapic_timer(_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, Ordering::Relaxed);
-    // EOI в LAPIC (не PIC!)
+    // EOI в LAPIC
     crate::interrupts::apic::eoi();
 }
 

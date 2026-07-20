@@ -5,6 +5,16 @@
 // LAPIC timer: замена PIT timer
 
 use crate::println;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Флаг: APIC активен (используется для выбора EOI в ISR)
+pub static APIC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Проверить, активен ли APIC
+#[inline]
+pub fn is_active() -> bool {
+    APIC_ACTIVE.load(Ordering::Relaxed)
+}
 
 // LAPIC Registers (MMIO offset от базы)
 const LAPIC_BASE: u64 = 0xFEE00000;
@@ -15,6 +25,7 @@ const LAPIC_SVR: u64 = 0x0F0;     // Spurious Vector Register
 const LAPIC_ICR_LOW: u64 = 0x300; // Interrupt Command Register
 const LAPIC_LVT_TIMER: u64 = 0x320;
 const LAPIC_TIMER_INIT: u64 = 0x380;
+const LAPIC_TIMER_CURRENT: u64 = 0x390;
 const LAPIC_TIMER_DIV: u64 = 0x3E0;
 
 // IO APIC Registers
@@ -28,6 +39,20 @@ const IA32_APIC_BASE: u32 = 0x1B;
 
 // Векторы прерываний (выше 47 чтобы не конфликтовать с PIC-ремапом)
 const LAPIC_TIMER_VECTOR: u8 = 48;  // LAPIC таймер
+
+/// Ввод байта из порта
+#[inline]
+unsafe fn inb(port: u16) -> u8 {
+    let val: u8;
+    core::arch::asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack, preserves_flags));
+    val
+}
+
+/// Вывод байта в порт
+#[inline]
+unsafe fn outb(port: u16, val: u8) {
+    core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags));
+}
 
 /// MMIO read/write
 unsafe fn lapic_read(reg: u64) -> u32 {
@@ -91,17 +116,17 @@ unsafe fn init_lapic() {
 }
 
 /// Инициализация LAPIC таймера (periodic, 100 Hz)
+/// Фиксированное значение для QEMU: LAPIC freq = TSC/16.
+/// При 2.4GHz TSC: 2400000 ticks/sec, делитель 16: 150000 ticks/sec
+/// Для 100 Hz: 150000 / 100 = 1500
 pub unsafe fn init_lapic_timer() {
-    // Делитель 16 (0x0B), periodic mode (бит 12)
-    lapic_write(LAPIC_TIMER_DIV, 0x0B);
-
-    // LVT Timer: вектор LAPIC_TIMER_VECTOR, periodic
+    // Делитель 16, periodic mode (бит 12), вектор 48
+    // Делитель 16 = значение 0x03 в регистре делителя LAPIC
+    lapic_write(LAPIC_TIMER_DIV, 0x03);
     lapic_write(LAPIC_LVT_TIMER, (LAPIC_TIMER_VECTOR as u32) | (1 << 12));
-
-    // Initial Count: 1193182 / 16 / 100 = 7457 ticks for ~10ms at 100Hz
-    // Формула: bus_freq / divider / desired_hz
-    // При стандартной частоте 1193182 Hz и делителе 16: 1193182 / 16 / 100 ≈ 7457
-    lapic_write(LAPIC_TIMER_INIT, 7457);
+    // Для QEMU: LAPIC тик = bus_freq/16. При 1GHz bus: 62500 тиков/сек
+    // Для 100 Hz: 62500/100 = 625. Используем 625.
+    lapic_write(LAPIC_TIMER_INIT, 625);
 
     println!("[APIC] LAPIC timer: 100 Hz, vector {}", LAPIC_TIMER_VECTOR);
 }
@@ -112,22 +137,16 @@ unsafe fn init_ioapic() {
     let ioapic_ver = ioapic_read(IOAPIC_VER_REG);
     println!("[APIC] IO APIC id={}, ver={}", ioapic_id, ioapic_ver & 0xFF);
 
-    // Маскируем все IRQ в IO APIC (bit 16 = mask)
+    // Маскируем все IRQ в IO APIC
     for i in 0..24 {
-        ioapic_write(IOAPIC_REDIRECTION + i * 2, 1 << 16); // mask
+        ioapic_write(IOAPIC_REDIRECTION + i * 2, 1 << 16);
     }
 
-    // IRQ0 (PIT/таймер) → вектор 32
-    ioapic_redirect(0, 32, 0);
-
-    // IRQ1 (клавиатура) → вектор 33
+    // Маршрутизация: IRQ1 (клавиатура) → вектор 33
+    // IRQ0 НЕ маршрутизируем — PIC остаётся для PIT timer (надёжнее)
     ioapic_redirect(1, 33, 0);
 
-    // IRQ2 (каскад) → замаскирован
-    // IRQ4 (serial) → вектор 36
-    ioapic_redirect(4, 36, 0);
-
-    println!("[APIC] IO APIC: IRQ0→32(tmr), IRQ1→33(kbd), IRQ4→36(serial)");
+    println!("[APIC] IO APIC: IRQ1→33(kbd), timer via PIC(32)");
 }
 
 /// Настроить маршрутизацию IRQ
@@ -154,12 +173,16 @@ pub fn init() {
         init_lapic_timer();
     }
 
-    // Полностью маскируем PIC — APIC берёт на себя
+    // Маскируем только IRQ1 на PIC (клавиатура — IO APIC берёт на себя)
+    // IRQ0 (таймер) остаётся на PIC для wake-up shell loop
     unsafe {
-        crate::interrupts::pic::mask_all();
+        crate::interrupts::pic::mask_irq1();
     }
 
-    println!("[APIC] APIC fully initialized (PIC masked)");
+    // Устанавливаем флаг: APIC активен для keyboard
+    APIC_ACTIVE.store(true, Ordering::SeqCst);
+
+    println!("[APIC] APIC initialized (PIC timer, IO APIC keyboard)");
 }
 
 /// Получить вектор LAPIC таймера (для IDT)

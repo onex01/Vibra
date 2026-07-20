@@ -81,3 +81,9 @@ pub unsafe fn mask_all() {
     outb(PIC1_DATA, 0xFF); // Маскируем все 8 IRQ на мастер PIC
     outb(PIC2_DATA, 0xFF); // Маскируем все 8 IRQ на ведомый PIC
 }
+
+/// Замаскировать только IRQ1 (клавиатура) — IRQ0 (таймер) остаётся
+pub unsafe fn mask_irq1() {
+    let mask = inb(PIC1_DATA) | 0x02; // Бит 1 = IRQ1
+    outb(PIC1_DATA, mask);
+}

@@ -208,9 +208,18 @@ pub extern "C" fn _start() -> ! {
     interrupts::init();
     interrupts::enable();
 
+    // Raw marker: пишем 'A' через port I/O сразу после sti
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'A', options(nostack, preserves_flags));
+    }
+
     // Повторная инициализация PS/2 после PIC remap
-    // Это критично: keyboard::init() вызывается ДО PIC remap
     crate::keyboard::post_init();
+
+    // Raw marker: пишем 'B' через port I/O после post_init
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'B', options(nostack, preserves_flags));
+    }
 
     println!("[DEBUG] Interrupts enabled, continuing boot...");
     println!("[DEBUG] About to draw ASCII art...");
@@ -242,6 +251,11 @@ pub extern "C" fn _start() -> ! {
     console.print_colored(version::KERNEL_CODENAME, framebuffer::COLOR_VIBRA_FG);
     console.print_colored("\"\n", framebuffer::COLOR_VIBRA_FG);
     console.print_colored("    Type 'help' for commands | Tab to autocomplete\n\n", framebuffer::COLOR_VIBRA_FG);
+
+    // Raw marker: пишем 'C' через port I/O перед циклом shell
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'C', options(nostack, preserves_flags));
+    }
 
     loop {
         // Динамический prompt: vibra:/path>
