@@ -1,4 +1,8 @@
 // syscall/sysret — переход ring 3 → ring 0 и обратно.
+//
+// SYSCALL не сохраняет user RSP. Решение:
+//   - Перед iretq (timer_naked_stub): сохраняем user RSP в PERCPU
+//   - На syscall entry: читаем user RSP из PERCPU, переключаемся на kernel stack
 
 use crate::println;
 use core::arch::asm;
@@ -8,13 +12,11 @@ const MSR_STAR: u32 = 0xC0000081;
 const MSR_LSTAR: u32 = 0xC0000082;
 const MSR_FMASK: u32 = 0xC0000084;
 
-const EFER_SCE: u64 = 1 << 0;
-
 pub const SYS_WRITE: u64 = 0;
 pub const SYS_EXIT: u64 = 1;
 pub const SYS_YIELD: u64 = 2;
 
-/// Per-Cpu data: [0]=user_rsp, [8]=kernel_rsp, [16]=user_rflags.
+/// Per-Cpu: [0]=user_rsp, [8]=kernel_rsp, [16]=user_rflags
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct PerCpu {
@@ -23,70 +25,53 @@ pub struct PerCpu {
     pub user_rflags: u64,
 }
 
-pub static mut PERCPU: PerCpu = PerCpu { user_rsp: 0, kernel_rsp: 0, user_rflags: 0 };
+pub static mut PERCPU: PerCpu = PerCpu { user_rsp: 0, kernel_rsp: 0, user_rflags: 0x200 };
 
-#[inline]
-unsafe fn rdmsr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi);
-    ((hi as u64) << 32) | (lo as u64)
-}
-
-#[inline]
-unsafe fn wrmsr(msr: u32, val: u64) {
-    asm!("wrmsr", in("ecx") msr, in("eax") val as u32, in("edx") (val >> 32) as u32);
-}
-
-/// Naked stub: syscall entry из ring 3.
+/// Naked stub: syscall entry.
+/// After SYSCALL: RCX=user RIP, R11=user RFLAGS, RSP=TSS.rsp0.
 #[unsafe(naked)]
 unsafe extern "sysv64" fn syscall_entry() -> ! {
     core::arch::naked_asm!(
         "swapgs",
 
-        // Читаем user RSP и RFLAGS из PERCPU
+        // rdi/rsi/rdx = user args (сохраняем на kernel stack позже)
+        // rcx = user RIP, r11 = user RFLAGS
+        // rax = syscall number
+
+        // Читаем kernel RSP из PERCPU
         "lea r10, [rip + {percpu}]",
-        "mov r10, [r10]",        // r10 = PERCPU.user_rsp
-        "mov r11, [r10 + 16 - 16]", // не можем — используем другой подход
+        "mov rsp, [r10 + 8]",    // rsp = PERCPU.kernel_rsp
 
-        // Читаем kernel RSP
-        "lea r11, [rip + {percpu}]",
-        "mov rsp, [r11 + 8]",    // rsp = PERCPU.kernel_rsp
-
-        // Сохраняем user context: rdi, rsi, rdx (args) + rcx (RIP) + r11 (RFLAGS)
-        // Стек: [rsp+0]=rdi, [+8]=rsi, [+16]=rdx, [+24]=rcx, [+32]=r11
-        "push r11",              // placeholder
+        // Сохраняем user context на kernel stack
+        "push r11",              // user RFLAGS
         "push rcx",              // user RIP
-        "push rdx",
-        "push rsi",
-        "push rdi",
+        "push rdx",              // arg2
+        "push rsi",              // arg1
+        "push rdi",              // arg0 → rsp+0
 
         // Вызываем dispatcher
         "mov rdi, rax",          // rdi = syscall number
         "mov rsi, rsp",          // rsi = args pointer
         "call {dispatch}",
 
-        // rax = return value — сохраняем в r10
+        // rax = return value → сохраняем
         "mov r10, rax",
 
-        // Восстанавливаем аргументы
+        // Восстанавливаем user context
         "pop rdi",
         "pop rsi",
         "pop rdx",
         "pop rcx",              // user RIP
-        "pop r11",              // placeholder
+        "pop r11",              // user RFLAGS
 
         // Восстанавливаем user RSP из PERCPU
         "lea rax, [rip + {percpu}]",
-        "mov rax, [rax]",       // rax = PERCPU.user_rsp
-        "mov rsp, rax",
+        "mov rsp, [rax]",       // rsp = PERCPU.user_rsp
 
-        // Восстанавливаем user RFLAGS из PERCPU
-        "lea rax, [rip + {percpu}]",
-        "mov r11, [rax + 16]",  // r11 = PERCPU.user_rflags
-
-        // rax = return value (был в r10)
+        // rax = return value
         "mov rax, r10",
 
+        // rcx = user RIP, r11 = user RFLAGS — всё готово
         "swapgs",
         "sysretq",
 
@@ -102,16 +87,11 @@ unsafe extern "sysv64" fn syscall_dispatch(sysnum: u64, args_ptr: *const u64) ->
     let rsi = core::ptr::read_volatile(args_ptr.add(1));
     let rdx = core::ptr::read_volatile(args_ptr.add(2));
 
-    crate::println!("[SYSCALL] num={} rdi={} rsi={:#x} rdx={}", sysnum, rdi, rsi, rdx);
-
     match sysnum {
         SYS_WRITE => sys_write(rdi as usize, rsi as *const u8, rdx as usize),
         SYS_EXIT => {
             let pid = crate::task::current_task_id().unwrap_or(0);
             crate::task::exit_task(pid);
-            println!("[SYSCALL] Process {} exited", pid);
-            // Возвращаем 0 — sysretq вернётся в user space,
-            // но задача помечена как Zombie и не будет выбрана планировщиком.
             0
         }
         SYS_YIELD => {
@@ -119,7 +99,7 @@ unsafe extern "sysv64" fn syscall_dispatch(sysnum: u64, args_ptr: *const u64) ->
             0
         }
         _ => {
-            println!("[SYSCALL] Unknown syscall: {}", sysnum);
+            println!("[SYSCALL] Unknown: {}", sysnum);
             !0u64
         }
     }
@@ -127,8 +107,9 @@ unsafe extern "sysv64" fn syscall_dispatch(sysnum: u64, args_ptr: *const u64) ->
 
 /// sys_write(fd, ptr, len)
 unsafe fn sys_write(_fd: usize, ptr: *const u8, len: usize) -> u64 {
-    if ptr as u64 >= 0xFFFF8000_0000_0000 { return !0u64; }
-    if len > 4096 { return !0u64; }
+    if ptr as u64 >= 0xFFFF8000_0000_0000 || len > 4096 {
+        return !0u64;
+    }
     let slice = core::slice::from_raw_parts(ptr, len);
     for &b in slice { crate::serial::write_byte(b); }
     len as u64
@@ -138,27 +119,29 @@ pub fn init() {
     println!("[SYSCALL] Initializing syscall/sysret...");
     unsafe {
         let mut efer = rdmsr(MSR_EFER);
-        if efer & EFER_SCE == 0 { efer |= EFER_SCE; wrmsr(MSR_EFER, efer); }
+        if efer & (1 << 0) == 0 { efer |= 1; wrmsr(MSR_EFER, efer); }
         wrmsr(MSR_STAR, (0x13u64 << 48) | (0x08u64 << 32));
         wrmsr(MSR_LSTAR, syscall_entry as u64);
-        wrmsr(MSR_FMASK, (1u64 << 9) | (1u64 << 8) | (1u64 << 3));
-        let kstack_top = crate::task::get_kstack_top().unwrap_or(0);
-        PERCPU.kernel_rsp = kstack_top;
+        wrmsr(MSR_FMASK, (1 << 9) | (1 << 8) | (1 << 3));
+        let k = crate::task::get_kstack_top().unwrap_or(0);
+        PERCPU.kernel_rsp = k;
         PERCPU.user_rsp = 0;
-        PERCPU.user_rflags = 0x200; // IF=1
-        println!("[SYSCALL] PERCPU: kernel_rsp={:#x}, user_rsp={:#x}", kstack_top, 0u64);
-        println!("[SYSCALL] syscall/sysret ready (LSTAR={:#x})", syscall_entry as u64);
+        PERCPU.user_rflags = 0x200;
+        println!("[SYSCALL] syscall/sysret ready");
     }
 }
 
-pub fn save_user_rsp(rsp: u64) {
-    unsafe { PERCPU.user_rsp = rsp; }
-}
+pub fn save_user_rsp(rsp: u64) { unsafe { PERCPU.user_rsp = rsp; } }
+pub fn save_user_rflags(rf: u64) { unsafe { PERCPU.user_rflags = rf; } }
+pub fn update_kernel_stack(top: u64) { unsafe { PERCPU.kernel_rsp = top; } }
 
-pub fn save_user_rflags(rflags: u64) {
-    unsafe { PERCPU.user_rflags = rflags; }
+#[inline]
+unsafe fn rdmsr(msr: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi);
+    ((hi as u64) << 32) | (lo as u64)
 }
-
-pub fn update_kernel_stack(new_top: u64) {
-    unsafe { PERCPU.kernel_rsp = new_top; }
+#[inline]
+unsafe fn wrmsr(msr: u32, val: u64) {
+    asm!("wrmsr", in("ecx") msr, in("eax") val as u32, in("edx") (val >> 32) as u32);
 }

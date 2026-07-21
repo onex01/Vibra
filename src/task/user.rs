@@ -11,13 +11,22 @@ use core::sync::atomic::Ordering;
 const PAGE_SIZE: u64 = 4096;
 
 /// User-код: write "Hello from ring 3!\n", затем infinite loop
+/// Layout:
+///   0-6:   mov rax, 0      (7 bytes)
+///   7-13:  mov rdi, 1      (7 bytes)
+///   14-20: lea rsi, [rip+X] (7 bytes, RIP after=21, X=string_offset-21)
+///   21-27: mov rdx, 21     (7 bytes)
+///   28-29: syscall          (2 bytes)
+///   30-31: jmp $            (2 bytes)
+///   32+:   "Hello from ring 3!\n" (21 bytes)
+///   X = 32 - 21 = 11 = 0x0B
 pub const HELLO_USER: &[u8] = &[
-    0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00,  // mov rax, 0 (SYS_WRITE)
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,  // mov rdi, 1 (stdout)
-    0x48, 0x8d, 0x35, 0x15, 0x00, 0x00, 0x00,  // lea rsi, [rip+0x15] -> msg
-    0x48, 0xc7, 0xc2, 0x15, 0x00, 0x00, 0x00,  // mov rdx, 21 (len)
+    0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00,  // mov rax, 0
+    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,  // mov rdi, 1
+    0x48, 0x8d, 0x35, 0x0B, 0x00, 0x00, 0x00,  // lea rsi, [rip+0x0B]
+    0x48, 0xc7, 0xc2, 0x15, 0x00, 0x00, 0x00,  // mov rdx, 21
     0x0f, 0x05,                                   // syscall
-    0xEB, 0xFE,                                   // jmp $ (infinite loop)
+    0xEB, 0xFE,                                   // jmp $
     b'H', b'e', b'l', b'l', b'o', b' ',
     b'f', b'r', b'o', b'm', b' ',
     b'r', b'i', b'n', b'g', b' ',
