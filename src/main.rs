@@ -23,6 +23,8 @@ mod users;
 mod cpu_info;
 mod drivers;
 mod syscall;
+mod script;
+mod arch;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};

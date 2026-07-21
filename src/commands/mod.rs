@@ -38,6 +38,9 @@ pub mod date;
 pub mod lspci;
 pub mod usertest;
 pub mod apic;
+pub mod beep;
+pub mod kill;
+pub mod run;
 
 use crate::framebuffer::Console;
 
