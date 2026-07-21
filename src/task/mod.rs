@@ -183,11 +183,12 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
         crate::syscall::update_kernel_stack(kstack_top);
     }
 
-    // Сохраняем user RSP в PerCpu для syscall_entry
-    // user RSP в iretq frame: saved_rsp + 144 (offset от r15)
+    // Сохраняем user RSP и RFLAGS в PerCpu для syscall_entry
     let next_rsp = sched.tasks[next].saved_rsp;
     let user_rsp = unsafe { core::ptr::read_volatile((next_rsp + 144) as *const u64) };
+    let user_rflags = unsafe { core::ptr::read_volatile((next_rsp + 136) as *const u64) };
     crate::syscall::save_user_rsp(user_rsp);
+    crate::syscall::save_user_rflags(user_rflags);
 
     sched.tasks[next].saved_rsp
 }

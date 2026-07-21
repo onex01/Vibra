@@ -10,16 +10,14 @@ use core::sync::atomic::Ordering;
 
 const PAGE_SIZE: u64 = 4096;
 
-/// User-код: write "Hello from ring 3!\n", затем exit(0)
+/// User-код: write "Hello from ring 3!\n", затем infinite loop
 pub const HELLO_USER: &[u8] = &[
     0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00,  // mov rax, 0 (SYS_WRITE)
     0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,  // mov rdi, 1 (stdout)
     0x48, 0x8d, 0x35, 0x15, 0x00, 0x00, 0x00,  // lea rsi, [rip+0x15] -> msg
     0x48, 0xc7, 0xc2, 0x15, 0x00, 0x00, 0x00,  // mov rdx, 21 (len)
     0x0f, 0x05,                                   // syscall
-    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,  // mov rax, 1 (SYS_EXIT)
-    0x48, 0x31, 0xff,                            // xor rdi, rdi (code=0)
-    0x0f, 0x05,                                   // syscall
+    0xEB, 0xFE,                                   // jmp $ (infinite loop)
     b'H', b'e', b'l', b'l', b'o', b' ',
     b'f', b'r', b'o', b'm', b' ',
     b'r', b'i', b'n', b'g', b' ',

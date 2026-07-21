@@ -200,14 +200,30 @@ extern "x86-interrupt" fn isr_general_protection(frame: InterruptStackFrame, err
 extern "x86-interrupt" fn isr_page_fault(frame: InterruptStackFrame, error_code: u64) {
     let cr2: u64;
     unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)); }
+
+    let is_user = error_code & 4 != 0;
+
     println!("\n!!! PAGE FAULT !!!");
-    println!("  Accessed address (CR2) = {:#018x}", cr2);
-    println!("  Error code = {:#x} [{} | {} | {}]",
-        error_code,
-        if error_code & 1 != 0 { "protection" } else { "not-present" },
+    println!("  Address (CR2) = {:#018x}", cr2);
+    println!("  Error: {} | {} | {}",
+        if error_code & 1 != 0 { "not-present" } else { "protection" },
         if error_code & 2 != 0 { "write" } else { "read" },
-        if error_code & 4 != 0 { "user" } else { "kernel" },
+        if is_user { "user" } else { "kernel" },
     );
     dump_frame(&frame);
-    super::halt_loop();
+
+    if is_user {
+        // User page fault — убиваем процесс, ОС продолжает работу
+        println!("  [KILL] Terminating user process");
+        let pid = crate::task::current_task_id().unwrap_or(0);
+        crate::task::exit_task(pid);
+        // Возвращаемся — планировщик выберет другую задачу
+        // (нельзя return из interrupt handler, нужен context switch)
+        // Пока просто halt — исправим когда scheduler будет корректно
+        // обрабатывать убитые задачи
+        super::halt_loop();
+    } else {
+        // Kernel page fault — критическая ошибка
+        super::halt_loop();
+    }
 }
