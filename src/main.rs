@@ -25,6 +25,7 @@ mod drivers;
 mod syscall;
 mod script;
 mod arch;
+mod boot_log;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
@@ -136,6 +137,9 @@ pub extern "C" fn _start() -> ! {
     
     // Инициализация файловых систем
     fs::init_filesystem();
+    
+    // Сохраняем лог загрузки в файл
+    boot_log::init();
     
     // Mount VFS (пока только ramfs)
     use alloc::boxed::Box;
@@ -332,5 +336,7 @@ pub extern "C" fn _start() -> ! {
 fn panic(info: &PanicInfo) -> ! {
     println!("\n!!! KERNEL PANIC !!!");
     println!("{}", info);
+    // Пытаемся сохранить лог перед зависанием
+    boot_log::flush_to_file("/var/log/error.log");
     loop { halt(); }
 }

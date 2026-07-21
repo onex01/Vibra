@@ -30,6 +30,9 @@ pub fn init() {
 }
 
 pub fn write_byte(b: u8) {
+    // Записываем в boot log буфер (всегда, даже до ФС)
+    crate::boot_log::log_byte(b);
+
     unsafe {
         while (inb(LINE_STATUS) & TRANSMITTER_EMPTY) == 0 {
             core::hint::spin_loop();
