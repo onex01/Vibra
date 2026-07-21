@@ -23,7 +23,8 @@ endif
 # COM1 привязан к stdin/stdout: можно вводить shell-команды из терминала,
 # сохраняя графическое окно QEMU для framebuffer-консоли.
 QEMU_FLAGS := -m 256M -serial stdio -monitor none -drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
-              -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35
+              -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35 \
+              -audiodev sdl,id=snd0 -machine pcspk-audiodev=snd0
 
 .PHONY: all build run clean setup install-kernel iso run-iso
 
