@@ -55,12 +55,13 @@ unsafe extern "sysv64" fn syscall_entry() -> ! {
         "mov rsp, [r11 + 8]",    // rsp = PERCPU.kernel_rsp
 
         // Сохраняем user context на kernel stack
-        "push r11",              // placeholder (user RFLAGS будет восстановлен)
+        // push в обратном порядке: rdx, rsi, rdi → rdi на rsp+0
+        "push r11",              // placeholder (user RFLAGS)
         "push rcx",              // user RIP
         "push r10",              // user RSP
-        "push rdi",
-        "push rsi",
-        "push rdx",
+        "push rdx",              // len
+        "push rsi",              // ptr
+        "push rdi",              // fd → rsp+0
 
         // Вызываем dispatcher
         "mov rdi, rax",          // rdi = syscall number
@@ -70,9 +71,9 @@ unsafe extern "sysv64" fn syscall_entry() -> ! {
         // rax = return value
 
         // Восстанавливаем аргументы
-        "pop rdx",
-        "pop rsi",
         "pop rdi",
+        "pop rsi",
+        "pop rdx",
         "pop r10",              // user RSP
 
         // Восстанавливаем user context
@@ -123,11 +124,15 @@ unsafe extern "sysv64" fn syscall_dispatch(sysnum: u64, args_ptr: *const u64) ->
 /// sys_write(fd, ptr, len) — печатает строку в serial
 unsafe fn sys_write(_fd: usize, ptr: *const u8, len: usize) -> u64 {
     if ptr as u64 >= 0xFFFF8000_0000_0000 {
+        println!("[SYS_WRITE] EFAULT: ptr={:#x}", ptr as u64);
         return !0u64;
     }
     if len > 4096 {
+        println!("[SYS_WRITE] EFBIG: len={}", len);
         return !0u64;
     }
+
+    println!("[SYS_WRITE] ptr={:#x} len={}", ptr as u64, len);
 
     let slice = core::slice::from_raw_parts(ptr, len);
     for &b in slice {

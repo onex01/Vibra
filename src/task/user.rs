@@ -10,8 +10,7 @@ use core::sync::atomic::Ordering;
 
 const PAGE_SIZE: u64 = 4096;
 
-/// Простой user-код: печатает "Hello from ring 3!\n" через syscall write(1, msg, 21),
-/// затем syscall exit(0).
+/// User-код: write "Hello from ring 3!\n", затем exit(0)
 pub const HELLO_USER: &[u8] = &[
     0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00,  // mov rax, 0 (SYS_WRITE)
     0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,  // mov rdi, 1 (stdout)
