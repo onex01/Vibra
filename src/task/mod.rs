@@ -118,6 +118,7 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
     };
 
     sched.tick_count += 1;
+    crate::interrupts::idt::TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // EOI: PIC или LAPIC — зависит от того, кто управляет IRQ0
     // Если APIC полностью активен → LAPIC EOI, иначе → PIC EOI

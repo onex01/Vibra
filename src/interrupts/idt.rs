@@ -63,7 +63,7 @@ struct IdtPointer {
 
 static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
 
-static TICKS: AtomicU64 = AtomicU64::new(0);
+pub static TICKS: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 unsafe fn outb(port: u16, value: u8) {

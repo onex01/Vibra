@@ -280,15 +280,19 @@ impl Console {
         self.fg_color = fg;
     }
 
-    /// Печатает один символ (без mirror в serial — для спец-кодов типа neofetch)
+    /// Печатает один символ в framebuffer + mirror в serial
     pub fn print_char(&mut self, ch: char) {
         match ch {
             '\n' => {
                 self.cursor_col = 0;
                 self.cursor_row += 1;
+                crate::serial::mirror_console_char('\n');
             }
             '\r' => {
                 self.cursor_col = 0;
+            }
+            '\x01'..='\x04' => {
+                // Спец-коды neofetch: только framebuffer (не mirror)
             }
             _ => {
                 if (self.cursor_col + 1) * FONT_WIDTH > self.width {
@@ -301,6 +305,7 @@ impl Console {
                 }
                 self.draw_char_at(ch, self.cursor_col, self.cursor_row, self.fg_color, self.bg_color);
                 self.cursor_col += 1;
+                crate::serial::mirror_console_char(ch);
             }
         }
     }

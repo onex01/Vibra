@@ -7,7 +7,6 @@ use super::CmdResult;
 use crate::framebuffer::{Console, COLOR_CYAN, COLOR_YELLOW,
                          COLOR_VIBRA_PROMPT, COLOR_VIBRA_FG, COLOR_DARK_GRAY};
 use crate::version;
-use crate::interrupts;
 use crate::kernel;
 use alloc::string::String;
 use alloc::format;
@@ -27,8 +26,8 @@ const LOGO: [&str; 8] = [
 // Информационные строки (по одной на каждую строку логотипа).
 // Спец-символы: {C} = цвет C, {} = сброс на VIBRA_FG.
 fn info_lines() -> alloc::vec::Vec<String> {
-    let ticks = interrupts::idt::ticks();
-    let seconds = ticks / interrupts::idt::TIMER_HZ;
+    let ticks = crate::interrupts::idt::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+    let seconds = ticks / 100;
     let minutes = seconds / 60;
     let hours = minutes / 60;
 
@@ -38,12 +37,17 @@ fn info_lines() -> alloc::vec::Vec<String> {
     let heap_pct = if heap_total != 0 { (heap_used * 100) / heap_total } else { 0 };
 
     let (pmm_used, pmm_total) = crate::memory::pmm::stats();
-    let mem_mb = (pmm_total * crate::memory::pmm::FRAME_SIZE) / (1024 * 1024);
+    let total_mb = (pmm_total * crate::memory::pmm::FRAME_SIZE) / (1024 * 1024);
     let used_mb = (pmm_used * crate::memory::pmm::FRAME_SIZE) / (1024 * 1024);
-    let free_mb = mem_mb - used_mb;
+    let free_mb = total_mb - used_mb;
 
-    // Для строк с несколькими цветными секциями строим String вручную,
-    // чтобы спец-коды не конфликтовали с {}-плейсхолдерами format!.
+    let used_kb = (pmm_used * crate::memory::pmm::FRAME_SIZE) / 1024;
+    let total_kb = (pmm_total * crate::memory::pmm::FRAME_SIZE) / 1024;
+
+    let cpu_info = crate::cpu_info::detect();
+    let cpu_brand = crate::cpu_info::brand_str(&cpu_info);
+    let cpu_freq = crate::cpu_info::freq_str(&cpu_info);
+
     let devices = format!("{}", kernel::registry::device_count());
     let drivers = format!("{}", kernel::registry::driver_count());
     let modules = format!("{}", kernel::registry::module_count());
@@ -77,12 +81,12 @@ fn info_lines() -> alloc::vec::Vec<String> {
     };
 
     alloc::vec![
-        // Простые строки — format! безопасен (нет вложенных {})
         format!("{}{}OS{}        Vibra OS v{} \"{}\"", CYL, BOLD, RST, version::OS_VERSION, version::OS_CODENAME),
         format!("{}{}Kernel{}    v{} \"{}\"", CYL, BOLD, RST, version::KERNEL_VERSION, version::KERNEL_CODENAME),
+        format!("{}{}CPU{}       {} ({}, {})", CYL, BOLD, RST, cpu_brand, cpu_info.cores, cpu_freq),
         format!("{}{}Arch{}       {}", CYL, BOLD, RST, version::ARCHITECTURE),
         format!("{}{}Uptime{}     {}", CYL, BOLD, RST, uptime_str),
-        format!("{}{}Memory{}     {} MB / {} MB ({} free)", CYL, BOLD, RST, used_mb, mem_mb, free_mb),
+        format!("{}{}Memory{}     {} MB / {} MB ({} KB used, {} free)", CYL, BOLD, RST, used_mb, total_mb, used_kb, free_mb),
         format!("{}{}Heap{}       {}/{} KB ({}% used)", CYL, BOLD, RST, heap_used / 1024, heap_total / 1024, heap_pct),
         dev_line,
         author_line,

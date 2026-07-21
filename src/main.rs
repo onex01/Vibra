@@ -20,6 +20,7 @@ mod input;
 mod devices;
 mod task;
 mod users;
+mod cpu_info;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
