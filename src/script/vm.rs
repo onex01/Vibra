@@ -31,7 +31,7 @@ impl VM {
             Expr::BinOp(l, op, r) => {
                 let lv = self.eval(l); let rv = self.eval(r);
                 match op {
-                    BinOp::Add => match (&lv, &rv) { (Value::Str(a), Value::Str(b)) => Value::Str(format!("{}{}", a, b)), _ => Value::Num(lv.to_num() + rv.to_num()) },
+                    BinOp::Add => match (&lv, &rv) { (Value::Str(_), _) | (_, Value::Str(_)) => Value::Str(format!("{}{}", lv.to_str(), rv.to_str())), _ => Value::Num(lv.to_num() + rv.to_num()) },
                     BinOp::Sub => Value::Num(lv.to_num() - rv.to_num()),
                     BinOp::Mul => Value::Num(lv.to_num() * rv.to_num()),
                     BinOp::Div => { let d = rv.to_num(); Value::Num(if d == 0 { 0 } else { lv.to_num() / d }) }
