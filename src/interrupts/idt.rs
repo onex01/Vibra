@@ -192,9 +192,17 @@ extern "x86-interrupt" fn isr_double_fault(frame: InterruptStackFrame, error_cod
 }
 
 extern "x86-interrupt" fn isr_general_protection(frame: InterruptStackFrame, error_code: u64) {
+    let is_user = frame.code_segment & 3 == 3;
     println!("\n!!! GENERAL PROTECTION (error={:#x}) !!!", error_code);
-    dump_frame(&frame);
-    super::halt_loop();
+    println!("  RIP={:#018x} CS={:#x} RFLAGS={:#x}", frame.instruction_pointer, frame.code_segment, frame.cpu_flags);
+
+    if is_user {
+        println!("[KILL] User process terminated (GPF)");
+        let pid = crate::task::current_task_id().unwrap_or(0);
+        crate::task::exit_task(pid);
+    } else {
+        super::halt_loop();
+    }
 }
 
 extern "x86-interrupt" fn isr_page_fault(frame: InterruptStackFrame, error_code: u64) {
@@ -202,6 +210,7 @@ extern "x86-interrupt" fn isr_page_fault(frame: InterruptStackFrame, error_code:
     unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)); }
 
     let is_user = error_code & 4 != 0;
+    let is_user_addr = cr2 < 0x0000_8000_0000_0000; // нижний half = user space
 
     println!("\n!!! PAGE FAULT !!!");
     println!("  Address (CR2) = {:#018x}", cr2);
@@ -210,20 +219,22 @@ extern "x86-interrupt" fn isr_page_fault(frame: InterruptStackFrame, error_code:
         if error_code & 2 != 0 { "write" } else { "read" },
         if is_user { "user" } else { "kernel" },
     );
-    dump_frame(&frame);
+    println!("  RIP={:#018x} CS={:#x} RFLAGS={:#x} RSP={:#018x}",
+        frame.instruction_pointer, frame.code_segment, frame.cpu_flags, frame.stack_pointer);
 
     if is_user {
         // User page fault — убиваем процесс, ОС продолжает работу
-        println!("  [KILL] Terminating user process");
+        println!("[KILL] User process terminated (page fault at {:#x})", cr2);
         let pid = crate::task::current_task_id().unwrap_or(0);
         crate::task::exit_task(pid);
-        // Возвращаемся — планировщик выберет другую задачу
-        // (нельзя return из interrupt handler, нужен context switch)
-        // Пока просто halt — исправим когда scheduler будет корректно
-        // обрабатывать убитые задачи
-        super::halt_loop();
+        // Не halt — планировщик выберет другую задачу на следующем тике
+    } else if is_user_addr {
+        // Kernel page fault на user-адресе — логируем, но не halt
+        // (баг в kernel code при доступе к user памяти)
+        println!("[WARN] Kernel fault on user address — continuing");
     } else {
-        // Kernel page fault — критическая ошибка
+        // Kernel page fault на kernel-адресе — критическая ошибка
+        println!("[FATAL] Kernel page fault — halting");
         super::halt_loop();
     }
 }

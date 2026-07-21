@@ -102,6 +102,8 @@ unsafe extern "sysv64" fn syscall_dispatch(sysnum: u64, args_ptr: *const u64) ->
     let rsi = core::ptr::read_volatile(args_ptr.add(1));
     let rdx = core::ptr::read_volatile(args_ptr.add(2));
 
+    crate::println!("[SYSCALL] num={} rdi={} rsi={:#x} rdx={}", sysnum, rdi, rsi, rdx);
+
     match sysnum {
         SYS_WRITE => sys_write(rdi as usize, rsi as *const u8, rdx as usize),
         SYS_EXIT => {
@@ -144,6 +146,7 @@ pub fn init() {
         PERCPU.kernel_rsp = kstack_top;
         PERCPU.user_rsp = 0;
         PERCPU.user_rflags = 0x200; // IF=1
+        println!("[SYSCALL] PERCPU: kernel_rsp={:#x}, user_rsp={:#x}", kstack_top, 0u64);
         println!("[SYSCALL] syscall/sysret ready (LSTAR={:#x})", syscall_entry as u64);
     }
 }

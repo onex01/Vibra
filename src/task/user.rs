@@ -98,6 +98,8 @@ pub fn spawn_user_process(name: &str, code: &[u8]) {
             kstack_ptr,
             kstack_layout: core::alloc::Layout::from_size_align(KERNEL_STACK_SIZE, 16).unwrap(),
             kstack_top: Some(kstack_top),
+            user_rsp: stack_top,
+            user_rflags: 0x200, // IF=1
         });
         println!("[USER] User process '{}' spawned (PID={})", name, id);
     }

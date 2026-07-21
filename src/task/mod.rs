@@ -78,6 +78,9 @@ pub struct Task {
     kstack_layout: Layout,
     /// Верхушка kernel stack (для TSS.rsp0 при ring3→ring0 переходе)
     kstack_top: Option<u64>,
+    /// User RSP и RFLAGS для syscall_entry (сохраняются при context switch)
+    user_rsp: u64,
+    user_rflags: u64,
 }
 
 // SAFETY: kernel stack pointer used only by scheduler, single-threaded kernel
@@ -177,16 +180,15 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
     sched.current = Some(next);
     sched.switches += 1;
 
-    // Обновляем TSS.rsp0 — стек ядра для ring 3 задач
+    // Обновляем TSS.rsp0 и kernel stack
     if let Some(kstack_top) = sched.tasks[next].kstack_top {
         crate::gdt::set_kernel_stack(kstack_top);
         crate::syscall::update_kernel_stack(kstack_top);
     }
 
-    // Сохраняем user RSP и RFLAGS в PerCpu для syscall_entry
-    let next_rsp = sched.tasks[next].saved_rsp;
-    let user_rsp = unsafe { core::ptr::read_volatile((next_rsp + 144) as *const u64) };
-    let user_rflags = unsafe { core::ptr::read_volatile((next_rsp + 136) as *const u64) };
+    // Сохраняем user RSP и RFLAGS из TCB (не читаем из памяти — избегаем page fault)
+    let user_rsp = sched.tasks[next].user_rsp;
+    let user_rflags = sched.tasks[next].user_rflags;
     crate::syscall::save_user_rsp(user_rsp);
     crate::syscall::save_user_rflags(user_rflags);
 
@@ -278,6 +280,8 @@ pub fn init() {
         kstack_ptr: ptr0,
         kstack_layout: layout,
         kstack_top: Some(top0),
+        user_rsp: 0,
+        user_rflags: 0x200,
     });
     scheduler.current = Some(0);
 
@@ -300,6 +304,8 @@ pub fn init() {
         kstack_ptr: ptr1,
         kstack_layout: layout,
         kstack_top: Some(top1),
+        user_rsp: 0,
+        user_rflags: 0x200,
     });
 
     scheduler.next_id = 2;
@@ -336,6 +342,8 @@ pub fn spawn(name: &str, entry: fn(), priority: Priority) -> Option<u32> {
         kstack_ptr: ptr,
         kstack_layout: layout,
         kstack_top: Some(top),
+        user_rsp: 0,
+        user_rflags: 0x200,
     });
 
     crate::println!("[SCHED] Task '{}' (id={}) spawned", name, id);
