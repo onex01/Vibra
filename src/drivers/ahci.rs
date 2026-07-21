@@ -406,3 +406,77 @@ pub fn active_port_count() -> usize {
 pub fn first_port() -> Option<u32> {
     AHCI_PORTS.lock().iter().find(|p| p.active).map(|p| p.num)
 }
+
+/// Записать секторы на диск через AHCI
+pub fn write_sectors(port_num: u32, lba: u64, count: u16, buffer: &[u8]) -> bool {
+    unsafe {
+        // Ждём пока порт свободен
+        let mut timeout = 500_000u32;
+        while port_read32(port_num, PORT_TFD) as u8 & (TFD_BSY | TFD_DRQ) != 0 && timeout > 0 {
+            timeout -= 1;
+        }
+        if timeout == 0 { return false; }
+
+        // Clear error
+        port_write32(port_num, PORT_IS, 0xFFFFFFFF);
+
+        // Command List
+        let cmd_list_phys = port_read32(port_num, PORT_CLB) as u64
+            | ((port_read32(port_num, PORT_CLB + 4) as u64) << 32);
+        let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
+        let cmd_list = (hhdm + cmd_list_phys) as *mut CommandHeader;
+        let cmd = &mut *cmd_list;
+
+        // Command Table
+        let ct_layout = core::alloc::Layout::from_size_align(256, 256).unwrap();
+        let ct_ptr = alloc::alloc::alloc_zeroed(ct_layout);
+        if ct_ptr.is_null() { return false; }
+        let ct_phys = virt_to_phys(ct_ptr as u64);
+
+        // FIS — WRITE DMA EXT
+        let fis = ct_ptr as *mut FisRegH2d;
+        (*fis).fis_type = FIS_TYPE_REG_H2D;
+        (*fis).command = ATA_CMD_WRITE_DMA_EXT;
+        (*fis).device = (1 << 6) | ((lba >> 24) & 0x0F) as u8;
+        (*fis).lba_low = lba as u8;
+        (*fis).lba_mid = (lba >> 8) as u8;
+        (*fis).lba_high = (lba >> 16) as u8;
+        (*fis).lba_low_exp = (lba >> 24) as u8;
+        (*fis).lba_mid_exp = (lba >> 32) as u8;
+        (*fis).lba_high_exp = (lba >> 40) as u8;
+        (*fis).sector_count_lo = (count & 0xFF) as u8;
+        (*fis).sector_count_hi = ((count >> 8) & 0xFF) as u8;
+
+        // PRD entry
+        let buf_phys = virt_to_phys(buffer.as_ptr() as u64);
+        let prd = (ct_ptr as *mut u8).add(128) as *mut PrdEntry;
+        (*prd).base_addr = buf_phys as u32;
+        (*prd).byte_count = (buffer.len() as u32) | (1 << 31);
+
+        // Command Header
+        cmd.cfl = 5;
+        cmd.c = 1;
+        cmd.prdtl = 1;
+        cmd.prdbc = 0;
+        cmd.command_table_base = ct_phys;
+
+        // Command Issue
+        port_write32(port_num, PORT_CI, 1);
+
+        // Wait
+        timeout = 5_000_000;
+        while port_read32(port_num, PORT_CI) & 1 != 0 && timeout > 0 {
+            timeout -= 1;
+        }
+
+        alloc::alloc::dealloc(ct_ptr, ct_layout);
+
+        if timeout == 0 { return false; }
+        let is = port_read32(port_num, PORT_IS);
+        if is & 1 != 0 {
+            port_write32(port_num, PORT_IS, 0xFFFFFFFF);
+            return false;
+        }
+        true
+    }
+}
