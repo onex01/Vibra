@@ -10,15 +10,15 @@
 // - COM1 serial
 
 pub mod interrupts {
-    pub use crate::interrupts::*;
+    pub 
 }
 
 pub mod memory {
-    pub use crate::memory::*;
+    pub 
 }
 
 pub mod task {
-    pub use crate::task::ctx_switch;
+    pub 
 }
 
 /// Инициализация x86-specific модулей

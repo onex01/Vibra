@@ -1,8 +1,6 @@
 // CPU info — чтение информации о процессоре через CPUID.
 
 use core::arch::asm;
-use alloc::format;
-use alloc::string::String;
 
 pub struct CpuInfo {
     pub brand: [u8; 48],

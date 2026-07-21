@@ -2,7 +2,7 @@ use super::CmdResult;
 use crate::framebuffer::{Console, COLOR_GREEN, COLOR_YELLOW, COLOR_CYAN};
 use crate::fs;
 use alloc::string::String;
-use alloc::vec::Vec;
+
 use alloc::format;
 
 pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
