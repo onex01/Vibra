@@ -157,8 +157,11 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
         None => return ctx_ptr,
     };
 
+    // Сохраняем контекст текущей задачи (но не меняем состояние если Zombie)
+    if sched.tasks[cur].state != TaskState::Zombie {
+        sched.tasks[cur].state = TaskState::Ready;
+    }
     sched.tasks[cur].saved_rsp = ctx_ptr;
-    sched.tasks[cur].state = TaskState::Ready;
     sched.tasks[cur].time_slices += 1;
 
     // Round-robin

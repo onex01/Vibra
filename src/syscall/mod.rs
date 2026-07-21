@@ -92,7 +92,11 @@ unsafe extern "sysv64" fn syscall_dispatch(sysnum: u64, args_ptr: *const u64) ->
         SYS_EXIT => {
             let pid = crate::task::current_task_id().unwrap_or(0);
             crate::task::exit_task(pid);
-            0
+            // Не возвращаемся — sysretq не произойдёт.
+            // Планировщик не выберет Zombie задачу на следующем тике.
+            loop {
+                unsafe { asm!("sti; hlt", options(nomem, nostack)); }
+            }
         }
         SYS_YIELD => {
             crate::task::yield_now();
