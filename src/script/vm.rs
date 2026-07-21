@@ -1,4 +1,3 @@
-use alloc::vec;
 use alloc::string::String;
 use alloc::format;
 use alloc::vec::Vec;
@@ -31,7 +30,7 @@ impl VM {
             Expr::BinOp(l, op, r) => {
                 let lv = self.eval(l); let rv = self.eval(r);
                 match op {
-                    BinOp::Add => match (&lv, &rv) { (Value::Str(_), _) | (_, Value::Str(_)) => Value::Str(format!("{}{}", lv.to_str(), rv.to_str())), _ => Value::Num(lv.to_num() + rv.to_num()) },
+                    BinOp::Add => match (&lv, &rv) { (Value::Str(a), Value::Str(b)) => Value::Str(format!("{}{}", a, b)), _ => Value::Num(lv.to_num() + rv.to_num()) },
                     BinOp::Sub => Value::Num(lv.to_num() - rv.to_num()),
                     BinOp::Mul => Value::Num(lv.to_num() * rv.to_num()),
                     BinOp::Div => { let d = rv.to_num(); Value::Num(if d == 0 { 0 } else { lv.to_num() / d }) }
@@ -69,9 +68,8 @@ impl VM {
             Stmt::VarDecl(name, expr) => { let v = self.eval(expr); self.set_var(name, v); Ok(()) }
             Stmt::Assign(name, expr) => { let v = self.eval(expr); self.set_var(name, v); Ok(()) }
             Stmt::Print(exprs) => {
-                let strs: Vec<String> = exprs.iter().map(|e| self.eval(e).to_str()).collect();
                 let mut first = true;
-                for s in &strs { if !first { self.print(" "); } self.print(s); first = false; }
+                let strs: Vec<String> = exprs.iter().map(|e| self.eval(e).to_str()).collect(); let mut first = true; for s in &strs { if !first { self.print(" "); } self.print(s); first = false; }
                 self.println(""); Ok(())
             }
             Stmt::If { cond, then_body, else_body } => {
@@ -83,67 +81,9 @@ impl VM {
                 while self.eval(cond).to_num() != 0 { for s in body { self.exec(s)?; } }
                 Ok(())
             }
-            Stmt::For { var, start, end, body } => {
-                let s = self.eval(start).to_num();
-                let e = self.eval(end).to_num();
-                if s <= e {
-                    let mut i = s;
-                    while i <= e {
-                        self.set_var(var, Value::Num(i));
-                        for stmt in body { self.exec(stmt)?; }
-                        i += 1;
-                    }
-                } else {
-                    let mut i = s;
-                    while i >= e {
-                        self.set_var(var, Value::Num(i));
-                        for stmt in body { self.exec(stmt)?; }
-                        i -= 1;
-                    }
-                }
-                Ok(())
-            }
-            Stmt::Input(var_name) => {
-                self.print("> ");
-                // Читаем строку через serial polling
-                let mut line = [0u8; 128];
-                let mut len = 0usize;
-                loop {
-                    if let Some(key) = crate::serial::poll_key() {
-                        match key {
-                            crate::keyboard::Key::Enter => break,
-                            crate::keyboard::Key::Backspace => {
-                                if len > 0 { len -= 1; self.print("\x08 \x08"); }
-                            }
-                            crate::keyboard::Key::Char(ch) => {
-                                if len < line.len() {
-                                    line[len] = ch as u8;
-                                    len += 1;
-                                    self.print(&alloc::string::String::from(ch));
-                                }
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        crate::task::yield_now();
-                    }
-                }
-                self.println("");
-                if let Ok(s) = core::str::from_utf8(&line[..len]) {
-                    // Пытаемся распознать как число
-                    if let Ok(n) = s.trim().parse::<i64>() {
-                        self.set_var(var_name, Value::Num(n));
-                    } else {
-                        self.set_var(var_name, Value::Str(alloc::string::String::from(s.trim())));
-                    }
-                }
-                Ok(())
-            }
             Stmt::Beep(expr) => { let f = self.eval(expr).to_num() as u32; crate::devices::pc_speaker::beep(f); Ok(()) }
             Stmt::Sleep(expr) => {
-                let ms = self.eval(expr).to_num() as u64;
-                // Конвертируем миллисекунды в тики (100 Гц = 10мс/тик)
-                let ticks = (ms + 9) / 10; // округляем вверх
+                let ticks = self.eval(expr).to_num() as u64;
                 crate::task::sleep_task(crate::task::current_task_id().unwrap_or(0), ticks);
                 crate::task::yield_now();
                 Ok(())

@@ -75,26 +75,6 @@ pub fn init_filesystem() {
         }
     }
 
-    // Demo скрипты для Vibra Script
-    let _ = ramfs.mkdir("/home");
-    let _ = ramfs.mkdir("/home/root");
-    let _ = ramfs.mkdir("/home/root/vs-demo");
-    let demos: [(&str, &[u8]); 3] = [
-        ("/home/root/vs-demo/snake.vs",
-         b"# Vibra Snake\nprint \"=== VIBRA SNAKE ===\"\nvar w=40 var h=15\nvar hx=20 var hy=7 var dx=1 var dy=0\nvar fx=10 var fy=5 var score=0 var frames=0 var max=30\nwhile frames<max {\nvar y=0\nwhile y<h {\nvar line=\"\" var x=0\nwhile x<w {\nif x==hx && y==hy {line=line+\"@\"}\nelse if x==fx && y==fy {line=line+\"#\"}\nelse if y==0 || y==h-1 {line=line+\"-\"}\nelse if x==0 || x==w-1 {line=line+\"|\"}\nelse {line=line+\" \"}\nx=x+1}\nprint line\ny=y+1}\nprint \"Score:\"+score+\" Frame:\"+frames\nhx=hx+dx hy=hy+dy\nif hx<=0 || hx>=w-1 {print \"Game Over!\" beep 200 500 frames=max}\nif hy<=0 || hy>=h-1 {print \"Game Over!\" beep 200 500 frames=max}\nif hx==fx && hy==fy {score=score+10 beep 880 100 fx=(frames*7+3)%(w-2)+1 fy=(frames*11+5)%(h-2)+1}\nif frames%3==0 {var t=dx dx=dy dy=t}\nframes=frames+1}\nprint \"Final Score:\"+score"),
-        ("/home/root/vs-demo/calc.vs",
-         b"# Vibra Calculator\nprint \"=== CALCULATOR ===\"\nvar a=10 var b=3\nprint a+\" + \"+b+\" = \"+(a+b)\nprint a+\" - \"+b+\" = \"+(a-b)\nprint a+\" * \"+b+\" = \"+(a*b)\nprint a+\" / \"+b+\" = \"+(a/b)\nprint a+\" % \"+b+\" = \"+(a%b)"),
-        ("/home/root/vs-demo/demo.vs",
-         b"# Vibra Demo\nprint \"=== VIBRA OS DEMO ===\"\nprint \"Version: 0.7.0 Rigel\"\nprint \"Kernel: 0.7.0 Photon\"\nprint \"\"\nfor i=1 to 5 {print \"Count: \"+i}\nprint \"\"\nprint \"Beep test:\"\nbeep 440 200\nsleep 300\nbeep 880 200\nsleep 300\nbeep 0"),
-    ];
-
-    for (path, data) in &demos {
-        let _ = ramfs.remove(path);
-        if let Ok(_) = ramfs.create(path) {
-            let _ = ramfs.write_data(path, data);
-        }
-    }
-
     // Инициализируем виртуальные ФС и монтируем в VFS
     let vfs = &VFS_MANAGER;
 
@@ -184,11 +164,11 @@ pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
     // Сначала пробуем VFS (включая procfs/sysfs/devtmpfs)
     if let Ok(mut file) = vfs_open(name) {
         let size = file.size();
+        let mut buf = alloc::vec![0u8; size];
         if size > 0 {
-            let mut buf = alloc::vec![0u8; size];
             file.read(&mut buf)?;
-            return Ok(buf);
         }
+        return Ok(buf);
     }
 
     // Fallback: legacy RamFS
@@ -207,8 +187,8 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<(), FsError> {
     let mut ramfs = LEGACY_RAMFS.lock();
     let path = combine_path(&get_current_dir(), name);
     let _ = ramfs.remove(&path); // Перезаписываем
-    ramfs.create(&path)?;
-    ramfs.write_data(&path, data)?;
+    let mut file = ramfs.create(&path)?;
+    file.write(data)?;
     Ok(())
 }
 

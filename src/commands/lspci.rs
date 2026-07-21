@@ -33,9 +33,8 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
                         _ => "Other",
                     };
 
-                    let line = format!("  {:02X}:{:02X}.{}  {:04X}:{:04X}  {}\n",
-                        bus, dev, func, vendor, device, name);
-                    console.print(&line);
+                    console.print_colored(&format!("  {:02X}:{:02X}.{}  {:04X}  {:04X}  {}\n",
+                        bus, dev, func, vendor, device, name), COLOR_YELLOW);
 
                     if func == 0 && hdr & 0x80 == 0 { break; }
                 }

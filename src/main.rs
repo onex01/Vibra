@@ -23,7 +23,6 @@ mod users;
 mod cpu_info;
 mod drivers;
 mod syscall;
-mod script;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
@@ -300,10 +299,10 @@ pub extern "C" fn _start() -> ! {
         if trimmed.is_empty() { continue; }
 
         // Парсим команду и аргументы
-        let mut parts: [&str; 64] = [""; 64];
+        let mut parts: [&str; 16] = [""; 16];
         let mut n_parts = 0usize;
         for p in trimmed.split_whitespace() {
-            if n_parts < 64 { parts[n_parts] = p; n_parts += 1; }
+            if n_parts < 16 { parts[n_parts] = p; n_parts += 1; }
         }
 
         if n_parts == 0 { continue; }

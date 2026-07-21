@@ -37,9 +37,6 @@ pub mod hostname;
 pub mod date;
 pub mod lspci;
 pub mod usertest;
-pub mod kill;
-pub mod run;
-pub mod beep;
 pub mod apic;
 
 use crate::framebuffer::Console;
@@ -99,9 +96,6 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "apic",    help: "APIC management/status",    func: apic::run },
     Command { name: "lspci",   help: "list PCI devices",          func: lspci::run },
     Command { name: "usertest", help: "run user-space process",  func: usertest::run },
-    Command { name: "kill",    help: "kill a process by PID",   func: kill::run },
-    Command { name: "run",     help: "run a .vs script",        func: run::run },
-    Command { name: "beep",    help: "play sound via PC speaker", func: beep::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 
