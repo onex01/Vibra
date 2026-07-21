@@ -62,19 +62,18 @@
 - [x] Команда `ps` — PID, состояние, тики, переключения
 - [x] Команда `top` — uptime, tick counter, список задач
 
-### Фаза 3 — APIC вместо PIC (v0.7.5) — В ПРОЦЕССЕ:
-- [x] LAPIC: детект (CPUID.01h:EDX bit 9), MSR 0x1B enable, SVR=0x1FF, TPR=0
-- [x] IO APIC: все 24 IRQ замаскированы (безопасный старт)
-- [x] EOI в naked stub через `tick_and_switch()` — поддержка APIC+PIC
-- [x] `isr_lapic_timer` (vector 48) + `isr_serial` (vector 36) в IDT
-- [x] **Инкрементальный подход**: PIC остаётся для IRQ0/IRQ1, IO APIC только для serial
-- [x] **EOI smart**: `tick_and_switch` и `isr_keyboard` проверяют `APIC_ACTIVE` → PIC или LAPIC EOI
-- [x] **LAPIC timer калибровка**: через PIT channel 2 (polling), значение сохраняется
-- [x] **IO APIC redirect**: GSI4 → вектор 36 (serial) — работает, PIC не конфликтует
-- [x] **Команда `apic`**: status/timer/keyboard/full для ручной миграции
-- [ ] **Полная миграция IRQ0**: `apic timer` → mask PIC IRQ0 + IO APIC GSI0→v32 + start LAPIC timer
-- [ ] **Полная миграция IRQ1**: `apic keyboard` → mask PIC IRQ1 + IO APIC GSI1→v33
-- [ ] **Тест**: keyboard работает через IO APIC, timer через LAPIC, serial через IO APIC
+### Фаза 3 — APIC вместо PIC (v0.7.5) — КРИТИЧЕСКИЙ БЛОКЕР:
+- [x] LAPIC: детект (CPUID), MSR enable, SVR=0x1FF, TPR=0, LINT disabled
+- [x] IO APIC: детект, все 24 IRQ замаскированы
+- [x] APIC infrastructure: detect, EOI, IO APIC redirect API, LAPIC timer API
+- [x] HHDM-based MMIO: LAPIC/IO APIC через HHDM offset
+- [x] IDT: timer=v32 (PIC), kbd=v33 (PIC), softirq=v0x81, spurious v0xFF
+- [x] EOI smart: tick_and_switch и isr_keyboard проверяют APIC_ACTIVE
+- [x] Команда `apic` — show status
+- [ ] **БЛОКЕР: LAPIC MMIO writes ломают serial polling** — при apic::init() serial input перестаёт работать даже при PIC primary. Корневая причина: подозрение на QEMU q35 side effect при LAPIC MSR enable. apic::init() отключён.
+- [ ] LAPIC timer калибровка через PIT channel 2 — код написан, не тестится (блокер)
+- [ ] Полная миграция: IRQ0 → LAPIC timer(v48), IRQ1 → IO APIC GSI1(v33)
+- [ ] pic::mask_all() после полной миграции
 
 ### Фаза 4 — Ring 3 + syscall (v0.8.0):
 - [ ] syscall/sysret (GDT: USER_DS=0x1B, USER_CS=0x23, STAR[63:48]=0x13)
