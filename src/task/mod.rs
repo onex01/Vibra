@@ -103,6 +103,8 @@ pub struct Scheduler {
     quantum: u64,
     next_id: u32,
     switches: u64,
+    idle_ticks: u64,     // тики когда idle задача была активна
+    busy_ticks: u64,     // тики когда kshell или пользовательские задачи были активны
 }
 
 static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
@@ -125,6 +127,14 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
 
     sched.tick_count += 1;
     crate::interrupts::idt::TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+    // Подсчёт idle/busy тиков для расчёта загрузки CPU
+    let cur = sched.current.unwrap_or(0);
+    if sched.tasks[cur].name == "idle" {
+        sched.idle_ticks += 1;
+    } else {
+        sched.busy_ticks += 1;
+    }
 
     // EOI: PIC или LAPIC — зависит от того, кто управляет IRQ0
     // Если APIC полностью активен → LAPIC EOI, иначе → PIC EOI
@@ -268,6 +278,8 @@ pub fn init() {
         quantum: 4,
         next_id: 0,
         switches: 0,
+        idle_ticks: 0,
+        busy_ticks: 0,
     };
 
     // Задача 0 = kshell (текущий поток, Limine stack)
@@ -424,6 +436,14 @@ pub fn stats() -> (u64, u64, usize) {
     match *guard {
         Some(ref s) => (s.tick_count, s.switches, s.tasks.len()),
         None => (0, 0, 0),
+    }
+}
+
+pub fn cpu_load() -> (u64, u64) {
+    let guard = SCHEDULER.lock();
+    match *guard {
+        Some(ref s) => (s.busy_ticks, s.idle_ticks),
+        None => (0, 0),
     }
 }
 

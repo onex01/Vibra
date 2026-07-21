@@ -61,10 +61,10 @@ fn print_cpu_info(console: &mut Console) {
     console.print_num(ctx_sw as usize);
     console.put_char('\n');
 
-    // Load estimation: context switches relative to uptime
-    let switches_per_sec = if uptime_secs > 0 { ctx_sw / uptime_secs } else { 0 };
-    // Простая эвристика: 100 переключений/сек = ~1% загрузка (очень грубо)
-    let load_pct = if switches_per_sec > 100 { 100 } else { switches_per_sec as usize };
+    // CPU load: busy ticks / total ticks * 100
+    let (busy, idle) = crate::task::cpu_load();
+    let total = busy + idle;
+    let load_pct = if total > 0 { (busy * 100 / total) as usize } else { 0 };
 
     console.print_colored("│ ", COLOR_YELLOW);
     console.print_colored("Load:   ", COLOR_WHITE);
