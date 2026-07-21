@@ -1,3 +1,4 @@
+use alloc::vec;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
@@ -26,6 +27,8 @@ pub enum Stmt {
     Print(Vec<Expr>),
     If { cond: Expr, then_body: Vec<Stmt>, else_body: Vec<Stmt> },
     While { cond: Expr, body: Vec<Stmt> },
+    For { var: String, start: Expr, end: Expr, body: Vec<Stmt> },
+    Input(String),
     Beep(Expr),
     Sleep(Expr),
     Exit,
@@ -69,10 +72,23 @@ impl<'a> Parser<'a> {
             }
             Token::If => self.parse_if(),
             Token::While => self.parse_while(),
+            Token::For => self.parse_for(),
+            Token::Input => {
+                self.advance();
+                let prompt = match self.peek() {
+                    Token::Str(s) => { let s = s.clone(); self.advance(); s }
+                    _ => String::new(),
+                };
+                let var_name = match self.advance() {
+                    Token::Ident(n) => n,
+                    t => return Err(alloc::format!("Expected variable name after input, got {:?}", t)),
+                };
+                Ok(Stmt::Input(var_name))
+            }
             Token::Print => {
                 self.advance();
                 let mut args = Vec::new();
-                loop { match self.peek() { Token::Newline | Token::Eof | Token::Semicolon => break, _ => { args.push(self.expr()?); if self.peek() == Token::Comma { self.advance(); } } } }
+                loop { match self.peek() { Token::Newline | Token::Eof | Token::Semicolon | Token::RBrace => break, _ => { args.push(self.expr()?); if self.peek() == Token::Comma { self.advance(); } } } }
                 Ok(Stmt::Print(args))
             }
             Token::Beep => { self.advance(); Ok(Stmt::Beep(self.expr()?)) }
@@ -116,6 +132,33 @@ impl<'a> Parser<'a> {
         let mut body = Vec::new();
         loop { match self.peek() { Token::RBrace | Token::Eof => { self.advance(); break; }, Token::Newline | Token::Semicolon => { self.advance(); }, _ => body.push(self.stmt()?) } }
         Ok(Stmt::While { cond, body })
+    }
+
+    fn parse_for(&mut self) -> Result<Stmt, String> {
+        self.advance(); // for
+        let var_name = match self.advance() {
+            Token::Ident(n) => n,
+            t => return Err(alloc::format!("Expected variable name in for loop, got {:?}", t)),
+        };
+        self.expect(&Token::Assign)?;
+        let start = self.expr()?;
+        if self.peek() == Token::To || self.peek() == Token::Ident("until".into()) {
+            self.advance();
+        }
+        let end = self.expr()?;
+
+        // Пропускаем ; и { до тела
+        loop { match self.peek() { Token::Semicolon | Token::Newline => { self.advance(); }, _ => break } }
+
+        let body = if self.peek() == Token::LBrace {
+            self.advance();
+            let mut b = Vec::new();
+            loop { match self.peek() { Token::RBrace | Token::Eof => { self.advance(); break; }, Token::Newline | Token::Semicolon => { self.advance(); }, _ => b.push(self.stmt()?) } }
+            b
+        } else {
+            vec![self.stmt()?]
+        };
+        Ok(Stmt::For { var: var_name, start, end, body })
     }
 
     fn expr(&mut self) -> Result<Expr, String> {
