@@ -141,7 +141,9 @@ impl VM {
             }
             Stmt::Beep(expr) => { let f = self.eval(expr).to_num() as u32; crate::devices::pc_speaker::beep(f); Ok(()) }
             Stmt::Sleep(expr) => {
-                let ticks = self.eval(expr).to_num() as u64;
+                let ms = self.eval(expr).to_num() as u64;
+                // Конвертируем миллисекунды в тики (100 Гц = 10мс/тик)
+                let ticks = (ms + 9) / 10; // округляем вверх
                 crate::task::sleep_task(crate::task::current_task_id().unwrap_or(0), ticks);
                 crate::task::yield_now();
                 Ok(())

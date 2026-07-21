@@ -164,11 +164,11 @@ pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
     // Сначала пробуем VFS (включая procfs/sysfs/devtmpfs)
     if let Ok(mut file) = vfs_open(name) {
         let size = file.size();
-        let mut buf = alloc::vec![0u8; size];
         if size > 0 {
+            let mut buf = alloc::vec![0u8; size];
             file.read(&mut buf)?;
+            return Ok(buf);
         }
-        return Ok(buf);
     }
 
     // Fallback: legacy RamFS
@@ -187,8 +187,8 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<(), FsError> {
     let mut ramfs = LEGACY_RAMFS.lock();
     let path = combine_path(&get_current_dir(), name);
     let _ = ramfs.remove(&path); // Перезаписываем
-    let mut file = ramfs.create(&path)?;
-    file.write(data)?;
+    ramfs.create(&path)?;
+    ramfs.write_data(&path, data)?;
     Ok(())
 }
 

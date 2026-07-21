@@ -11,7 +11,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     }
 
     let freq: u32 = args[0].parse().unwrap_or(0);
-    let duration: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200);
+    let duration_ms: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200);
 
     if freq == 0 {
         crate::devices::pc_speaker::silent();
@@ -21,12 +21,14 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("Playing ");
         console.print_num(freq as usize);
         console.print(" Hz for ");
-        console.print_num(duration as usize);
+        console.print_num(duration_ms as usize);
         console.print("ms\n");
 
-        // Busy-wait delay
-        let iterations = duration as u64 * 50_000;
-        for _ in 0..iterations {
+        // Точная задержка через scheduler (1 тик = 10мс)
+        let ticks = (duration_ms + 9) / 10;
+        let current = crate::task::current_task_id().unwrap_or(0);
+        let deadline = crate::interrupts::idt::TICKS.load(core::sync::atomic::Ordering::Relaxed) + ticks;
+        while crate::interrupts::idt::TICKS.load(core::sync::atomic::Ordering::Relaxed) < deadline {
             core::hint::spin_loop();
         }
         crate::devices::pc_speaker::silent();
