@@ -87,3 +87,21 @@ pub unsafe fn mask_irq1() {
     let mask = inb(PIC1_DATA) | 0x02; // Бит 1 = IRQ1
     outb(PIC1_DATA, mask);
 }
+
+/// Замаскировать только IRQ0 (таймер) — IRQ1 (клавиатура) остаётся
+pub unsafe fn mask_irq0() {
+    let mask = inb(PIC1_DATA) | 0x01; // Бит 0 = IRQ0
+    outb(PIC1_DATA, mask);
+}
+
+/// Размаскировать IRQ0 (таймер)
+pub unsafe fn unmask_irq0() {
+    let mask = inb(PIC1_DATA) & !0x01; // Бит 0 = IRQ0
+    outb(PIC1_DATA, mask);
+}
+
+/// Размаскировать IRQ1 (клавиатура)
+pub unsafe fn unmask_irq1() {
+    let mask = inb(PIC1_DATA) & !0x02; // Бит 1 = IRQ1
+    outb(PIC1_DATA, mask);
+}

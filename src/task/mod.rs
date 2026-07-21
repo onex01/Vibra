@@ -119,13 +119,12 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
 
     sched.tick_count += 1;
 
-    // EOI
-    unsafe {
-        if crate::interrupts::apic::is_active() {
-            crate::interrupts::apic::eoi();
-        } else {
-            crate::interrupts::pic::eoi(0);
-        }
+    // EOI: PIC или LAPIC — зависит от того, кто управляет IRQ0
+    // Если APIC полностью активен → LAPIC EOI, иначе → PIC EOI
+    if crate::interrupts::apic::is_active() {
+        crate::interrupts::apic::eoi();
+    } else {
+        unsafe { crate::interrupts::pic::eoi(0); }
     }
 
     // Пробуждаем спящие

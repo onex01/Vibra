@@ -206,20 +206,16 @@ pub extern "C" fn _start() -> ! {
     // GDT и IDT строим ПОСЛЕ переключения page tables
     gdt::init();
     interrupts::init();
+
+    // APIC: LAPIC init + IO APIC masked (PIC остаётся primary).
+    // Пока отключено — серийный ввод ломается при LAPIC MMIO writes.
+    // TODO: выяснить почему LAPIC MMIO ломает serial polling.
+    // crate::interrupts::apic::init();
+
     interrupts::enable();
 
-    // Raw marker: пишем 'A' через port I/O сразу после sti
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'A', options(nostack, preserves_flags));
-    }
-
-    // Повторная инициализация PS/2 после PIC remap
+    // Повторная инициализация PS/2 после APIC takeover (IO APIC для IRQ1)
     crate::keyboard::post_init();
-
-    // Raw marker: пишем 'B' через port I/O после post_init
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'B', options(nostack, preserves_flags));
-    }
 
     println!("[DEBUG] Interrupts enabled, continuing boot...");
     println!("[DEBUG] About to draw ASCII art...");

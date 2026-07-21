@@ -35,6 +35,7 @@ pub mod ps;
 pub mod chmod;
 pub mod hostname;
 pub mod date;
+pub mod apic;
 
 use crate::framebuffer::Console;
 
@@ -90,6 +91,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "chmod",    help: "change file permissions",   func: chmod::run },
     Command { name: "hostname", help: "show/set system hostname",  func: hostname::run },
     Command { name: "date",     help: "show current time",        func: date::run },
+    Command { name: "apic",    help: "APIC management/status",    func: apic::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 

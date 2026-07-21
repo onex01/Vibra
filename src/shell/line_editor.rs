@@ -40,8 +40,6 @@ impl LineEditor {
         self.history_idx = self.history_count;
         self.prompt_len = prompt_len;
         loop {
-            // Сначала PS/2 (нажатия в окне QEMU), затем COM1. Serial driver
-            // работает polling-ом; PIT будит цикл максимум через 10 мс.
             let next_key = keyboard::poll_key().or_else(crate::serial::poll_key);
             if let Some(key) = next_key {
                 match key {

@@ -3,7 +3,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 use super::pic;
 
-// Частота системного таймера (PIT), Гц
+// Частота системного таймера (legacy PIT), Гц — используется только для калибровки
 pub const TIMER_HZ: u64 = 100;
 
 #[repr(C)]
@@ -90,32 +90,28 @@ pub fn init() {
         println!("[IDT] Setting up IDT...");
 
         // Исключения CPU.
-        // ВАЖНО: обработчики используют ABI "x86-interrupt" — компилятор сам
-        // сохраняет регистры и завершает обработчик через iretq.
         IDT[0].set_handler(isr_divide_by_zero as *const () as u64);
         IDT[2].set_handler_with_ist(isr_nmi as *const () as u64, crate::gdt::NMI_IST_INDEX);
         IDT[6].set_handler(isr_invalid_opcode as *const () as u64);
-        // Double Fault на отдельном IST-стеке: сработает даже если RSP битый
         IDT[8].set_handler_with_ist(isr_double_fault as *const () as u64, crate::gdt::DOUBLE_FAULT_IST_INDEX);
         IDT[13].set_handler(isr_general_protection as *const () as u64);
         IDT[14].set_handler(isr_page_fault as *const () as u64);
 
-        // Аппаратные прерывания
-        // Timer (IRQ0) — naked stub для context switch (вектор 32)
+        // === Hardware IRQs (PIC primary + APIC ready) ===
+        // Vector 32: PIC PIT timer (naked stub для context switch)
         IDT[pic::PIC1_OFFSET as usize + 0].set_handler(
             crate::task::ctx_switch::timer_naked_stub as *const () as u64);
-        // Keyboard (IRQ1) — обычный x86-interrupt
+        // Vector 33: PIC keyboard
         IDT[pic::PIC1_OFFSET as usize + 1].set_handler(isr_keyboard as *const () as u64);
         // Spurious
         IDT[pic::PIC1_OFFSET as usize + 7].set_handler(isr_spurious_master as *const () as u64);
         IDT[pic::PIC2_OFFSET as usize + 7].set_handler(isr_spurious_slave as *const () as u64);
 
-        // Soft IRQ (vector 0x81) — yield/exit без EOI
+        // Vector 0x81: Soft IRQ (yield/exit)
         IDT[0x81].set_handler(crate::task::ctx_switch::softirq_naked_stub as *const () as u64);
 
-        // APIC vectors
-        IDT[48].set_handler(isr_lapic_timer as *const () as u64);  // LAPIC timer
-        IDT[36].set_handler(isr_serial as *const () as u64);       // Serial (IRQ4 via IO APIC)
+        // LAPIC spurious (0xFF)
+        IDT[0xFF].set_handler(isr_lapic_spurious as *const () as u64);
 
         let idt_ptr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -125,7 +121,7 @@ pub fn init() {
         asm!("lidt [{}]", in(reg) &idt_ptr, options(readonly, nostack));
 
         init_pit();
-        println!("[IDT] IDT loaded (PIC + APIC vectors)");
+        println!("[IDT] IDT loaded (PIC primary: timer=v32, kbd=v33)");
     }
 }
 
@@ -133,53 +129,32 @@ pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-// ============ Аппаратные прерывания ============
-
-extern "x86-interrupt" fn isr_timer(_frame: InterruptStackFrame) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
-    // EOI: APIC если активен, иначе PIC
-    if crate::interrupts::apic::is_active() {
-        crate::interrupts::apic::eoi();
-    } else {
-        unsafe { pic::eoi(0); }
-    }
-}
+// ============ Hardware IRQ handlers (APIC mode) ============
 
 extern "x86-interrupt" fn isr_keyboard(_frame: InterruptStackFrame) {
-    // Скан-код нужно прочитать обязательно, иначе контроллер
-    // не выдаст следующее прерывание
     let scancode = unsafe { inb(0x60) };
     crate::keyboard::handle_interrupt(scancode);
-    // EOI: APIC если активен, иначе PIC
+    // EOI: PIC или LAPIC — зависит от того, кто управляет IRQ1
     if crate::interrupts::apic::is_active() {
         crate::interrupts::apic::eoi();
     } else {
-        unsafe { pic::eoi(1); }
+        unsafe { crate::interrupts::pic::eoi(1); }
     }
-}
-
-// APIC timer handler (vector 48)
-extern "x86-interrupt" fn isr_lapic_timer(_frame: InterruptStackFrame) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
-    // EOI в LAPIC
-    crate::interrupts::apic::eoi();
 }
 
 // Serial port handler (IRQ4 via IO APIC, vector 36)
 extern "x86-interrupt" fn isr_serial(_frame: InterruptStackFrame) {
-    // Читаем данные из serial port
     let _data = unsafe { inb(0x3F8) };
-    // EOI в LAPIC
+    // Serial идёт через IO APIC → LAPIC EOI
     crate::interrupts::apic::eoi();
 }
 
-// Ложное (spurious) IRQ7: EOI отправлять НЕ нужно
+// Spurious: EOI НЕ отправляем
 extern "x86-interrupt" fn isr_spurious_master(_frame: InterruptStackFrame) {}
+extern "x86-interrupt" fn isr_spurious_slave(_frame: InterruptStackFrame) {}
 
-// Ложное IRQ15: EOI только мастеру (он видел каскад IRQ2)
-extern "x86-interrupt" fn isr_spurious_slave(_frame: InterruptStackFrame) {
-    unsafe { pic::eoi(0); }
-}
+// LAPIC spurious (vector 0xFF) — не требует EOI, просто iretq
+extern "x86-interrupt" fn isr_lapic_spurious(_frame: InterruptStackFrame) {}
 
 // ============ Исключения CPU ============
 
