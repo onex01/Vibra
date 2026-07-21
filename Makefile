@@ -25,7 +25,7 @@ endif
 QEMU_FLAGS := -m 256M -serial stdio -monitor none -drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
               -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35
 
-.PHONY: all build run clean setup install-kernel
+.PHONY: all build run clean setup install-kernel iso run-iso
 
 all: run
 
@@ -102,3 +102,47 @@ run: build
 clean:
 	$(CARGO) clean
 	rm -rf $(BUILD_DIR) $(LIMINE_DIR) OVMF.fd limine-binary.tar.xz
+
+# === ISO image для реального железа ===
+# Собирает ISO с Limine (BIOS + UEFI), ядром и конфигом.
+# Записывается на USB/CD-R для запуска на реальном PC.
+
+iso: build
+	@echo "==> Creating ISO image..."
+	@mkdir -p $(BUILD_DIR)/iso_root/limine
+	@mkdir -p $(BUILD_DIR)/iso_root/EFI/BOOT
+
+	@echo "==> Copying kernel to ISO root..."
+	@cp target/$(TARGET)/debug/$(KERNEL_NAME) $(BUILD_DIR)/iso_root/kernel.elf
+
+	@echo "==> Copying Limine config..."
+	@cp limine.conf $(BUILD_DIR)/iso_root/limine/
+
+	@echo "==> Copying Limine UEFI bootloader..."
+	@cp $(LIMINE_DIR)/BOOTX64.EFI $(BUILD_DIR)/iso_root/EFI/BOOT/
+
+	@echo "==> Copying Limine BIOS + CD boot files..."
+	@cp $(LIMINE_DIR)/limine-bios-cd.bin $(BUILD_DIR)/iso_root/limine/
+	@cp $(LIMINE_DIR)/limine-uefi-cd.bin $(BUILD_DIR)/iso_root/limine/
+	@cp $(LIMINE_DIR)/limine-bios.sys $(BUILD_DIR)/iso_root/limine/ || true
+
+	@echo "==> Creating bootable ISO with xorriso..."
+	xorriso -as mkisofs \
+		-b limine/limine-bios-cd.bin \
+		-no-emul-boot \
+		-boot-load-size 4 \
+		-boot-info-table \
+		--efi-boot limine/limine-uefi-cd.bin \
+		-o $(BUILD_DIR)/vibra.iso \
+		$(BUILD_DIR)/iso_root
+
+	@echo "==> ISO image created: $(BUILD_DIR)/vibra.iso"
+	@ls -lh $(BUILD_DIR)/vibra.iso
+	@echo "==> Flash to USB: sudo dd if=$(BUILD_DIR)/vibra.iso of=/dev/sdX bs=4M status=progress"
+
+run-iso: iso
+	@echo "==> Starting QEMU with ISO..."
+	$(QEMU) -m 512M -serial stdio -monitor none \
+		-cdrom $(BUILD_DIR)/vibra.iso \
+		-drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
+		-M q35 -display none

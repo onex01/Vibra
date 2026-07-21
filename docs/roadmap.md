@@ -50,6 +50,15 @@
 - [x] FAT32 драйвер (чтение/запись) — реальный BPB parse, cluster-chain, write_cluster/alloc_cluster
 - [x] Ext2 драйвер (чтение) — superblock/inode/dirent packed structs, direct blocks[0..12]
 - [x] VFS: procfs, sysfs, devtmpfs virtual filesystems
+
+### Фаза 1.2 — Hardware drivers (для реального железа):
+- [x] PCI enumeration — config space 0xCF8/0xCFC, bus scan, BAR/IRQ, lspci command
+- [x] AHCI/SATA driver — HBA init, port scan, ATA READ DMA EXT, FIS+PRD
+- [x] CPUID — brand string, core count, TSC frequency, asm cpuid wrapper
+- [ ] USB (XHCI/EHCI) — клавиатура/мышь для modern hardware
+- [ ] NVMe driver — быстрый доступ к SSD
+- [ ] AHCI write sectors — ATA WRITE DMA EXT
+- [ ] AHCI → VFS integration — boot from SATA disk
 - [x] Shell команды используют VFS API
 
 ### Фаза 2 — Вытесняющий планировщик (v0.7.0):
@@ -117,4 +126,9 @@
 
 - [ ] Собственный компилятор (TCC для C или интерпретатор Lua)
 - [ ] IDE с подсветкой синтаксиса
-- [ ] Драйверы USB, SATA, GPU
+- [ ] USB (XHCI/EHCI) для реального железа
+- [ ] NVMe для современных SSD
+- [ ] AHCI write (запись на SATA диски)
+- [ ] AHCI/VirtIO → VFS integration (boot с диска)
+- [ ] Драйверы GPU (.basic framebuffer UEFI → VESA → DRM)
+- [ ] Сетевой стек TCP/IP через e1000/VirtIO-net
