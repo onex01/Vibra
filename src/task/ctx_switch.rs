@@ -196,3 +196,24 @@ pub unsafe fn prepare_task_stack(stack_top: u64, entry: u64) -> u64 {
     // saved_rsp = адрес r15 (нижний край контекста)
     stack_top - 160
 }
+
+/// Подготовить контекст для USER задачи (ring 3).
+/// Аналогичен prepare_task_stack, но CS/SS = user сегменты.
+/// user_rsp = адрес стека в user space для iretq frame.
+pub unsafe fn prepare_user_task_stack(stack_top: u64, entry: u64, user_rsp: u64) -> u64 {
+    let base = (stack_top - 160) as *mut u64;
+
+    // Все 15 GP регистров = 0
+    for i in 0..15 {
+        core::ptr::write_volatile(base.add(i), 0u64);
+    }
+
+    // iretq frame: CS=0x23 (USER_CS), SS=0x1B (USER_DS)
+    core::ptr::write_volatile(base.add(15), entry);          // RIP = code address
+    core::ptr::write_volatile(base.add(16), 0x23u64);       // CS = USER_CS (ring 3)
+    core::ptr::write_volatile(base.add(17), 0x202u64);      // RFLAGS (IF=1)
+    core::ptr::write_volatile(base.add(18), user_rsp);       // RSP = user stack
+    core::ptr::write_volatile(base.add(19), 0x1Bu64);       // SS = USER_DS (ring 3)
+
+    stack_top - 160
+}

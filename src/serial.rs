@@ -29,7 +29,7 @@ pub fn init() {
     }
 }
 
-fn write_byte(b: u8) {
+pub fn write_byte(b: u8) {
     unsafe {
         while (inb(LINE_STATUS) & TRANSMITTER_EMPTY) == 0 {
             core::hint::spin_loop();

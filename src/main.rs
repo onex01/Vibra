@@ -22,6 +22,7 @@ mod task;
 mod users;
 mod cpu_info;
 mod drivers;
+mod syscall;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
@@ -211,6 +212,9 @@ pub extern "C" fn _start() -> ! {
     // GDT и IDT строим ПОСЛЕ переключения page tables
     gdt::init();
     interrupts::init();
+
+    // syscall/sysret MSR setup (нужен после gdt::init, до sti)
+    syscall::init();
 
     // APIC: LAPIC init + IO APIC masked (PIC остаётся primary).
     // Пока отключено — серийный ввод ломается при LAPIC MMIO writes.

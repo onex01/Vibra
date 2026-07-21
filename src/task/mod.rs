@@ -6,6 +6,7 @@
 // Формат контекста — единый: 15 GP + iretq frame (5 слов) = 160 байт.
 
 pub mod ctx_switch;
+pub mod user;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -75,6 +76,8 @@ pub struct Task {
     /// Kernel stack pointer + layout для dealloc
     kstack_ptr: *mut u8,
     kstack_layout: Layout,
+    /// Верхушка kernel stack (для TSS.rsp0 при ring3→ring0 переходе)
+    kstack_top: Option<u64>,
 }
 
 // SAFETY: kernel stack pointer used only by scheduler, single-threaded kernel
@@ -173,6 +176,19 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
     sched.tasks[next].state = TaskState::Running;
     sched.current = Some(next);
     sched.switches += 1;
+
+    // Обновляем TSS.rsp0 — стек ядра для ring 3 задач
+    if let Some(kstack_top) = sched.tasks[next].kstack_top {
+        crate::gdt::set_kernel_stack(kstack_top);
+        crate::syscall::update_kernel_stack(kstack_top);
+    }
+
+    // Сохраняем user RSP в PerCpu для syscall_entry
+    // user RSP в iretq frame: saved_rsp + 144 (offset от r15)
+    let next_rsp = sched.tasks[next].saved_rsp;
+    let user_rsp = unsafe { core::ptr::read_volatile((next_rsp + 144) as *const u64) };
+    crate::syscall::save_user_rsp(user_rsp);
+
     sched.tasks[next].saved_rsp
 }
 
@@ -216,6 +232,11 @@ pub extern "sysv64" fn softirq_handler(ctx_ptr: u64) -> u64 {
     sched.tasks[next].state = TaskState::Running;
     sched.current = Some(next);
     sched.switches += 1;
+
+    if let Some(kstack_top) = sched.tasks[next].kstack_top {
+        crate::gdt::set_kernel_stack(kstack_top);
+    }
+
     sched.tasks[next].saved_rsp
 }
 
@@ -229,7 +250,7 @@ pub fn init() {
 
     // kstack0 не используется для kshell (текущий поток на Limine стеке),
     // но TCB требует поле — выделяем最小 стек, он не будет переключаться.
-    let (ptr0, _top0) = match alloc_kstack() {
+    let (ptr0, top0) = match alloc_kstack() {
         Some(v) => v,
         None => { crate::println!("[SCHED] FATAL: no memory for kstack0"); return; }
     };
@@ -255,6 +276,7 @@ pub fn init() {
         saved_rsp: 0,
         kstack_ptr: ptr0,
         kstack_layout: layout,
+        kstack_top: Some(top0),
     });
     scheduler.current = Some(0);
 
@@ -276,6 +298,7 @@ pub fn init() {
         saved_rsp: rsp1,
         kstack_ptr: ptr1,
         kstack_layout: layout,
+        kstack_top: Some(top1),
     });
 
     scheduler.next_id = 2;
@@ -311,6 +334,7 @@ pub fn spawn(name: &str, entry: fn(), priority: Priority) -> Option<u32> {
         saved_rsp: rsp,
         kstack_ptr: ptr,
         kstack_layout: layout,
+        kstack_top: Some(top),
     });
 
     crate::println!("[SCHED] Task '{}' (id={}) spawned", name, id);
@@ -402,5 +426,16 @@ pub fn current_task_id() -> Option<u32> {
 fn idle_task_entry() {
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+    }
+}
+
+/// Получить верхушку kernel stack текущей задачи (для TSS.rsp0 / syscall)
+pub fn get_kstack_top() -> Option<u64> {
+    let guard = SCHEDULER.lock();
+    match *guard {
+        Some(ref sched) => sched.current
+            .and_then(|i| sched.tasks.get(i))
+            .and_then(|t| t.kstack_top),
+        None => None,
     }
 }

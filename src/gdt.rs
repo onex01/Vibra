@@ -13,6 +13,8 @@ use core::arch::asm;
 
 pub const KERNEL_CS: u16 = 0x08;
 pub const KERNEL_DS: u16 = 0x10;
+pub const USER_DS: u16 = 0x1B;   // index 3 (0x18) | RPL 3
+pub const USER_CS: u16 = 0x23;   // index 4 (0x20) | RPL 3
 const TSS_SELECTOR: u16 = 0x28;
 
 // Индексы IST в TSS (1-based в записи IDT!)
@@ -135,5 +137,14 @@ pub fn init() {
         asm!("ltr {0:x}", in(reg) TSS_SELECTOR, options(nostack, preserves_flags));
 
         println!("[GDT] GDT loaded, TSS active (IST1=DF stack, IST2=NMI stack)");
+    }
+}
+
+/// Установить kernel stack для ring 0 (TSS.rsp[0]).
+/// Вызывается при переключении задач: чтобы при syscall/irq из ring 3
+/// CPU нашёл валидный стек ядра.
+pub fn set_kernel_stack(stack_top: u64) {
+    unsafe {
+        TSS.rsp[0] = stack_top;
     }
 }
