@@ -21,6 +21,7 @@ mod devices;
 mod task;
 mod users;
 mod cpu_info;
+mod drivers;
 
 use core::panic::PanicInfo;
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
@@ -126,6 +127,9 @@ pub extern "C" fn _start() -> ! {
     // Виртуальные устройства
     devices::init();
     devices::virtio_block::probe_devices();
+
+    // PCI + AHCI/SATA драйверы (для реального железа)
+    drivers::init();
     
     // Инициализация файловых систем
     fs::init_filesystem();
