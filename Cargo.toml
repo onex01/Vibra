@@ -1,3 +1,20 @@
-[workspace]
-members = ["vibra"]
-resolver = "2"
+[package]
+name = "vibra"
+version = "0.5.0"
+edition = "2021"
+
+[dependencies]
+limine = "0.6"
+spin = "0.9.8"
+
+[features]
+# В development-сборке shell доступен через COM1. Для образа без serial shell:
+# cargo build --release --no-default-features ...
+default = ["serial-debug"]
+serial-debug = []
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
