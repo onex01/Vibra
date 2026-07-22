@@ -103,6 +103,8 @@ pub fn init() {
             crate::task::ctx_switch::timer_naked_stub as *const () as u64);
         // Vector 33: PIC keyboard
         IDT[pic::PIC1_OFFSET as usize + 1].set_handler(isr_keyboard as *const () as u64);
+        // Vector 36: PIC serial (COM1 IRQ4)
+        IDT[pic::PIC1_OFFSET as usize + 4].set_handler(isr_serial as *const () as u64);
         // Spurious
         IDT[pic::PIC1_OFFSET as usize + 7].set_handler(isr_spurious_master as *const () as u64);
         IDT[pic::PIC2_OFFSET as usize + 7].set_handler(isr_spurious_slave as *const () as u64);

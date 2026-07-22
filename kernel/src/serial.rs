@@ -1,9 +1,21 @@
 use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use alloc::vec::Vec;
+use spin::Mutex;
 
 const COM1: u16 = 0x3F8;
 const LINE_STATUS: u16 = COM1 + 5;
 const TRANSMITTER_EMPTY: u8 = 0x20;
 const DATA_READY: u8 = 0x01;
+const RX_DATA: u16 = COM1; // Receive buffer register
+
+/// Ring buffer для serial input (IRQ4 driven)
+const SERIAL_BUF_SIZE: usize = 256;
+static SERIAL_BUF: Mutex<[u8; SERIAL_BUF_SIZE]> = Mutex::new([0u8; SERIAL_BUF_SIZE]);
+static SERIAL_HEAD: AtomicU16 = AtomicU16::new(0);
+static SERIAL_TAIL: AtomicU16 = AtomicU16::new(0);
+
+use core::sync::atomic::AtomicU16;
 
 #[inline]
 unsafe fn outb(port: u16, value: u8) {
@@ -19,20 +31,65 @@ unsafe fn inb(port: u16) -> u8 {
 
 pub fn init() {
     unsafe {
-        outb(COM1 + 1, 0x00); // выключить UART interrupts: читаем polling-ом
-        outb(COM1 + 3, 0x80); // DLAB
-        outb(COM1, 0x01);     // divisor low: 115200 baud
-        outb(COM1 + 1, 0x00); // divisor high
+        // Выключаем interrupts на время конфигурации
+        outb(COM1 + 1, 0x00);
+        // DLAB + divisor
+        outb(COM1 + 3, 0x80);
+        outb(COM1, 0x01);     // 115200 baud low
+        outb(COM1 + 1, 0x00); // high
         outb(COM1 + 3, 0x03); // 8N1
         outb(COM1 + 2, 0xC7); // FIFO enabled, clear, 14-byte threshold
         outb(COM1 + 4, 0x0B); // DTR + RTS + OUT2
+        // Включаем receive interrupt (bit 0 = RX data ready)
+        outb(COM1 + 1, 0x01);
     }
 }
 
-pub fn write_byte(b: u8) {
-    // Записываем в boot log буфер (всегда, даже до ФС)
-    crate::boot_log::log_byte(b);
+/// Вызывается из IRQ4 handler (isr_serial)
+pub fn handle_interrupt() {
+    unsafe {
+        while inb(LINE_STATUS) & DATA_READY != 0 {
+            let byte = inb(RX_DATA);
+            push_byte(byte);
+        }
+    }
+    // EOI
+    if crate::interrupts::apic::is_active() {
+        crate::interrupts::apic::eoi();
+    } else {
+        unsafe { crate::interrupts::pic::eoi(4); }
+    }
+}
 
+fn push_byte(b: u8) {
+    let head = SERIAL_HEAD.load(Ordering::Relaxed);
+    let tail = SERIAL_TAIL.load(Ordering::Relaxed);
+    let next = (head + 1) % SERIAL_BUF_SIZE as u16;
+    if next != tail {
+        let mut buf = SERIAL_BUF.lock();
+        buf[head as usize] = b;
+        drop(buf);
+        SERIAL_HEAD.store(next, Ordering::Release);
+    }
+    // Если буфер полон — теряем байт (не блокируем ISR)
+}
+
+/// Pop байт из ring buffer (безопасно для poll_key)
+fn pop_byte() -> Option<u8> {
+    let head = SERIAL_HEAD.load(Ordering::Acquire);
+    let tail = SERIAL_TAIL.load(Ordering::Relaxed);
+    if head == tail {
+        return None;
+    }
+    let buf = SERIAL_BUF.lock();
+    let b = buf[tail as usize];
+    drop(buf);
+    SERIAL_TAIL.store((tail + 1) % SERIAL_BUF_SIZE as u16, Ordering::Release);
+    Some(b)
+}
+
+pub fn write_byte(b: u8) {
+    crate::boot_log::log_byte(b);
     unsafe {
         while (inb(LINE_STATUS) & TRANSMITTER_EMPTY) == 0 {
             core::hint::spin_loop();
@@ -41,23 +98,22 @@ pub fn write_byte(b: u8) {
     }
 }
 
-/// Неблокирующее чтение из UART. Безопасно вызывается из главного цикла:
-/// проверяем DATA_READY до чтения DATA, поэтому порт никогда не ждёт байт.
 #[cfg(feature = "serial-debug")]
 fn try_read_byte() -> Option<u8> {
+    // Сначала проверяем ring buffer (IRQ4 driven)
+    if let Some(b) = pop_byte() {
+        return Some(b);
+    }
+    // Fallback: polling (если IRQ4 не работает)
     unsafe {
         if inb(LINE_STATUS) & DATA_READY != 0 {
-            Some(inb(COM1))
+            Some(inb(RX_DATA))
         } else {
             None
         }
     }
 }
 
-/// Преобразует байт serial terminal в тот же Key, что использует PS/2 driver.
-/// Стрелки и escape sequences пока сознательно не разбираются: базовый shell
-/// получает ASCII, Enter, Backspace и Tab. PS/2 остаётся полным источником
-/// навигационных клавиш.
 #[cfg(feature = "serial-debug")]
 pub fn poll_key() -> Option<crate::keyboard::Key> {
     use crate::keyboard::Key;
@@ -66,32 +122,33 @@ pub fn poll_key() -> Option<crate::keyboard::Key> {
         b'\r' | b'\n' => Some(Key::Enter),
         0x08 | 0x7f => Some(Key::Backspace),
         b'\t' => Some(Key::Tab),
+        // Ctrl+Z
+        0x1A => Some(Key::Char('\x1A')),
+        // ESC sequence start (ansi arrow keys etc.)
+        0x1B => Some(Key::Char('\x1B')),
         byte if (0x20..=0x7e).contains(&byte) => Some(Key::Char(byte as char)),
         _ => None,
     }
 }
 
-/// В production-сборке serial shell скомпилирован полностью вне ядра.
 #[cfg(not(feature = "serial-debug"))]
 pub fn poll_key() -> Option<crate::keyboard::Key> {
     None
 }
 
-/// Дублирует текст framebuffer-консоли в COM1 только в debug-сборке.
-/// Это делает результат shell-команд доступным без окна QEMU.
-#[cfg(feature = "serial-debug")]
+/// Дублирует текст framebuffer-консоли в COM1.
 pub fn mirror_console_char(ch: char) {
-    if ch.is_ascii() {
-        let byte = ch as u8;
-        if byte == b'\n' {
-            write_byte(b'\r');
+    #[cfg(feature = "serial-debug")]
+    {
+        if ch.is_ascii() {
+            let byte = ch as u8;
+            if byte == b'\n' {
+                write_byte(b'\r');
+            }
+            write_byte(byte);
         }
-        write_byte(byte);
     }
 }
-
-#[cfg(not(feature = "serial-debug"))]
-pub fn mirror_console_char(_ch: char) {}
 
 pub fn write_str(s: &str) {
     for b in s.bytes() {

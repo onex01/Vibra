@@ -76,6 +76,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
                 "\n[GFX] Demo cancelled\n",
                 vibra_kernel::framebuffer::COLOR_YELLOW,
             );
+            console.restore_text_mode();
             return CmdResult::Ok;
         }
 
@@ -87,7 +88,8 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
                         "\n[GFX] Demo exited\n",
                         vibra_kernel::framebuffer::COLOR_GREEN,
                     );
-                    return CmdResult::Ok;
+                    console.restore_text_mode();
+            return CmdResult::Ok;
                 }
                 vibra_kernel::keyboard::Key::Char('\x1A') => {
                     vibra_kernel::request_cancel();
@@ -95,7 +97,8 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
                         "\n[GFX] Demo cancelled\n",
                         vibra_kernel::framebuffer::COLOR_YELLOW,
                     );
-                    return CmdResult::Ok;
+                    console.restore_text_mode();
+            return CmdResult::Ok;
                 }
                 _ => {}
             }

@@ -30,8 +30,9 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         // Проверяем отмену (Ctrl+Z)
         if vibra_kernel::is_cancelled() {
             vibra_kernel::reset_cancel();
+            console.restore_text_mode();
             console.print_colored(
-                "\n[GFX] Demo cancelled\n",
+                "[GFX] Demo cancelled\n",
                 vibra_kernel::framebuffer::COLOR_YELLOW,
             );
             return CmdResult::Ok;
@@ -41,16 +42,18 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         if let Some(key) = vibra_kernel::keyboard::poll_key() {
             match key {
                 vibra_kernel::keyboard::Key::Char('\x1B') => {
+                    console.restore_text_mode();
                     console.print_colored(
-                        "\n[GFX] Demo exited\n",
+                        "[GFX] Demo exited\n",
                         vibra_kernel::framebuffer::COLOR_GREEN,
                     );
                     return CmdResult::Ok;
                 }
                 vibra_kernel::keyboard::Key::Char('\x1A') => {
                     vibra_kernel::request_cancel();
+                    console.restore_text_mode();
                     console.print_colored(
-                        "\n[GFX] Demo cancelled\n",
+                        "[GFX] Demo cancelled\n",
                         vibra_kernel::framebuffer::COLOR_YELLOW,
                     );
                     return CmdResult::Ok;

@@ -337,6 +337,12 @@ impl Console {
         self.cursor_row = row;
     }
 
+    /// Восстанавливает текстовый режим после графических demo
+    pub fn restore_text_mode(&mut self) {
+        self.clear();
+        self.set_cursor(0, 0);
+    }
+
     pub fn cursor_col(&self) -> usize {
         self.cursor_col
     }
