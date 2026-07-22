@@ -58,6 +58,12 @@ impl VM {
 
     pub fn run(&mut self, program: &Program) -> ScriptResult {
         for stmt in program {
+            // Проверяем Ctrl+Z отмену
+            if crate::is_cancelled() {
+                crate::reset_cancel();
+                self.println("\n[Script] Cancelled by user (Ctrl+Z)");
+                return ScriptResult::Ok;
+            }
             if let Err(e) = self.exec(stmt) { return ScriptResult::Error(e); }
         }
         ScriptResult::Ok

@@ -48,6 +48,11 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                     // ESC — выходим из цикла
                     break;
                 }
+                Key::Char('\x1A') => {
+                    // Ctrl+Z — отмена
+                    crate::request_cancel();
+                    break;
+                }
                 Key::Enter => {
                     if len < buffer.len() {
                         buffer[len] = b'\n';

@@ -31,10 +31,30 @@ use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, Executable
 use spin::Mutex;
 use commands::CmdResult;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 pub static MEMORY_MAP_REQUEST: MemmapRequest = MemmapRequest::new();
 pub static EXECUTABLE_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+
+/// Флаг отмены текущей команды (Ctrl+Z)
+pub static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Проверить, запросил ли пользователь отмену
+pub fn is_cancelled() -> bool {
+    CANCEL_FLAG.load(Ordering::Relaxed)
+}
+
+/// Сбросить флаг отмены
+pub fn reset_cancel() {
+    CANCEL_FLAG.store(false, Ordering::Relaxed);
+}
+
+/// Установить флаг отмены
+pub fn request_cancel() {
+    CANCEL_FLAG.store(true, Ordering::Relaxed);
+}
 
 #[inline]
 fn halt() { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }

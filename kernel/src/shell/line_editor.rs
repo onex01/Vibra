@@ -111,6 +111,15 @@ impl LineEditor {
                         self.tab_complete(console);
                     }
                     Key::Char(ch) => {
+                        // Ctrl+Z (0x1A) — отмена текущей команды
+                        if ch == '\x1A' {
+                            crate::request_cancel();
+                            // Очищаем строку и возвращаем пустую
+                            self.len = 0;
+                            self.cursor = 0;
+                            console.put_char('\n');
+                            return "";
+                        }
                         if self.len < MAX_LINE - 1 {
                             // Вставляем символ
                             for i in (self.cursor..self.len).rev() {
