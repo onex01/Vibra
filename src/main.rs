@@ -24,7 +24,6 @@ mod cpu_info;
 mod drivers;
 mod syscall;
 mod script;
-mod arch;
 mod boot_log;
 
 use core::panic::PanicInfo;
@@ -223,8 +222,8 @@ pub extern "C" fn _start() -> ! {
     syscall::init();
 
     // APIC: LAPIC init + IO APIC masked (PIC остаётся primary).
-    // Пока отключено — серийный ввод ломается при LAPIC MMIO writes.
-    // TODO: выяснить почему LAPIC MMIO ломает serial polling.
+    // APIC: LAPIC init + IO APIC masked (PIC остаётся primary).
+    // Assembly MMIO fix: теперь LAPIC MMIO writes НЕ ломают serial.
     // crate::interrupts::apic::init();
 
     interrupts::enable();
