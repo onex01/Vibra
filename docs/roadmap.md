@@ -54,11 +54,10 @@
 ### Фаза 1.2 — Hardware drivers (для реального железа):
 - [x] PCI enumeration — config space 0xCF8/0xCFC, bus scan, BAR/IRQ, lspci command
 - [x] AHCI/SATA driver — HBA init, port scan, ATA READ DMA EXT, FIS+PRD
+- [x] AHCI DiskIo — read/write через AHCI, DiskIo trait implementation
 - [x] CPUID — brand string, core count, TSC frequency, asm cpuid wrapper
 - [ ] USB (XHCI/EHCI) — клавиатура/мышь для modern hardware
 - [ ] NVMe driver — быстрый доступ к SSD
-- [ ] AHCI write sectors — ATA WRITE DMA EXT
-- [ ] AHCI → VFS integration — boot from SATA disk
 - [x] Shell команды используют VFS API
 
 ### Фаза 2 — Вытесняющий планировщик (v0.7.0):
@@ -76,24 +75,24 @@
 - [x] IO APIC: детект, все 24 IRQ замаскированы
 - [x] APIC infrastructure: detect, EOI, IO APIC redirect API, LAPIC timer API
 - [x] HHDM-based MMIO: LAPIC/IO APIC через HHDM offset
+- [x] Assembly MMIO: LAPIC read/write через inline asm (fix serial blocking)
+- [x] LAPIC timer калибровка через PIT channel 2
+- [x] LAPIC timer start (periodic, vector 48)
+- [x] IO APIC mask/unmask/redirect API
 - [x] IDT: timer=v32 (PIC), kbd=v33 (PIC), softirq=v0x81, spurious v0xFF
 - [x] EOI smart: tick_and_switch и isr_keyboard проверяют APIC_ACTIVE
 - [x] Команда `apic` — show status
-- [ ] **БЛОКЕР: LAPIC MMIO writes ломают serial polling** — при apic::init() serial input перестаёт работать даже при PIC primary. Корневая причина: подозрение на QEMU q35 side effect при LAPIC MSR enable. apic::init() отключён.
-- [ ] LAPIC timer калибровка через PIT channel 2 — код написан, не тестится (блокер)
 - [ ] Полная миграция: IRQ0 → LAPIC timer(v48), IRQ1 → IO APIC GSI1(v33)
 - [ ] pic::mask_all() после полной миграции
 
 ### Фаза 4 — Ring 3 + syscall (v0.8.0):
-- [ ] syscall/sysret (GDT: USER_DS=0x1B, USER_CS=0x23, STAR[63:48]=0x13)
-- [ ] `src/syscall/mod.rs`: MSR (EFER.SCE, STAR, LSTAR, SFMASK), naked syscall_entry
-- [ ] Сисколлы: write / exit / yield с валидацией user-указателей
-- [ ] `src/task/user.rs`: user-задача (код 0x400000 RO+X, стек NX+RW), вход через iretq
-- [ ] TSS.rsp0 обновляется при переключении задач
-- [ ] `isr_page_fault`: user-фолт убивает задачу, а не вешает ОС
-- [ ] Реализация sys_mmap (MAP_ANONYMOUS) и sys_munmap
-- [ ] Парсер ELF64 в ядре
-- [ ] Создание user-space процесса из ELF-файла с диска
+- [x] syscall/sysret (GDT: USER_DS=0x1B, USER_CS=0x23, STAR[63:48]=0x13)
+- [x] `src/syscall/mod.rs`: MSR (EFER.SCE, STAR, LSTAR, SFMASK), naked syscall_entry
+- [x] Сисколлы: write / exit / yield с валидацией user-указателей
+- [x] `src/task/user.rs`: user-задача (код через iretq, стек NX+RW)
+- [x] TSS.rsp0 обновляется при переключении задач
+- [x] `isr_page_fault`: user-фолт убивает задачу, а не вешает ОС
+- [x] Команда `usertest` — запуск user-space процесса
 
 ## Версия 1.0 "Nova"
 
