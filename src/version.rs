@@ -8,10 +8,10 @@ pub const OS_VERSION: &str = "0.7.0";
 pub const OS_CODENAME: &str = "Rigel";
 
 /// Версия ядра
-pub const KERNEL_VERSION: &str = "0.7.0";
+pub const KERNEL_VERSION: &str = "0.8.0";
 
 /// Кодовое название ядра
-pub const KERNEL_CODENAME: &str = "Photon";
+pub const KERNEL_CODENAME: &str = "Higgs";
 
 /// Автор проекта
 pub const AUTHOR: &str = "OneX01";

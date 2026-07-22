@@ -225,13 +225,13 @@ pub fn poll_key() -> Option<Key> {
         if state.extended_key {
             state.extended_key = false;
             if scancode & 0x80 != 0 { return None; }
-            return Some(match scancode {
-                0x4B => Key::Left,
-                0x4D => Key::Right,
-                0x48 => Key::Up,
-                0x50 => Key::Down,
-                _ => Key::Unknown,
-            });
+            return match scancode {
+                0x4B => Some(Key::Left),
+                0x4D => Some(Key::Right),
+                0x48 => Some(Key::Up),
+                0x50 => Some(Key::Down),
+                _ => None, // Unknown extended scancode — пропускаем
+            };
         }
 
         if scancode & 0x80 != 0 { return None; }

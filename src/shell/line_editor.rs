@@ -40,6 +40,8 @@ impl LineEditor {
         self.history_idx = self.history_count;
         self.prompt_len = prompt_len;
         loop {
+            // Serial (COM1) + PS/2 keyboard. Keyboard Unknown scancodes
+            // теперь возвращают None → не блокируют serial polling.
             let next_key = crate::serial::poll_key().or_else(keyboard::poll_key);
             if let Some(key) = next_key {
                 match key {
