@@ -223,7 +223,7 @@ pub extern "C" fn _start() -> ! {
 
     // APIC: LAPIC init + IO APIC masked (PIC остаётся primary).
     // Assembly MMIO fix: lapic_read/write uses inline asm, не ломает serial.
-    crate::interrupts::apic::init();
+    // crate::interrupts::apic::init();
 
     interrupts::enable();
 

@@ -132,8 +132,14 @@ pub fn ticks() -> u64 {
 // ============ Hardware IRQ handlers (APIC mode) ============
 
 extern "x86-interrupt" fn isr_keyboard(_frame: InterruptStackFrame) {
-    let scancode = unsafe { inb(0x60) };
-    crate::keyboard::handle_interrupt(scancode);
+    // Проверяем DATA_READY (bit 0) перед чтением port 0x60
+    // Если данных нет — это phantom IRQ, пропускаем
+    let status = unsafe { inb(0x64) }; // PS/2 status register
+    if status & 0x01 != 0 {
+        // Данные есть — читаем scancode
+        let scancode = unsafe { inb(0x60) };
+        crate::keyboard::handle_interrupt(scancode);
+    }
     // EOI: PIC или LAPIC — зависит от того, кто управляет IRQ1
     if crate::interrupts::apic::is_active() {
         crate::interrupts::apic::eoi();
