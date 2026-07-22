@@ -1,11 +1,11 @@
 // lsusb — показать найденные USB контроллеры.
 
-use super::CmdResult;
-use crate::framebuffer::{Console, COLOR_CYAN, COLOR_YELLOW};
+use vibra_kernel::commands::CmdResult;
+use vibra_kernel::framebuffer::{Console, COLOR_CYAN, COLOR_YELLOW};
 use alloc::format;
 
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
-    let controllers = crate::drivers::usb::get_controllers();
+    let controllers = vibra_kernel::drivers::usb::get_controllers();
 
     if controllers.is_empty() {
         console.print_colored("USB контроллеры не найдены\n", COLOR_YELLOW);

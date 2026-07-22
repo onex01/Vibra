@@ -18,7 +18,7 @@ pub const COLOR_VIBRA_PROMPT: u32 = 0x0000FF88; // Зелёный prompt
 
 // Встроенный bitmap font 8x16 для ASCII 32..=126 (95 символов)
 // Каждый символ — 16 байт (по 1 байту на строку, 8 пикселей в байте)
-pub(crate) static FONT_DATA: [[u8; 16]; 95] = {
+pub static FONT_DATA: [[u8; 16]; 95] = {
     let mut data = [[0u8; 16]; 95];
     // Пробел (32)
     data[0] = [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00];

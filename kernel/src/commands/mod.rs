@@ -41,15 +41,11 @@ pub mod apic;
 pub mod beep;
 pub mod kill;
 pub mod run;
-pub mod cpuid;
-pub mod memmap;
-pub mod lsusb;
-pub mod diskinfo;
-pub mod desktop;
 
 use crate::framebuffer::Console;
 
 /// Результат выполнения команды
+#[derive(Clone, Copy)]
 pub enum CmdResult {
     Ok,
     Continue, // для команд типа clear, которые меняют состояние консоли
@@ -58,6 +54,7 @@ pub enum CmdResult {
 
 pub type CmdFn = fn(&[&str], &mut Console) -> CmdResult;
 
+#[derive(Clone, Copy)]
 pub struct Command {
     pub name: &'static str,
     pub help: &'static str,
@@ -104,19 +101,34 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "apic",    help: "APIC management/status",    func: apic::run },
     Command { name: "lspci",   help: "list PCI devices",          func: lspci::run },
     Command { name: "usertest", help: "run user-space process",  func: usertest::run },
-    Command { name: "cpuid",    help: "show CPU information",    func: cpuid::run },
-    Command { name: "memmap",   help: "show memory map",         func: memmap::run },
-    Command { name: "lsusb",   help: "list USB controllers",     func: lsusb::run },
-    Command { name: "diskinfo", help: "show AHCI disk info",     func: diskinfo::run },
-    Command { name: "desktop", help: "launch graphical desktop", func: desktop::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 
-pub fn find_command(name: &str) -> Option<&'static Command> {
-    COMMANDS.iter().find(|c| c.name == name)
+use alloc::vec::Vec;
+use spin::Mutex;
+
+/// Динамический реестр команд (允许 vibra добавлять свои команды)
+static EXTRA_COMMANDS: Mutex<Vec<Command>> = Mutex::new(Vec::new());
+
+/// Добавить команду из внешнего crate (vibra OS)
+pub fn register_command(cmd: Command) {
+    EXTRA_COMMANDS.lock().push(cmd);
+}
+
+pub fn find_command(name: &str) -> Option<Command> {
+    if let Some(cmd) = COMMANDS.iter().find(|c| c.name == name) {
+        return Some(*cmd);
+    }
+    let extra = EXTRA_COMMANDS.lock();
+    extra.iter().find(|c| c.name == name).copied()
 }
 
 /// Для tab-completion: список всех имен команд
-pub fn command_names() -> impl Iterator<Item = &'static str> {
-    COMMANDS.iter().map(|c| c.name)
+pub fn command_names() -> alloc::vec::Vec<&'static str> {
+    let mut names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+    let extra = EXTRA_COMMANDS.lock();
+    for cmd in extra.iter() {
+        names.push(cmd.name);
+    }
+    names
 }

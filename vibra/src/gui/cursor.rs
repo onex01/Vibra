@@ -5,7 +5,7 @@
 // Курсор рисуется поверх всех окон поверхностью.
 
 use spin::Mutex;
-use crate::framebuffer::Console;
+use vibra_kernel::framebuffer::Console;
 
 const CURSOR_SIZE: usize = 12;
 
@@ -52,7 +52,7 @@ pub fn init() {
     state.x = 100;
     state.y = 100;
     state.drawn = false;
-    crate::println!("[GUI] Курсор инициализирован");
+    vibra_kernel::println!("[GUI] Курсор инициализирован");
 }
 
 /// Применяет XOR-рисование для одного пикселя курсора

@@ -4,7 +4,7 @@
 // Window — базовое окно с заголовком, кнопкой закрытия и областью содержимого.
 
 use alloc::vec::Vec;
-use crate::framebuffer;
+use vibra_kernel::framebuffer;
 use super::surface::Surface;
 
 /// Трейт виджета

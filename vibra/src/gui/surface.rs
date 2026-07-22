@@ -5,7 +5,7 @@
 // и копирование в фреймбуфер через Console.
 
 use alloc::vec::Vec;
-use crate::framebuffer::{Console, FONT_DATA, FONT_WIDTH, FONT_HEIGHT};
+use vibra_kernel::framebuffer::{Console, FONT_DATA, FONT_WIDTH, FONT_HEIGHT};
 
 /// Поверхность рисования
 pub struct Surface {

@@ -1,11 +1,11 @@
 // diskinfo — показать информацию о найденных дисках AHCI.
 
-use super::CmdResult;
-use crate::framebuffer::{Console, COLOR_CYAN, COLOR_YELLOW};
+use vibra_kernel::commands::CmdResult;
+use vibra_kernel::framebuffer::{Console, COLOR_CYAN, COLOR_YELLOW};
 use alloc::format;
 
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
-    let disks = crate::drivers::ahci::get_disk_info();
+    let disks = vibra_kernel::drivers::ahci::get_disk_info();
 
     if disks.is_empty() {
         console.print_colored("Диски не найдены (AHCI)\n", COLOR_YELLOW);

@@ -1,11 +1,11 @@
-use super::CmdResult;
-use crate::framebuffer::Console;
+use vibra_kernel::commands::CmdResult;
+use vibra_kernel::framebuffer::Console;
 
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
-    console.print_colored("Memory Map:\n", crate::framebuffer::COLOR_CYAN);
+    console.print_colored("Memory Map:\n", vibra_kernel::framebuffer::COLOR_CYAN);
     console.print("  Type                    Base              Size\n");
 
-    if let Some(mm) = crate::MEMORY_MAP_REQUEST.response() {
+    if let Some(mm) = vibra_kernel::MEMORY_MAP_REQUEST.response() {
         for entry in mm.entries() {
             let type_str = match entry.type_ {
                 limine::memmap::MEMMAP_USABLE => "Usable",
@@ -39,7 +39,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
             console.print("\n");
         }
     } else {
-        console.print_colored("  Memory map not available\n", crate::framebuffer::COLOR_RED);
+        console.print_colored("  Memory map not available\n", vibra_kernel::framebuffer::COLOR_RED);
     }
 
     CmdResult::Ok

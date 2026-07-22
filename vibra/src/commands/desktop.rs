@@ -4,8 +4,8 @@
 // ввод мыши и клавиатуры, поддерживает перетаскивание окон.
 // ESC возвращает в текстовый режим.
 
-use super::CmdResult;
-use crate::framebuffer::Console;
+use vibra_kernel::commands::CmdResult;
+use vibra_kernel::framebuffer::Console;
 use crate::gui::compositor::Compositor;
 use crate::gui::widget::Window;
 use crate::gui::cursor;
@@ -26,7 +26,7 @@ fn usize_to_str(mut n: usize, buf: &mut [u8]) -> &str {
 }
 
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
-    crate::println!("[GUI] Запуск графического режима...");
+    vibra_kernel::println!("[GUI] Запуск графического режима...");
 
     // Прячем текстовый курсор
     let max_row = console.rows();
@@ -43,10 +43,10 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         let mut info_win = Window::new("System Info", 80, 60, 300, 200);
 
         // Получаем информацию о CPU
-        let cpu_info = crate::cpu_info::detect();
-        let brand = crate::cpu_info::brand_str(&cpu_info);
-        let freq = crate::cpu_info::freq_str(&cpu_info);
-        let (heap_used, heap_total) = crate::memory::heap::stats();
+        let cpu_info = vibra_kernel::cpu_info::detect();
+        let brand = vibra_kernel::cpu_info::brand_str(&cpu_info);
+        let freq = vibra_kernel::cpu_info::freq_str(&cpu_info);
+        let (heap_used, heap_total) = vibra_kernel::memory::heap::stats();
 
         // Заполняем информацию в окне (область содержимого)
         let mut y_offset = 32; // после заголовка (24px) + 8px отступ
@@ -130,7 +130,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     // === Главный цикл GUI ===
     loop {
         // Опрос мыши
-        let mouse = crate::devices::ps2_mouse::get_state();
+        let mouse = vibra_kernel::devices::ps2_mouse::get_state();
         if mouse.dx != 0 || mouse.dy != 0 {
             compositor.handle_mouse_move(mouse.dx as i32, mouse.dy as i32);
         }
@@ -144,17 +144,17 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         }
 
         // Опрос клавиатуры
-        if let Some(key) = crate::keyboard::poll_key() {
+        if let Some(key) = vibra_kernel::keyboard::poll_key() {
             match key {
-                crate::keyboard::Key::Char('\x1B') => {
+                vibra_kernel::keyboard::Key::Char('\x1B') => {
                     // ESC — выход из графического режима
-                    crate::println!("[GUI] Выход из графического режима");
+                    vibra_kernel::println!("[GUI] Выход из графического режима");
                     // Восстанавливаем текстовый курсор
                     console.set_cursor(0, 0);
                     console.clear();
                     return CmdResult::Continue;
                 }
-                crate::keyboard::Key::Char(ch) => {
+                vibra_kernel::keyboard::Key::Char(ch) => {
                     compositor.handle_key(ch as u8);
                 }
                 _ => {}
@@ -165,6 +165,6 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         compositor.render(console);
 
         // Уступаем процессор другим задачам
-        crate::task::yield_now();
+        vibra_kernel::task::yield_now();
     }
 }

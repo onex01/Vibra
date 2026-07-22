@@ -1,19 +1,19 @@
-use super::CmdResult;
-use crate::framebuffer::Console;
+use vibra_kernel::commands::CmdResult;
+use vibra_kernel::framebuffer::Console;
 
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
-    let info = crate::cpu_info::detect();
+    let info = vibra_kernel::cpu_info::detect();
 
-    console.print_colored("CPU Information:\n", crate::framebuffer::COLOR_CYAN);
+    console.print_colored("CPU Information:\n", vibra_kernel::framebuffer::COLOR_CYAN);
     console.print("  Vendor:   ");
-    console.print(crate::cpu_info::vendor_str(&info));
+    console.print(vibra_kernel::cpu_info::vendor_str(&info));
     console.print("\n");
 
     console.print("  Brand:    ");
-    console.print(crate::cpu_info::brand_str(&info));
+    console.print(vibra_kernel::cpu_info::brand_str(&info));
     console.print("\n");
 
-    let freq = crate::cpu_info::freq_str(&info);
+    let freq = vibra_kernel::cpu_info::freq_str(&info);
     console.print("  Freq:     ");
     console.print(&freq);
     console.print("\n");
@@ -32,7 +32,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     if info.topology.smt { console.print("yes"); } else { console.print("no"); }
     console.print("\n");
 
-    console.print_colored("\nFeatures:\n", crate::framebuffer::COLOR_CYAN);
+    console.print_colored("\nFeatures:\n", vibra_kernel::framebuffer::COLOR_CYAN);
     let f = &info.features;
     let features_list = [
         ("FPU", f.fpu), ("SSE", f.sse), ("SSE2", f.sse2),
@@ -46,7 +46,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     for (name, present) in features_list {
         if present {
             console.print("  ");
-            console.print_colored(name, crate::framebuffer::COLOR_GREEN);
+            console.print_colored(name, vibra_kernel::framebuffer::COLOR_GREEN);
             console.print("  ");
         }
     }

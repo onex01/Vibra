@@ -4,7 +4,7 @@
 // выполняет z-сортировку и рендеринг на фреймбуфер через Console.
 
 use alloc::vec::Vec;
-use crate::framebuffer::Console;
+use vibra_kernel::framebuffer::Console;
 use super::surface::Surface;
 use super::widget::{Widget, Window};
 use super::cursor;

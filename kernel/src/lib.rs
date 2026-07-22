@@ -23,7 +23,6 @@ pub mod users;
 pub mod cpu_info;
 pub mod drivers;
 pub mod syscall;
-pub mod gui;
 pub mod script;
 pub mod boot_log;
 
@@ -86,11 +85,21 @@ fn heap_stress() {
     }
 }
 
-static LINE_EDITOR: Mutex<shell::LineEditor> = Mutex::new(shell::LineEditor::new());
+/// Публичные типы для shell loop (используются vibra)
+pub struct BootConsole {
+    pub console: framebuffer::Console,
+}
 
-/// Точка входа ядра. Вызывается из _start() бинарника.
-/// Выполняет полную цепочку инициализации и запускает shell.
+/// Точка входа ядра: полная инициализация + shell.
+/// Вызывается из _start() бинарника.
 pub fn boot() -> ! {
+    let bc = init();
+    shell_loop(bc);
+}
+
+/// Инициализация ядра. Возвращает BootConsole с готовой framebuffer консолью.
+/// Вызывается vibra для запуска своего shell loop.
+pub fn init() -> BootConsole {
     serial::init();
     println!(
         "Vibra {} \"{}\" booting...",
@@ -147,7 +156,6 @@ pub fn boot() -> ! {
             (0xffffffff80000000u64, 0xffffffff80000000u64)
         }
     };
-    println!("[VMM] Kernel phys={:#x}, virt={:#x}", kernel_phys_base, kernel_virt_base);
 
     let (fb_virt, fb_size) = match FRAMEBUFFER_REQUEST.response() {
         Some(fb_resp) => match fb_resp.framebuffers().first() {
@@ -157,7 +165,6 @@ pub fn boot() -> ! {
         None => (0, 0),
     };
     let fb_phys = if fb_virt != 0 { fb_virt - hhdm_offset } else { 0 };
-    println!("[VMM] Framebuffer virt={:#x} phys={:#x}, size={:#x}", fb_virt, fb_phys, fb_size);
 
     let memory_map_entries = match MEMORY_MAP_REQUEST.response() {
         Some(mm) => mm.entries(),
@@ -165,40 +172,35 @@ pub fn boot() -> ! {
     };
 
     match memory::vmm::init(
-        memory_map_entries,
-        hhdm_offset,
-        kernel_phys_base,
-        kernel_virt_base,
-        fb_phys,
-        fb_size,
+        memory_map_entries, hhdm_offset, kernel_phys_base, kernel_virt_base, fb_phys, fb_size,
     ) {
-        Some(_pml4_phys) => {
-            println!("[VMM] Initialization complete!");
-        }
-        None => {
-            println!("[VMM] FATAL: Failed to initialize VMM!");
-            loop { halt(); }
-        }
+        Some(_pml4_phys) => println!("[VMM] Initialization complete!"),
+        None => { println!("[VMM] FATAL: Failed to initialize VMM!"); loop { halt(); } }
     }
 
     gdt::init();
     interrupts::init();
     syscall::init();
-
-    // crate::interrupts::apic::init();
-
     interrupts::enable();
     keyboard::post_init();
 
     println!("[DEBUG] Interrupts enabled, continuing boot...");
 
-    let mut console = match FRAMEBUFFER_REQUEST.response() {
+    let console = match FRAMEBUFFER_REQUEST.response() {
         Some(fb_resp) => match fb_resp.framebuffers().first() {
             Some(fb) => framebuffer::Console::new(fb),
             None => { println!("[FATAL] No framebuffer"); loop { halt(); } }
         },
         None => { println!("[FATAL] Framebuffer request failed"); loop { halt(); } }
     };
+
+    BootConsole { console }
+}
+
+/// Shell loop — используется и kernel::boot() и vibra.
+/// Vibra может вызвать init() + shell_loop() или написать свой loop.
+pub fn shell_loop(mut bc: BootConsole) -> ! {
+    let mut console = bc.console;
 
     console.print_colored("\n", framebuffer::COLOR_VIBRA_FG);
     console.print_colored("     __     ___ _           \n", framebuffer::COLOR_CYAN);
@@ -207,11 +209,6 @@ pub fn boot() -> ! {
     console.print_colored("       \\ V / | | |_) | | | (_| |\n", framebuffer::COLOR_CYAN);
     console.print_colored("        \\_/  |_|_.__/|_|  \\__,_|\n", framebuffer::COLOR_CYAN);
     console.print("\n");
-    console.print_colored("    Vibra OS v", framebuffer::COLOR_VIBRA_PROMPT);
-    console.print_colored(version::OS_VERSION, framebuffer::COLOR_VIBRA_PROMPT);
-    console.print_colored(" \"", framebuffer::COLOR_VIBRA_PROMPT);
-    console.print_colored(version::OS_CODENAME, framebuffer::COLOR_VIBRA_PROMPT);
-    console.print_colored("\"\n", framebuffer::COLOR_VIBRA_PROMPT);
     console.print_colored("    Kernel v", framebuffer::COLOR_VIBRA_FG);
     console.print_colored(version::KERNEL_VERSION, framebuffer::COLOR_VIBRA_FG);
     console.print_colored(" \"", framebuffer::COLOR_VIBRA_FG);
@@ -222,6 +219,8 @@ pub fn boot() -> ! {
     unsafe {
         core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'C', options(nostack, preserves_flags));
     }
+
+    static LINE_EDITOR: Mutex<shell::LineEditor> = Mutex::new(shell::LineEditor::new());
 
     loop {
         let current_dir = fs::get_current_dir();
