@@ -3,7 +3,7 @@ use crate::framebuffer::{Console, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN, COLOR_W
 use crate::fs;
 use alloc::string::String;
 
-pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
+pub fn run(_args: &[pub fn run(args: &[&str]str], console: &mut Console) -> CmdResult {
     let show_all = args.iter().any(|a| *a == "-a" || *a == "-la" || *a == "-al");
     let long_format = args.iter().any(|a| *a == "-l" || *a == "-la" || *a == "-al");
 

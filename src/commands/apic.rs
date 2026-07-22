@@ -1,7 +1,7 @@
 use super::CmdResult;
 use crate::framebuffer::Console;
 
-pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
+pub fn run(_args: &[pub fn run(args: &[&str]str], console: &mut Console) -> CmdResult {
     let active = crate::interrupts::apic::is_active();
     let has_apic = crate::interrupts::apic::has_apic();
 

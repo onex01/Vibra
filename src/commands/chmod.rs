@@ -2,7 +2,7 @@ use super::CmdResult;
 use crate::framebuffer::{Console, COLOR_GREEN, COLOR_RED, COLOR_YELLOW};
 use crate::fs;
 
-pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
+pub fn run(_args: &[pub fn run(args: &[&str]str], console: &mut Console) -> CmdResult {
     if args.len() < 2 {
         console.print_colored("Usage: chmod <mode> <file>\n", COLOR_YELLOW);
         console.print("  Example: chmod 755 myfile\n");
