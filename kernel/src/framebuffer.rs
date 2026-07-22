@@ -485,9 +485,9 @@ impl Console {
         // Вычисляем физические координаты прямоугольника
         let (phys_x_start, phys_x_end, phys_y_start, phys_y_end) = if self.virtual_width > 0 {
             let vx_start = x.min(self.virtual_width);
-            let vx_end = (x + w).min(self.virtual_width);
+            let vx_end = x.saturating_add(w).min(self.virtual_width);
             let vy_start = y.min(self.virtual_height);
-            let vy_end = (y + h).min(self.virtual_height);
+            let vy_end = y.saturating_add(h).min(self.virtual_height);
 
             if vx_start >= vx_end || vy_start >= vy_end {
                 return;
@@ -501,9 +501,9 @@ impl Console {
             (px_start, px_end, py_start, py_end)
         } else {
             let sx = x.min(self.width);
-            let ex = (x + w).min(self.width);
+            let ex = x.saturating_add(w).min(self.width);
             let sy = y.min(self.height);
-            let ey = (y + h).min(self.height);
+            let ey = y.saturating_add(h).min(self.height);
             (sx, ex, sy, ey)
         };
 
@@ -701,5 +701,18 @@ impl Console {
             self.scale_x = (((self.width as u64) << 16) / vw as u64) as u32;
             self.scale_y = (((self.height as u64) << 16) / vh as u64) as u32;
         }
+    }
+
+    /// Переключить framebuffer консоли на новый буфер (например, GPU framebuffer)
+    pub fn switch_framebuffer(&mut self, new_fb: *mut u32, new_width: usize, new_height: usize, new_pitch_words: usize) {
+        self.fb_addr = new_fb;
+        self.width = new_width;
+        self.height = new_height;
+        self.pitch = new_pitch_words;
+        self.cols = new_width / FONT_WIDTH;
+        self.rows = new_height / FONT_HEIGHT;
+        self.cursor_col = 0;
+        self.cursor_row = 0;
+        self.clear();
     }
 }

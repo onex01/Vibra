@@ -86,6 +86,7 @@ pub struct PciDevice {
     pub bar3: u32,
     pub bar4: u32,
     pub bar5: u32,
+    pub bar_phys: [u64; 6],
     pub irq: u8,
 }
 
@@ -149,6 +150,30 @@ impl PciDevice {
         };
         bar & 1 == 0 // bit 0 = 0 → memory, bit 0 = 1 → I/O
     }
+
+    /// Прочитать физический адрес BAR через конфигурационное пространство PCI.
+    /// Поддерживает 32-бит и 64-бит memory BAR, а также I/O BAR.
+    pub fn bar_phys_from_config(&self, bar_num: u8) -> u64 {
+        unsafe {
+            let low = pci_read_u32(self.bus, self.dev, self.func, 0x10 + bar_num * 4);
+            if low & 1 == 0 {
+                // Memory BAR
+                let bar_type = (low >> 1) & 0x3;
+                match bar_type {
+                    0 => low as u64 & 0xFFFFFFF0, // 32-bit
+                    2 => {
+                        // 64-bit: объединяем BAR[n] + BAR[n+1]
+                        let high = pci_read_u32(self.bus, self.dev, self.func, 0x10 + (bar_num + 1) * 4);
+                        ((high as u64) << 32) | ((low as u64) & 0xFFFFFFF0)
+                    }
+                    _ => low as u64 & 0xFFFFFFF0, // 16-bit или неизвестный
+                }
+            } else {
+                // I/O BAR
+                (low & !0x3) as u64
+            }
+        }
+    }
 }
 
 static PCI_DEVICES: Mutex<Vec<PciDevice>> = Mutex::new(Vec::new());
@@ -196,8 +221,32 @@ pub fn init() {
                         class, subclass, prog_if,
                         header_type,
                         bar0, bar1, bar2, bar3, bar4, bar5,
+                        bar_phys: [0; 6],
                         irq,
                     };
+
+                    // Вычисляем физические адреса всех BAR
+                    let mut device = device;
+                    for i in 0..6u8 {
+                        let raw = pci_read_u32(bus, dev, func, 0x10 + i * 4);
+                        if raw == 0 || raw == 0xFFFFFFFF {
+                            continue;
+                        }
+                        if raw & 1 == 0 {
+                            // Memory BAR
+                            let bar_type = (raw >> 1) & 0x3;
+                            if bar_type == 2 && i < 5 {
+                                // 64-bit: объединяем BAR[n] + BAR[n+1]
+                                let high = pci_read_u32(bus, dev, func, 0x10 + (i + 1) * 4);
+                                device.bar_phys[i as usize] = ((high as u64) << 32) | ((raw as u64) & 0xFFFFFFF0);
+                            } else {
+                                device.bar_phys[i as usize] = raw as u64 & 0xFFFFFFF0;
+                            }
+                        } else {
+                            // I/O BAR
+                            device.bar_phys[i as usize] = (raw & !0x3) as u64;
+                        }
+                    }
 
                     devices.push(device);
                     count += 1;
@@ -273,4 +322,28 @@ pub fn find_all_devices_by_class(class: u8, subclass: u8) -> Vec<PciDevice> {
 /// Количество найденных устройств
 pub fn device_count() -> usize {
     PCI_DEVICES.lock().len()
+}
+
+/// Прочитать физический адрес BAR устройства через конфигурационное пространство.
+/// Поддерживает 32-бит, 64-бит memory BAR и I/O BAR.
+pub fn bar_phys(bus: u8, dev: u8, func: u8, bar_num: u8) -> u64 {
+    unsafe {
+        let low = pci_read_u32(bus, dev, func, 0x10 + bar_num * 4);
+        if low & 1 == 0 {
+            // Memory BAR: биты [3:1] указывают тип
+            let bar_type = (low >> 1) & 0x3;
+            match bar_type {
+                0 => low as u64 & 0xFFFFFFF0, // 32-bit
+                2 => {
+                    // 64-bit: BAR[n] (low) + BAR[n+1] (high)
+                    let high = pci_read_u32(bus, dev, func, 0x10 + (bar_num + 1) * 4);
+                    ((high as u64) << 32) | ((low as u64) & 0xFFFFFFF0)
+                }
+                _ => low as u64 & 0xFFFFFFF0, // 16-bit или неизвестный
+            }
+        } else {
+            // I/O BAR
+            (low & !0x3) as u64
+        }
+    }
 }

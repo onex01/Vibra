@@ -207,13 +207,16 @@ pub fn init() -> BootConsole {
 
     println!("[DEBUG] Interrupts enabled, continuing boot...");
 
-    let console = match FRAMEBUFFER_REQUEST.response() {
+    let mut console = match FRAMEBUFFER_REQUEST.response() {
         Some(fb_resp) => match fb_resp.framebuffers().first() {
             Some(fb) => framebuffer::Console::new(fb),
             None => { println!("[FATAL] No framebuffer"); loop { halt(); } }
         },
         None => { println!("[FATAL] Framebuffer request failed"); loop { halt(); } }
     };
+
+    // Попытка переключения на VirtIO-GPU framebuffer
+    crate::drivers::virtio_gpu::try_switch_console(&mut console);
 
     BootConsole { console }
 }

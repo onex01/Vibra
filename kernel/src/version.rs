@@ -2,16 +2,16 @@
 /// Изменяй версии ТОЛЬКО здесь!
 
 /// Версия ОС
-pub const OS_VERSION: &str = "1.0.0";
+pub const OS_VERSION: &str = "1.1.0";
 
 /// Кодовое название ОС
-pub const OS_CODENAME: &str = "Canopus";
+pub const OS_CODENAME: &str = "Sirius";
 
 /// Версия ядра
-pub const KERNEL_VERSION: &str = "1.0.0";
+pub const KERNEL_VERSION: &str = "1.1.0";
 
 /// Кодовое название ядра
-pub const KERNEL_CODENAME: &str = "Quantum";
+pub const KERNEL_CODENAME: &str = "Boson";
 
 /// Автор проекта
 pub const AUTHOR: &str = "OneX01";
