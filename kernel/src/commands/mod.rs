@@ -41,6 +41,7 @@ pub mod apic;
 pub mod beep;
 pub mod kill;
 pub mod run;
+pub mod display;
 
 use crate::framebuffer::Console;
 
@@ -102,6 +103,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "lspci",   help: "list PCI devices",          func: lspci::run },
     Command { name: "usertest", help: "run user-space process",  func: usertest::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
+    Command { name: "display", help: "show display info",          func: display::run },
 ];
 
 use alloc::vec::Vec;

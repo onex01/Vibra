@@ -26,6 +26,7 @@ pub mod syscall;
 pub mod script;
 pub mod boot_log;
 pub mod graphics;
+pub mod display;
 
 // === Limine requests (нужны в lib crate для линкера) ===
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
@@ -217,6 +218,16 @@ pub fn init() -> BootConsole {
 
     // Попытка переключения на VirtIO-GPU framebuffer
     crate::drivers::virtio_gpu::try_switch_console(&mut console);
+
+    // Инициализация display manager
+    crate::display::init();
+
+    // Регистрация GOP бэкенда (Limine framebuffer)
+    if let Some(fb_resp) = crate::FRAMEBUFFER_REQUEST.response() {
+        if let Some(fb) = fb_resp.framebuffers().first() {
+            crate::display::gop::register_from_framebuffer(fb);
+        }
+    }
 
     BootConsole { console }
 }

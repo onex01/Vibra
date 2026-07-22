@@ -152,6 +152,7 @@ pub struct Console {
     cursor_row: usize,
     fg_color: u32,
     bg_color: u32,
+    pixel_format: crate::display::PixelFormat,
     // Виртуальный framebuffer и back buffer
     back_buffer: Option<Vec<u32>>,
     back_buffer_ptr: *mut u32,
@@ -180,6 +181,7 @@ impl Console {
             cursor_row: 0,
             fg_color: COLOR_VIBRA_FG,
             bg_color: COLOR_VIBRA_BG,
+            pixel_format: crate::display::PixelFormat::Bgr888,
             back_buffer: None,
             back_buffer_ptr: core::ptr::null_mut(),
             back_buffer_size: 0,
@@ -294,6 +296,16 @@ impl Console {
     /// Устанавливает текущий цвет (остаётся до следующего set_fg / print_colored)
     pub fn set_fg(&mut self, fg: u32) {
         self.fg_color = fg;
+    }
+
+    /// Установить формат пикселей для конвертации цветов
+    pub fn set_pixel_format(&mut self, format: crate::display::PixelFormat) {
+        self.pixel_format = format;
+    }
+
+    /// Получить текущий формат пикселей
+    pub fn pixel_format(&self) -> crate::display::PixelFormat {
+        self.pixel_format
     }
 
     /// Печатает один символ в framebuffer + mirror в serial
@@ -437,6 +449,9 @@ impl Console {
 
     /// Записывает один пиксель в фреймбуфер (с масштабированием виртуальных координат)
     pub fn put_pixel(&self, x: usize, y: usize, color: u32) {
+        // Конвертация цвета из Rgb888 в native format
+        let native_color = crate::display::color_to_native(color, self.pixel_format);
+
         // Границы проверки: виртуальные, если заданы
         let (max_x, max_y) = if self.virtual_width > 0 {
             (self.virtual_width, self.virtual_height)
@@ -466,12 +481,12 @@ impl Console {
         if !self.back_buffer_ptr.is_null() {
             if offset < self.back_buffer_size {
                 unsafe {
-                    core::ptr::write_volatile(self.back_buffer_ptr.add(offset), color);
+                    core::ptr::write_volatile(self.back_buffer_ptr.add(offset), native_color);
                 }
             }
         } else {
             unsafe {
-                core::ptr::write_volatile(self.fb_addr.add(offset), color);
+                core::ptr::write_volatile(self.fb_addr.add(offset), native_color);
             }
         }
     }
@@ -713,6 +728,8 @@ impl Console {
         self.rows = new_height / FONT_HEIGHT;
         self.cursor_col = 0;
         self.cursor_row = 0;
+        // При переключении на GPU framebuffer обновляем формат
+        self.pixel_format = crate::display::PixelFormat::Bgr888;
         self.clear();
     }
 }
