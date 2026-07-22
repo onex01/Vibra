@@ -2,16 +2,16 @@ use super::CmdResult;
 use crate::framebuffer::{Console, COLOR_GREEN, COLOR_RED, COLOR_YELLOW};
 use crate::fs;
 
-pub fn run(_args: &[pub fn run(args: &[&str]str], console: &mut Console) -> CmdResult {
-    if args.len() < 2 {
+pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
+    if _args.len() < 2 {
         console.print_colored("Usage: chmod <mode> <file>\n", COLOR_YELLOW);
         console.print("  Example: chmod 755 myfile\n");
         console.print("  Modes: rwx (7), rw- (6), r-- (4), etc.\n");
         return CmdResult::Ok;
     }
 
-    let mode_str = args[0];
-    let path = args[1];
+    let mode_str = _args[0];
+    let path = _args[1];
 
     // Парсим OCTAL режим (например "755")
     let mode = if mode_str.len() == 3 {
