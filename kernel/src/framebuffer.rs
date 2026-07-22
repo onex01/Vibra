@@ -1,4 +1,5 @@
 use limine::framebuffer::Framebuffer;
+use alloc::vec::Vec;
 
 // Размер одного символа
 pub const FONT_WIDTH: usize = 8;
@@ -151,6 +152,14 @@ pub struct Console {
     cursor_row: usize,
     fg_color: u32,
     bg_color: u32,
+    // Виртуальный framebuffer и back buffer
+    back_buffer: Option<Vec<u32>>,
+    back_buffer_ptr: *mut u32,
+    back_buffer_size: usize,
+    virtual_width: usize,
+    virtual_height: usize,
+    scale_x: u32, // фиксированная точка 16.16
+    scale_y: u32,
 }
 
 impl Console {
@@ -171,6 +180,13 @@ impl Console {
             cursor_row: 0,
             fg_color: COLOR_VIBRA_FG,
             bg_color: COLOR_VIBRA_BG,
+            back_buffer: None,
+            back_buffer_ptr: core::ptr::null_mut(),
+            back_buffer_size: 0,
+            virtual_width: 0,
+            virtual_height: 0,
+            scale_x: 0,
+            scale_y: 0,
         };
 
         console.clear();
@@ -339,6 +355,11 @@ impl Console {
 
     /// Восстанавливает текстовый режим после графических demo
     pub fn restore_text_mode(&mut self) {
+        self.disable_back_buffer();
+        self.virtual_width = 0;
+        self.virtual_height = 0;
+        self.scale_x = 0;
+        self.scale_y = 0;
         self.clear();
         self.set_cursor(0, 0);
     }
@@ -379,14 +400,22 @@ impl Console {
 
     // === Примитивы рисования пикселей ===
 
-    /// Ширина фреймбуфера в пикселях
+    /// Ширина экрана для рисования (виртуальная, если задана, иначе физическая)
     pub fn fb_width(&self) -> usize {
-        self.width
+        if self.virtual_width > 0 {
+            self.virtual_width
+        } else {
+            self.width
+        }
     }
 
-    /// Высота фреймбуфера в пикселях
+    /// Высота экрана для рисования (виртуальная, если задана, иначе физическая)
     pub fn fb_height(&self) -> usize {
-        self.height
+        if self.virtual_height > 0 {
+            self.virtual_height
+        } else {
+            self.height
+        }
     }
 
     /// Питч фреймбуфера в u32 словах
@@ -406,42 +435,143 @@ impl Console {
         }
     }
 
-    /// Записывает один пиксель в фреймбуфер
+    /// Записывает один пиксель в фреймбуфер (с масштабированием виртуальных координат)
     pub fn put_pixel(&self, x: usize, y: usize, color: u32) {
-        if x < self.width && y < self.height {
+        // Границы проверки: виртуальные, если заданы
+        let (max_x, max_y) = if self.virtual_width > 0 {
+            (self.virtual_width, self.virtual_height)
+        } else {
+            (self.width, self.height)
+        };
+
+        if x >= max_x || y >= max_y {
+            return;
+        }
+
+        // Вычисляем физические координаты
+        let (px, py) = if self.virtual_width > 0 {
+            let px = ((x as u64 * self.scale_x as u64) >> 16) as usize;
+            let py = ((y as u64 * self.scale_y as u64) >> 16) as usize;
+            (px, py)
+        } else {
+            (x, y)
+        };
+
+        if px >= self.width || py >= self.height {
+            return;
+        }
+
+        let offset = py * self.pitch + px;
+
+        if !self.back_buffer_ptr.is_null() {
+            if offset < self.back_buffer_size {
+                unsafe {
+                    core::ptr::write_volatile(self.back_buffer_ptr.add(offset), color);
+                }
+            }
+        } else {
             unsafe {
-                let offset = y * self.pitch + x;
                 core::ptr::write_volatile(self.fb_addr.add(offset), color);
             }
         }
     }
 
-    /// Заливает прямоугольник заданным цветом
+    /// Заливает прямоугольник заданным цветом (с масштабированием и u64 пакетной записью)
     pub fn fill_rect(&self, x: usize, y: usize, w: usize, h: usize, color: u32) {
-        for dy in 0..h {
-            let py = y + dy;
-            if py >= self.height {
-                break;
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        // Вычисляем физические координаты прямоугольника
+        let (phys_x_start, phys_x_end, phys_y_start, phys_y_end) = if self.virtual_width > 0 {
+            let vx_start = x.min(self.virtual_width);
+            let vx_end = (x + w).min(self.virtual_width);
+            let vy_start = y.min(self.virtual_height);
+            let vy_end = (y + h).min(self.virtual_height);
+
+            if vx_start >= vx_end || vy_start >= vy_end {
+                return;
             }
-            let start_x = x.min(self.width);
-            let end_x = (x + w).min(self.width);
-            if start_x >= end_x {
-                continue;
+
+            let px_start = ((vx_start as u64 * self.scale_x as u64) >> 16) as usize;
+            let px_end = ((vx_end as u64 * self.scale_x as u64) >> 16) as usize;
+            let py_start = ((vy_start as u64 * self.scale_y as u64) >> 16) as usize;
+            let py_end = ((vy_end as u64 * self.scale_y as u64) >> 16) as usize;
+
+            (px_start, px_end, py_start, py_end)
+        } else {
+            let sx = x.min(self.width);
+            let ex = (x + w).min(self.width);
+            let sy = y.min(self.height);
+            let ey = (y + h).min(self.height);
+            (sx, ex, sy, ey)
+        };
+
+        let phys_w = if phys_x_end > phys_x_start {
+            phys_x_end - phys_x_start
+        } else {
+            return;
+        };
+        let phys_h = if phys_y_end > phys_y_start {
+            phys_y_end - phys_y_start
+        } else {
+            return;
+        };
+
+        if !self.back_buffer_ptr.is_null() {
+            // Пакетная запись через back buffer (u64 = 2 пикселя за раз)
+            let double_color = ((color as u64) << 32) | (color as u64);
+            for dy in 0..phys_h {
+                let py = phys_y_start + dy;
+                let row_start = py * self.pitch + phys_x_start;
+
+                unsafe {
+                    let ptr = self.back_buffer_ptr.add(row_start);
+                    let mut offset = 0;
+                    let mut remaining = phys_w;
+
+                    // Выравнивание: если нечётный — пишем один u32
+                    if (row_start & 1) != 0 && remaining > 0 {
+                        core::ptr::write_volatile(ptr.add(offset), color);
+                        offset += 1;
+                        remaining -= 1;
+                    }
+
+                    // u64 пакетная запись (по 2 пикселя за раз)
+                    let u64_ptr = ptr.add(offset) as *mut u64;
+                    let pairs = remaining / 2;
+                    for i in 0..pairs {
+                        core::ptr::write_volatile(u64_ptr.add(i), double_color);
+                    }
+
+                    // Остаток: один u32
+                    let written = pairs * 2;
+                    for i in 0..(remaining - written) {
+                        core::ptr::write_volatile(ptr.add(offset + written + i), color);
+                    }
+                }
             }
-            let count = end_x - start_x;
-            let row_start = py * self.pitch + start_x;
-            unsafe {
-                let slice = core::slice::from_raw_parts_mut(self.fb_addr.add(row_start), count);
-                slice.fill(color);
+        } else {
+            for dy in 0..phys_h {
+                let py = phys_y_start + dy;
+                let row_start = py * self.pitch + phys_x_start;
+                unsafe {
+                    let slice =
+                        core::slice::from_raw_parts_mut(self.fb_addr.add(row_start), phys_w);
+                    slice.fill(color);
+                }
             }
         }
     }
 
-    /// Рисует рамку прямоугольника (1px)
+    /// Рисует рамку прямоугольника (1px) — с масштабированием виртуальных координат
     pub fn draw_rect(&self, x: usize, y: usize, w: usize, h: usize, color: u32) {
         if w == 0 || h == 0 {
             return;
         }
+        let max_x = self.fb_width();
+        let max_y = self.fb_height();
+
         // Верхняя и нижняя границы
         self.fill_rect(x, y, w, 1, color);
         if h > 1 {
@@ -451,20 +581,14 @@ impl Console {
         if h > 2 {
             for dy in 1..h - 1 {
                 let py = y + dy;
-                if py >= self.height {
+                if py >= max_y {
                     break;
                 }
-                if x < self.width {
-                    unsafe {
-                        let offset = py * self.pitch + x;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), color);
-                    }
+                if x < max_x {
+                    self.put_pixel(x, py, color);
                 }
-                if x + w - 1 < self.width {
-                    unsafe {
-                        let offset = py * self.pitch + x + w - 1;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), color);
-                    }
+                if x + w - 1 < max_x {
+                    self.put_pixel(x + w - 1, py, color);
                 }
             }
         }
@@ -496,11 +620,13 @@ impl Console {
         }
     }
 
-    /// Рисует текст в позиции (x, y) пиксельными координатами
+    /// Рисует текст в позиции (x, y) пиксельными координатами (с масштабированием)
     pub fn draw_text_at(&self, x: usize, y: usize, text: &str, fg: u32, bg: u32) {
+        let max_x = self.fb_width();
+        let max_y = self.fb_height();
         for (i, ch) in text.chars().enumerate() {
             let char_x = x + i * FONT_WIDTH;
-            if char_x + FONT_WIDTH > self.width || y + FONT_HEIGHT > self.height {
+            if char_x + FONT_WIDTH > max_x || y + FONT_HEIGHT > max_y {
                 break;
             }
             let font_index = if ch >= ' ' && ch <= '~' {
@@ -516,6 +642,64 @@ impl Console {
                     self.put_pixel(char_x + dx, y + dy, color);
                 }
             }
+        }
+    }
+
+    // === Виртуальный framebuffer ===
+
+    /// Ширина виртуального экрана (алиас для fb_width)
+    pub fn virt_width(&self) -> usize {
+        self.fb_width()
+    }
+
+    /// Высота виртуального экрана (алиас для fb_height)
+    pub fn virt_height(&self) -> usize {
+        self.fb_height()
+    }
+
+    /// Питч фреймбуфера в u32 словах (всегда физический)
+    pub fn fb_pitch_words(&self) -> usize {
+        self.pitch
+    }
+
+    /// Включить back buffer — все рисования идут в off-screen буфер
+    pub fn enable_back_buffer(&mut self) {
+        let size = self.pitch * self.height;
+        let mut buf = Vec::<u32>::with_capacity(size);
+        buf.resize(size, 0);
+        self.back_buffer_ptr = buf.as_mut_ptr();
+        self.back_buffer_size = size;
+        self.back_buffer = Some(buf);
+    }
+
+    /// Выключить back buffer — рисования идут напрямую в фреймбуфер
+    pub fn disable_back_buffer(&mut self) {
+        self.back_buffer = None;
+        self.back_buffer_ptr = core::ptr::null_mut();
+        self.back_buffer_size = 0;
+    }
+
+    /// Копировать back buffer в фреймбуфер (bulk memcpy)
+    pub fn flip(&self) {
+        if !self.back_buffer_ptr.is_null() {
+            let total = self.pitch * self.height;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.back_buffer_ptr as *const u32,
+                    self.fb_addr,
+                    total,
+                );
+            }
+        }
+    }
+
+    /// Установить виртуальное разрешение (демо рисует в vw×vh, масштабируется на экран)
+    pub fn set_virtual_resolution(&mut self, vw: usize, vh: usize) {
+        self.virtual_width = vw;
+        self.virtual_height = vh;
+        if vw > 0 && vh > 0 {
+            self.scale_x = (((self.width as u64) << 16) / vw as u64) as u32;
+            self.scale_y = (((self.height as u64) << 16) / vh as u64) as u32;
         }
     }
 }

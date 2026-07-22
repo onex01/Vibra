@@ -1,11 +1,14 @@
 /// 3D каркасный куб — вращающийся куб с проекцией и линиями Брезенхема.
-/// Ctrl+Z или ESC для выхода.
+/// Виртуальное разрешение 320×240, back buffer. Ctrl+Z или ESC для выхода.
 use vibra_kernel::commands::CmdResult;
 use vibra_kernel::framebuffer::Console;
 use vibra_kernel::graphics::{Canvas, FpsCounter, sin_lut, cos_lut};
 
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     vibra_kernel::reset_cancel();
+
+    console.enable_back_buffer();
+    console.set_virtual_resolution(320, 240);
 
     let w = console.fb_width();
     let h = console.fb_height();
@@ -49,20 +52,25 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     let mut angle_x: u8 = 0;
     let mut fps = FpsCounter::new();
 
-    console.print_colored(
-        "3D Wireframe Cube — Ctrl+Z or ESC to exit\n",
+    console.draw_text_at(
+        0,
+        4,
+        "3D Wireframe - Ctrl+Z or ESC",
         vibra_kernel::framebuffer::COLOR_CYAN,
+        0x000a0a2a,
     );
+    console.flip();
 
     loop {
         // Проверка отмены (Ctrl+Z)
         if vibra_kernel::is_cancelled() {
             vibra_kernel::reset_cancel();
+            console.disable_back_buffer();
+            console.restore_text_mode();
             console.print_colored(
-                "\n[GFX] Demo cancelled\n",
+                "[GFX] Demo отменён\n",
                 vibra_kernel::framebuffer::COLOR_YELLOW,
             );
-            console.restore_text_mode();
             return CmdResult::Ok;
         }
 
@@ -70,21 +78,23 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         if let Some(key) = vibra_kernel::keyboard::poll_key() {
             match key {
                 vibra_kernel::keyboard::Key::Char('\x1B') => {
+                    console.disable_back_buffer();
+                    console.restore_text_mode();
                     console.print_colored(
-                        "\n[GFX] Demo exited\n",
+                        "[GFX] Demo завершён\n",
                         vibra_kernel::framebuffer::COLOR_GREEN,
                     );
-                    console.restore_text_mode();
-            return CmdResult::Ok;
+                    return CmdResult::Ok;
                 }
                 vibra_kernel::keyboard::Key::Char('\x1A') => {
                     vibra_kernel::request_cancel();
+                    console.disable_back_buffer();
+                    console.restore_text_mode();
                     console.print_colored(
-                        "\n[GFX] Demo cancelled\n",
+                        "[GFX] Demo отменён\n",
                         vibra_kernel::framebuffer::COLOR_YELLOW,
                     );
-                    console.restore_text_mode();
-            return CmdResult::Ok;
+                    return CmdResult::Ok;
                 }
                 _ => {}
             }
@@ -160,6 +170,9 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         // Счётчик FPS
         fps.tick();
         fps.draw(&*console);
+
+        // Копируем back buffer → framebuffer
+        console.flip();
 
         vibra_kernel::task::yield_now();
     }

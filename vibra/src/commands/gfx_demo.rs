@@ -1,5 +1,5 @@
-/// Простая графическая демка — рисует движущиеся фигуры на_FRAMEBUFFER.
-/// Использует Canvas API и FpsCounter. Ctrl+Z или ESC для выхода.
+/// Простая графическая демка — рисует движущиеся фигуры на framebuffer.
+/// Использует back buffer и виртуальное разрешение 320×240. Ctrl+Z или ESC для выхода.
 use vibra_kernel::commands::CmdResult;
 use vibra_kernel::framebuffer::Console;
 use vibra_kernel::graphics::FpsCounter;
@@ -7,11 +7,23 @@ use vibra_kernel::graphics::FpsCounter;
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     vibra_kernel::reset_cancel();
 
+    console.enable_back_buffer();
+    console.set_virtual_resolution(320, 240);
+
     let w = console.fb_width();
     let h = console.fb_height();
 
     // Фон
     console.fill_rect(0, 0, w, h, 0x000a0a2a);
+    // Надпись в виртуальных координатах (через draw_text_at → put_pixel → back buffer)
+    console.draw_text_at(
+        0,
+        4,
+        "GFX Demo - Ctrl+Z or ESC",
+        vibra_kernel::framebuffer::COLOR_CYAN,
+        0x000a0a2a,
+    );
+    console.flip();
 
     let mut box_x: i32 = 0;
     let mut box_y: i32 = 0;
@@ -21,18 +33,14 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     let mut frame: u32 = 0;
     let mut fps = FpsCounter::new();
 
-    console.print_colored(
-        "GFX Demo — Ctrl+Z or ESC to exit\n",
-        vibra_kernel::framebuffer::COLOR_CYAN,
-    );
-
     loop {
         // Проверяем отмену (Ctrl+Z)
         if vibra_kernel::is_cancelled() {
             vibra_kernel::reset_cancel();
+            console.disable_back_buffer();
             console.restore_text_mode();
             console.print_colored(
-                "[GFX] Demo cancelled\n",
+                "[GFX] Demo отменён\n",
                 vibra_kernel::framebuffer::COLOR_YELLOW,
             );
             return CmdResult::Ok;
@@ -42,18 +50,20 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         if let Some(key) = vibra_kernel::keyboard::poll_key() {
             match key {
                 vibra_kernel::keyboard::Key::Char('\x1B') => {
+                    console.disable_back_buffer();
                     console.restore_text_mode();
                     console.print_colored(
-                        "[GFX] Demo exited\n",
+                        "[GFX] Demo завершён\n",
                         vibra_kernel::framebuffer::COLOR_GREEN,
                     );
                     return CmdResult::Ok;
                 }
                 vibra_kernel::keyboard::Key::Char('\x1A') => {
                     vibra_kernel::request_cancel();
+                    console.disable_back_buffer();
                     console.restore_text_mode();
                     console.print_colored(
-                        "[GFX] Demo cancelled\n",
+                        "[GFX] Demo отменён\n",
                         vibra_kernel::framebuffer::COLOR_YELLOW,
                     );
                     return CmdResult::Ok;
@@ -108,6 +118,9 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         fps.draw(&*console);
 
         frame += 1;
+
+        // Копируем back buffer → framebuffer
+        console.flip();
 
         // Yield — не блокируем scheduler
         vibra_kernel::task::yield_now();
