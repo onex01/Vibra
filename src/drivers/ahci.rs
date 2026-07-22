@@ -480,3 +480,32 @@ pub fn write_sectors(port_num: u32, lba: u64, count: u16, buffer: &[u8]) -> bool
         true
     }
 }
+
+/// Реализация DiskIo для AHCI
+impl crate::fs::disk::DiskIo for AhciDisk {
+    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        if read_sectors(self.port, sector, 1, buf) {
+            Ok(())
+        } else {
+            Err(crate::fs::vfs::FsError::IoError)
+        }
+    }
+
+    fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
+        if write_sectors(self.port, sector, 1, buf) {
+            Ok(())
+        } else {
+            Err(crate::fs::vfs::FsError::IoError)
+        }
+    }
+}
+
+pub struct AhciDisk {
+    port: u32,
+}
+
+impl AhciDisk {
+    pub fn new(port: u32) -> Self {
+        Self { port }
+    }
+}

@@ -222,9 +222,8 @@ pub extern "C" fn _start() -> ! {
     syscall::init();
 
     // APIC: LAPIC init + IO APIC masked (PIC остаётся primary).
-    // APIC: LAPIC init + IO APIC masked (PIC остаётся primary).
-    // Assembly MMIO fix: теперь LAPIC MMIO writes НЕ ломают serial.
-    // crate::interrupts::apic::init();
+    // Assembly MMIO fix: lapic_read/write uses inline asm, не ломает serial.
+    crate::interrupts::apic::init();
 
     interrupts::enable();
 
