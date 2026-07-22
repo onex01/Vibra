@@ -40,7 +40,7 @@ impl LineEditor {
         self.history_idx = self.history_count;
         self.prompt_len = prompt_len;
         loop {
-            let next_key = keyboard::poll_key().or_else(crate::serial::poll_key);
+            let next_key = crate::serial::poll_key().or_else(keyboard::poll_key);
             if let Some(key) = next_key {
                 match key {
                     Key::Enter => {
