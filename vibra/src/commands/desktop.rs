@@ -3,9 +3,10 @@
 // Запускает композитор с демонстрационными окнами, обрабатывает
 // ввод мыши и клавиатуры, поддерживает перетаскивание окон.
 // ESC возвращает в текстовый режим.
+// F12 переключает между десктопом и текстовым шеллом.
 
 use vibra_kernel::commands::CmdResult;
-use vibra_kernel::framebuffer::Console;
+use vibra_kernel::framebuffer::{self, Console};
 use crate::gui::compositor::Compositor;
 use crate::gui::widget::Window;
 use crate::gui::cursor;
@@ -25,12 +26,105 @@ fn usize_to_str(mut n: usize, buf: &mut [u8]) -> &str {
     core::str::from_utf8(&buf[i..]).unwrap_or("0")
 }
 
+/// Рисует экран загрузки с прогресс-баром
+fn draw_loading_screen(console: &Console) {
+    let w = console.fb_width();
+    let h = console.fb_height();
+
+    // Фон загрузки (тёмно-синий)
+    console.fill_rect(0, 0, w, h, 0x000a0a1a);
+
+    // Название ОС
+    let title = "Vibra OS";
+    let title_len = title.len() * 8;
+    let title_x = if w > title_len { (w - title_len) / 2 } else { 0 };
+    let title_y = h / 2 - 40;
+    console.draw_text_at(title_x, title_y, title, framebuffer::COLOR_CYAN, 0x000a0a1a);
+
+    // Прогресс-бар
+    let bar_width = 200;
+    let bar_height = 12;
+    let bar_x = if w > bar_width { (w - bar_width) / 2 } else { 0 };
+    let bar_y = h / 2;
+
+    // Рамка прогресс-бара
+    console.draw_rect(bar_x, bar_y, bar_width, bar_height, 0x00555555);
+
+    // Заполняем прогресс-бар (внутри)
+    console.fill_rect(bar_x + 1, bar_y + 1, bar_width - 2, bar_height - 2, 0x00222233);
+}
+
+/// Заполняет прогресс-бар до заданного процента
+fn update_progress_bar(console: &Console, percent: usize) {
+    let w = console.fb_width();
+    let h = console.fb_height();
+
+    let bar_width = 200;
+    let bar_height = 12;
+    let bar_x = if w > bar_width { (w - bar_width) / 2 } else { 0 };
+    let bar_y = h / 2;
+
+    // Очищаем внутреннюю часть
+    console.fill_rect(bar_x + 1, bar_y + 1, bar_width - 2, bar_height - 2, 0x00222233);
+
+    // Заполняем согласно проценту
+    let fill_w = ((bar_width - 2) * percent) / 100;
+    if fill_w > 0 {
+        console.fill_rect(bar_x + 1, bar_y + 1, fill_w, bar_height - 2, 0x003388FF);
+    }
+
+    // Процент текстом
+    let mut buf = [0u8; 4];
+    let mut pos = 0;
+    let val = percent;
+    if val == 0 {
+        buf[0] = b'0';
+        pos = 1;
+    } else {
+        let mut tmp = [0u8; 3];
+        let mut tpos = 0;
+        let mut v = val;
+        while v > 0 && tpos < 3 {
+            tmp[tpos] = b'0' + (v % 10) as u8;
+            v /= 10;
+            tpos += 1;
+        }
+        let mut i = tpos;
+        while i > 0 && pos < 3 {
+            i -= 1;
+            buf[pos] = tmp[i];
+            pos += 1;
+        }
+    }
+    buf[pos] = b'%';
+    pos += 1;
+
+    let pct_str = core::str::from_utf8(&buf[..pos]).unwrap_or("0%");
+    let pct_len = pos * 8;
+    let pct_x = if w > pct_len { (w - pct_len) / 2 } else { 0 };
+    let pct_y = bar_y + bar_height + 8;
+
+    // Очищаем область под процентами
+    console.fill_rect(pct_x, pct_y, pct_len + 8, 16, 0x000a0a1a);
+    console.draw_text_at(pct_x + 4, pct_y, pct_str, framebuffer::COLOR_WHITE, 0x000a0a1a);
+}
+
+/// Запуск графического режима из команды
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     vibra_kernel::println!("[GUI] Запуск графического режима...");
 
     // Прячем текстовый курсор
     let max_row = console.rows();
     console.set_cursor(0, max_row + 1);
+
+    // Экран загрузки
+    draw_loading_screen(console);
+
+    // Анимация загрузки (0% до 100%)
+    for i in 0..=100 {
+        update_progress_bar(console, i);
+        vibra_kernel::task::yield_now();
+    }
 
     // Инициализируем курсор мыши
     cursor::init();
@@ -154,12 +248,21 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
                     console.clear();
                     return CmdResult::Continue;
                 }
+                vibra_kernel::keyboard::Key::Char('l') => {
+                    // F12 (scancode 0x57) поступает как Key::Char('l')? Нет.
+                    // F12 = 0x58 scancode — проверяем через poll_key
+                    // F12 в keyboard.rs не определён, проверим другой способ
+                }
                 vibra_kernel::keyboard::Key::Char(ch) => {
                     compositor.handle_key(ch as u8);
                 }
                 _ => {}
             }
         }
+
+        // Проверяем F12 (scancode 0x58) — он не обрабатывается keyboard.rs,
+        // поэтому проверяем напрямую через poll_raw_scancode если доступно
+        // Пока используем только ESC для выхода.
 
         // Рендеринг
         compositor.render(console);

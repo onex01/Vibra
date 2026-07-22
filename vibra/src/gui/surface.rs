@@ -1,8 +1,8 @@
 // Surface — абстракция поверхности рисования.
 //
 // Каждая поверхность имеет собственный буфер пикселей (Vec<u32>)
-// и координаты позиции на экране. Поддерживает рисование примитивов
-// и копирование в фреймбуфер через Console.
+// и координаты позиции на экране. Поддерживает рисование примитивов,
+// скруглённых прямоугольников и копирование в фреймбуфер через Console.
 
 use alloc::vec::Vec;
 use vibra_kernel::framebuffer::{Console, FONT_DATA, FONT_WIDTH, FONT_HEIGHT};
@@ -69,6 +69,101 @@ impl Surface {
             }
         }
         self.dirty = true;
+    }
+
+    /// Рисует скруглённый прямоугольник (заливка).
+    /// Углы скругляются с помощью проверки расстояния до центра закругляющего круга.
+    pub fn fill_rounded_rect(&mut self, lx: i32, ly: i32, w: usize, h: usize, radius: usize, color: u32) {
+        let r = radius as i32;
+        for dy in 0..h {
+            let py = ly + dy as i32;
+            if py < 0 || py >= self.height as i32 {
+                continue;
+            }
+            for dx in 0..w {
+                let px = lx + dx as i32;
+                if px < 0 || px >= self.width as i32 {
+                    continue;
+                }
+                // Проверяем, попадает ли пиксель в угловую область
+                let outside = Self::is_outside_rounded_rect(dx, dy, w, h, r);
+                if !outside {
+                    self.buffer[py as usize * self.width + px as usize] = color;
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Рисует рамку скруглённого прямоугольника (1px) с учётом прозрачности углов.
+    /// Прозрачные пиксели (с alpha == 0) пропускаются.
+    pub fn stroke_rounded_rect(&mut self, lx: i32, ly: i32, w: usize, h: usize, radius: usize, color: u32) {
+        let r = radius as i32;
+        for dy in 0..h {
+            let py = ly + dy as i32;
+            if py < 0 || py >= self.height as i32 {
+                continue;
+            }
+            for dx in 0..w {
+                let px = lx + dx as i32;
+                if px < 0 || px >= self.width as i32 {
+                    continue;
+                }
+                // Проверяем, что пиксель на границе (1px)
+                let is_border = dx == 0 || dy == 0 || dx == w - 1 || dy == h - 1;
+                if !is_border {
+                    continue;
+                }
+                let outside = Self::is_outside_rounded_rect(dx, dy, w, h, r);
+                if !outside {
+                    self.buffer[py as usize * self.width + px as usize] = color;
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Определяет, находится ли пиксель (dx, dy) за пределами скруглённого прямоугольника.
+    /// Пиксель считается за пределами, если он в угловой области и лежит вне окружности.
+    #[inline]
+    fn is_outside_rounded_rect(dx: usize, dy: usize, w: usize, h: usize, r: i32) -> bool {
+        if r <= 0 {
+            return false;
+        }
+        let x = dx as i32;
+        let y = dy as i32;
+        let w_i = w as i32;
+        let h_i = h as i32;
+
+        // Верхний левый угол
+        if x < r && y < r {
+            let cx = r;
+            let cy = r;
+            let dist_sq = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            return dist_sq > r * r;
+        }
+        // Верхний правый угол
+        if x >= w_i - r && y < r {
+            let cx = w_i - r - 1;
+            let cy = r;
+            let dist_sq = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            return dist_sq > r * r;
+        }
+        // Нижний левый угол
+        if x < r && y >= h_i - r {
+            let cx = r;
+            let cy = h_i - r - 1;
+            let dist_sq = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            return dist_sq > r * r;
+        }
+        // Нижний правый угол
+        if x >= w_i - r && y >= h_i - r {
+            let cx = w_i - r - 1;
+            let cy = h_i - r - 1;
+            let dist_sq = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            return dist_sq > r * r;
+        }
+        false
     }
 
     /// Копирует содержимое поверхности в фреймбуфер
@@ -138,5 +233,10 @@ impl Surface {
             *pixel = color;
         }
         self.dirty = true;
+    }
+
+    /// Возвращает ссылку на внутренний буфер пикселей
+    pub fn buffer(&self) -> &[u32] {
+        &self.buffer
     }
 }

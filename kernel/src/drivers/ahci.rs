@@ -239,6 +239,13 @@ pub fn init() {
             if det == 0x03 && ipm == 0x01 {
                 // Device connected and active
                 let sig = port_read32(i, PORT_SIG);
+
+                // Пропускаем phantom порты (0xffffffff = нет реального устройства)
+                if sig == 0xFFFFFFFF {
+                    println!("[AHCI] Port {}: phantom (det=3 ipm=1 but SIG=0xFFFFFFFF), skip", i);
+                    continue;
+                }
+
                 let sig_str = match sig >> 16 {
                     0x0000 => "ATAPI",
                     0xEB14 => "ATAPI",
@@ -541,7 +548,7 @@ pub fn get_disk_info() -> Vec<DiskInfo> {
 pub fn identify_device(port_num: u32) -> Option<DiskInfo> {
     unsafe {
         // Ждём пока порт свободен (BSY=0, DRQ=0)
-        let mut timeout = 500_000u32;
+        let mut timeout = 50_000u32;
         while port_read32(port_num, PORT_TFD) as u8 & (TFD_BSY | TFD_DRQ) != 0 && timeout > 0 {
             timeout -= 1;
         }
@@ -597,7 +604,7 @@ pub fn identify_device(port_num: u32) -> Option<DiskInfo> {
         port_write32(port_num, PORT_CI, 1);
 
         // Ждём завершения
-        timeout = 10_000_000;
+        timeout = 2_000_000;
         while port_read32(port_num, PORT_CI) & 1 != 0 && timeout > 0 {
             timeout -= 1;
         }
