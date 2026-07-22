@@ -2,16 +2,16 @@
 /// Изменяй версии ТОЛЬКО здесь!
 
 /// Версия ОС
-pub const OS_VERSION: &str = "0.9.0";
+pub const OS_VERSION: &str = "1.0.0";
 
 /// Кодовое название ОС
-pub const OS_CODENAME: &str = "Vega";
+pub const OS_CODENAME: &str = "Canopus";
 
 /// Версия ядра
-pub const KERNEL_VERSION: &str = "0.9.0";
+pub const KERNEL_VERSION: &str = "1.0.0";
 
 /// Кодовое название ядра
-pub const KERNEL_CODENAME: &str = "Plasma";
+pub const KERNEL_CODENAME: &str = "Quantum";
 
 /// Автор проекта
 pub const AUTHOR: &str = "OneX01";

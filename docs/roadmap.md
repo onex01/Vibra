@@ -1,6 +1,6 @@
 # Roadmap — План развития Vibra OS
 
-> **Текущая версия:** 0.9.0 "Plasma" (ядро) / 0.9.0 "Vega" (ОС).
+> **Текущая версия:** 1.0.0 "Quantum" (ядро) / 1.0.0 "Canopus" (ОС).
 >
 > **Архитектура:** Workspace — `kernel/` (vibra-kernel, lib crate) + `vibra/` (bin crate)
 

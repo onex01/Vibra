@@ -9,6 +9,7 @@
 
 use crate::println;
 use alloc::vec::Vec;
+use alloc::string::String;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -258,6 +259,16 @@ pub fn init() {
         }
 
         println!("[AHCI] {} active ports", ports.len());
+
+        // Определяем тип каждого диска через IDENTIFY DEVICE
+        let mut disk_infos = DISK_INFO.lock();
+        for port in ports.iter() {
+            if port.active {
+                if let Some(info) = identify_device(port.num) {
+                    disk_infos.push(info);
+                }
+            }
+        }
     }
 }
 
@@ -507,5 +518,149 @@ pub struct AhciDisk {
 impl AhciDisk {
     pub fn new(port: u32) -> Self {
         Self { port }
+    }
+}
+
+/// Информация о диске, полученная через ATA IDENTIFY
+#[derive(Clone)]
+pub struct DiskInfo {
+    pub total_sectors: u64,
+    pub sector_size: u16,
+    pub serial: String,
+    pub model: String,
+}
+
+static DISK_INFO: Mutex<Vec<DiskInfo>> = Mutex::new(Vec::new());
+
+/// Получить информацию о найденных дисках
+pub fn get_disk_info() -> Vec<DiskInfo> {
+    DISK_INFO.lock().clone()
+}
+
+/// Выполнить ATA IDENTIFY DEVICE на указанном порту AHCI
+pub fn identify_device(port_num: u32) -> Option<DiskInfo> {
+    unsafe {
+        // Ждём пока порт свободен (BSY=0, DRQ=0)
+        let mut timeout = 500_000u32;
+        while port_read32(port_num, PORT_TFD) as u8 & (TFD_BSY | TFD_DRQ) != 0 && timeout > 0 {
+            timeout -= 1;
+        }
+        if timeout == 0 {
+            println!("[AHCI] Port {}: identify timeout (port busy)", port_num);
+            return None;
+        }
+
+        // Очи Status
+        port_write32(port_num, PORT_IS, 0xFFFFFFFF);
+
+        // Command List
+        let cmd_list_phys = port_read32(port_num, PORT_CLB) as u64
+            | ((port_read32(port_num, PORT_CLB + 4) as u64) << 32);
+        let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
+        let cmd_list = (hhdm + cmd_list_phys) as *mut CommandHeader;
+        let cmd = &mut *cmd_list;
+
+        // Command Table (FIS + PRD)
+        let ct_layout = core::alloc::Layout::from_size_align(256, 256).unwrap();
+        let ct_ptr = alloc::alloc::alloc_zeroed(ct_layout);
+        if ct_ptr.is_null() { return None; }
+        let ct_phys = virt_to_phys(ct_ptr as u64);
+
+        // Буфер 512 байт для ответа IDENTIFY
+        let id_buf_layout = core::alloc::Layout::from_size_align(512, 16).unwrap();
+        let id_buf = alloc::alloc::alloc_zeroed(id_buf_layout);
+        if id_buf.is_null() {
+            alloc::alloc::dealloc(ct_ptr, ct_layout);
+            return None;
+        }
+        let id_buf_phys = virt_to_phys(id_buf as u64);
+
+        // FIS — IDENTIFY DEVICE (ATA_CMD_IDENTIFY = 0xEC)
+        let fis = ct_ptr as *mut FisRegH2d;
+        (*fis).fis_type = FIS_TYPE_REG_H2D;
+        (*fis).command = ATA_CMD_IDENTIFY;
+        (*fis).device = 0;
+
+        // PRD — указывает на буфер с ответом
+        let prd = (ct_ptr as *mut u8).add(128) as *mut PrdEntry;
+        (*prd).base_addr = id_buf_phys as u32;
+        (*prd).byte_count = 511; // 512 байт, без прерывания
+
+        // Command Header
+        cmd.cfl = 5;  // FIS 5 dword'ов
+        cmd.c = 1;    // Clear busy
+        cmd.prdtl = 1;
+        cmd.prdbc = 0;
+        cmd.command_table_base = ct_phys;
+
+        // Запускаем команду
+        port_write32(port_num, PORT_CI, 1);
+
+        // Ждём завершения
+        timeout = 10_000_000;
+        while port_read32(port_num, PORT_CI) & 1 != 0 && timeout > 0 {
+            timeout -= 1;
+        }
+
+        let is = port_read32(port_num, PORT_IS);
+        alloc::alloc::dealloc(ct_ptr, ct_layout);
+
+        if timeout == 0 {
+            println!("[AHCI] Port {}: identify command timeout", port_num);
+            alloc::alloc::dealloc(id_buf, id_buf_layout);
+            return None;
+        }
+
+        if is & 1 != 0 {
+            println!("[AHCI] Port {}: identify error IS={:#x}", port_num, is);
+            port_write32(port_num, PORT_IS, 0xFFFFFFFF);
+            alloc::alloc::dealloc(id_buf, id_buf_layout);
+            return None;
+        }
+
+        // Парсим данные IDENTIFY (256 слов по 16 бит)
+        let data = core::slice::from_raw_parts(id_buf as *const u16, 256);
+
+        // Секторов (LBA48) — слова 100..103
+        let total_sectors = (data[100] as u64)
+            | ((data[101] as u64) << 16)
+            | ((data[102] as u64) << 32)
+            | ((data[103] as u64) << 48);
+
+        // Серийный номер — слова 10..19 (20 байт, ASCII с байт-свопом)
+        let mut serial_raw = [0u8; 20];
+        for i in 0..10 {
+            let w = data[10 + i];
+            serial_raw[i * 2] = (w >> 8) as u8;
+            serial_raw[i * 2 + 1] = w as u8;
+        }
+        let serial_end = serial_raw.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
+        let serial = String::from_utf8_lossy(&serial_raw[..serial_end]).into_owned();
+
+        // Модель диска — слова 27..46 (40 байт)
+        let mut model_raw = [0u8; 40];
+        for i in 0..20 {
+            let w = data[27 + i];
+            model_raw[i * 2] = (w >> 8) as u8;
+            model_raw[i * 2 + 1] = w as u8;
+        }
+        let model_end = model_raw.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
+        let model = String::from_utf8_lossy(&model_raw[..model_end]).into_owned();
+
+        // Размер сектора — по умолчанию 512
+        let sector_size: u16 = if data.len() > 106 && data[106] & (1 << 12) != 0 {
+            // Объявлен физический размер сектора
+            let phys_sect_words = data[118] as u32;
+            if phys_sect_words > 0 { (phys_sect_words * 2) as u16 } else { 512 }
+        } else {
+            512
+        };
+
+        alloc::alloc::dealloc(id_buf, id_buf_layout);
+
+        println!("[AHCI] Port {}: {} — {}sect ({} bytes/sect)",
+            port_num, model, total_sectors, sector_size);
+
+        Some(DiskInfo { total_sectors, sector_size, serial, model })
     }
 }

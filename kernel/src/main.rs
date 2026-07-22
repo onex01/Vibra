@@ -24,6 +24,7 @@ mod cpu_info;
 mod drivers;
 mod syscall;
 mod script;
+mod gui;
 mod boot_log;
 
 use core::panic::PanicInfo;

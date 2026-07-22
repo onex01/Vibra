@@ -18,7 +18,7 @@ pub const COLOR_VIBRA_PROMPT: u32 = 0x0000FF88; // Зелёный prompt
 
 // Встроенный bitmap font 8x16 для ASCII 32..=126 (95 символов)
 // Каждый символ — 16 байт (по 1 байту на строку, 8 пикселей в байте)
-static FONT_DATA: [[u8; 16]; 95] = {
+pub(crate) static FONT_DATA: [[u8; 16]; 95] = {
     let mut data = [[0u8; 16]; 95];
     // Пробел (32)
     data[0] = [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00];
@@ -368,6 +368,143 @@ impl Console {
         }
         if let Ok(s) = core::str::from_utf8(&buf[i..]) {
             self.print(s);
+        }
+    }
+
+    // === Примитивы рисования пикселей ===
+
+    /// Ширина фреймбуфера в пикселях
+    pub fn fb_width(&self) -> usize {
+        self.width
+    }
+
+    /// Высота фреймбуфера в пикселях
+    pub fn fb_height(&self) -> usize {
+        self.height
+    }
+
+    /// Читает один пиксель из фреймбуфера
+    pub fn read_pixel(&self, x: usize, y: usize) -> u32 {
+        if x < self.width && y < self.height {
+            unsafe {
+                let offset = y * self.pitch + x;
+                core::ptr::read_volatile(self.fb_addr.add(offset))
+            }
+        } else {
+            0
+        }
+    }
+
+    /// Записывает один пиксель в фреймбуфер
+    pub fn put_pixel(&self, x: usize, y: usize, color: u32) {
+        if x < self.width && y < self.height {
+            unsafe {
+                let offset = y * self.pitch + x;
+                core::ptr::write_volatile(self.fb_addr.add(offset), color);
+            }
+        }
+    }
+
+    /// Заливает прямоугольник заданным цветом
+    pub fn fill_rect(&self, x: usize, y: usize, w: usize, h: usize, color: u32) {
+        for dy in 0..h {
+            let py = y + dy;
+            if py >= self.height {
+                break;
+            }
+            let start_x = x.min(self.width);
+            let end_x = (x + w).min(self.width);
+            if start_x >= end_x {
+                continue;
+            }
+            let count = end_x - start_x;
+            let row_start = py * self.pitch + start_x;
+            unsafe {
+                let slice = core::slice::from_raw_parts_mut(self.fb_addr.add(row_start), count);
+                slice.fill(color);
+            }
+        }
+    }
+
+    /// Рисует рамку прямоугольника (1px)
+    pub fn draw_rect(&self, x: usize, y: usize, w: usize, h: usize, color: u32) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        // Верхняя и нижняя границы
+        self.fill_rect(x, y, w, 1, color);
+        if h > 1 {
+            self.fill_rect(x, y + h - 1, w, 1, color);
+        }
+        // Левая и правая границы
+        if h > 2 {
+            for dy in 1..h - 1 {
+                let py = y + dy;
+                if py >= self.height {
+                    break;
+                }
+                if x < self.width {
+                    unsafe {
+                        let offset = py * self.pitch + x;
+                        core::ptr::write_volatile(self.fb_addr.add(offset), color);
+                    }
+                }
+                if x + w - 1 < self.width {
+                    unsafe {
+                        let offset = py * self.pitch + x + w - 1;
+                        core::ptr::write_volatile(self.fb_addr.add(offset), color);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Копирует буфер пикселей в фреймбуфер
+    pub fn blit(&self, x: usize, y: usize, src: &[u32], src_w: usize, src_h: usize) {
+        for sy in 0..src_h {
+            let dy = y + sy;
+            if dy >= self.height {
+                break;
+            }
+            let src_row_start = sy * src_w;
+            if src_row_start >= src.len() {
+                break;
+            }
+            let start_x = x.min(self.width);
+            let copy_width = src_w.min(self.width.saturating_sub(start_x));
+            let row_start = dy * self.pitch + start_x;
+
+            for dx in 0..copy_width {
+                let src_idx = src_row_start + dx;
+                if src_idx < src.len() {
+                    unsafe {
+                        core::ptr::write_volatile(self.fb_addr.add(row_start + dx), src[src_idx]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Рисует текст в позиции (x, y) пиксельными координатами
+    pub fn draw_text_at(&self, x: usize, y: usize, text: &str, fg: u32, bg: u32) {
+        for (i, ch) in text.chars().enumerate() {
+            let char_x = x + i * FONT_WIDTH;
+            if char_x + FONT_WIDTH > self.width || y + FONT_HEIGHT > self.height {
+                break;
+            }
+            let font_index = if ch >= ' ' && ch <= '~' {
+                (ch as usize) - 32
+            } else {
+                0
+            };
+            let glyph = &FONT_DATA[font_index];
+            for dy in 0..FONT_HEIGHT {
+                let line = glyph[dy];
+                for dx in 0..FONT_WIDTH {
+                    let color = if (line >> (7 - dx)) & 1 == 1 { fg } else { bg };
+                    self.put_pixel(char_x + dx, y + dy, color);
+                }
+            }
         }
     }
 }

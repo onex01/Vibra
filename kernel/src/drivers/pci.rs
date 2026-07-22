@@ -264,6 +264,12 @@ pub unsafe fn enable_bus_master(bus: u8, dev: u8, func: u8) {
     pci_write_u32(bus, dev, func, 0x04, command);
 }
 
+/// Найти все устройства по class/subclass
+pub fn find_all_devices_by_class(class: u8, subclass: u8) -> Vec<PciDevice> {
+    let devices = PCI_DEVICES.lock();
+    devices.iter().filter(|d| d.class == class && d.subclass == subclass).copied().collect()
+}
+
 /// Количество найденных устройств
 pub fn device_count() -> usize {
     PCI_DEVICES.lock().len()

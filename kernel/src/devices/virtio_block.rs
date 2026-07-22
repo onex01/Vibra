@@ -34,6 +34,7 @@ struct VirtQueue {
 }
 
 unsafe impl Send for VirtQueue {}
+unsafe impl Sync for VirtQueue {}
 
 impl VirtQueue {
     fn new(queue_size: u16, hhdm: u64) -> Option<Self> {
@@ -109,6 +110,9 @@ pub struct VirtioBlock {
     ready: bool,
     queue: Option<VirtQueue>,
 }
+
+unsafe impl Send for VirtioBlock {}
+unsafe impl Sync for VirtioBlock {}
 
 impl VirtioBlock {
     pub fn new(base: u64) -> Self {
@@ -278,4 +282,15 @@ pub fn read_sector(sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
 pub fn write_sector(sector: u64, buf: &[u8]) -> Result<(), &'static str> {
     let mut dev = VIRTIO_BLK.lock();
     dev.as_mut().ok_or("no device")?.write_sectors(sector, buf)
+}
+
+/// Реализация DiskIo для VirtIO блочного устройства
+impl crate::fs::DiskIo for VirtioBlock {
+    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        self.read_sectors(sector, buf).map_err(|_| crate::fs::vfs::FsError::IoError)
+    }
+
+    fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
+        self.write_sectors(sector, buf).map_err(|_| crate::fs::vfs::FsError::IoError)
+    }
 }

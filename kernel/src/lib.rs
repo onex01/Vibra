@@ -23,6 +23,7 @@ pub mod users;
 pub mod cpu_info;
 pub mod drivers;
 pub mod syscall;
+pub mod gui;
 pub mod script;
 pub mod boot_log;
 

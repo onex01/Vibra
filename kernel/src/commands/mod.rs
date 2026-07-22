@@ -41,6 +41,11 @@ pub mod apic;
 pub mod beep;
 pub mod kill;
 pub mod run;
+pub mod cpuid;
+pub mod memmap;
+pub mod lsusb;
+pub mod diskinfo;
+pub mod desktop;
 
 use crate::framebuffer::Console;
 
@@ -99,6 +104,11 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "apic",    help: "APIC management/status",    func: apic::run },
     Command { name: "lspci",   help: "list PCI devices",          func: lspci::run },
     Command { name: "usertest", help: "run user-space process",  func: usertest::run },
+    Command { name: "cpuid",    help: "show CPU information",    func: cpuid::run },
+    Command { name: "memmap",   help: "show memory map",         func: memmap::run },
+    Command { name: "lsusb",   help: "list USB controllers",     func: lsusb::run },
+    Command { name: "diskinfo", help: "show AHCI disk info",     func: diskinfo::run },
+    Command { name: "desktop", help: "launch graphical desktop", func: desktop::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
 ];
 

@@ -7,6 +7,7 @@
 pub mod virtio_block;
 pub mod virtio_net;
 pub mod pc_speaker;
+pub mod ps2_mouse;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -77,4 +78,7 @@ pub fn init() {
     register_device("pc-speaker", VirtDeviceType::Console);
     register_device("ps2-keyboard", VirtDeviceType::Input);
     register_device("ps2-mouse", VirtDeviceType::Input);
+
+    // Инициализируем PS/2 мышь
+    ps2_mouse::init();
 }

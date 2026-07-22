@@ -107,6 +107,9 @@ pub fn init() {
         IDT[pic::PIC1_OFFSET as usize + 7].set_handler(isr_spurious_master as *const () as u64);
         IDT[pic::PIC2_OFFSET as usize + 7].set_handler(isr_spurious_slave as *const () as u64);
 
+        // Vector 44: PS/2 мышь (IRQ12 = PIC2_OFFSET + 4)
+        IDT[pic::PIC2_OFFSET as usize + 4].set_handler(isr_mouse as *const () as u64);
+
         // Vector 0x81: Soft IRQ (yield/exit)
         IDT[0x81].set_handler(crate::task::ctx_switch::softirq_naked_stub as *const () as u64);
 
@@ -153,6 +156,17 @@ extern "x86-interrupt" fn isr_serial(_frame: InterruptStackFrame) {
     let _data = unsafe { inb(0x3F8) };
     // Serial идёт через IO APIC → LAPIC EOI
     crate::interrupts::apic::eoi();
+}
+
+// PS/2 Mouse handler (IRQ12, vector 44)
+extern "x86-interrupt" fn isr_mouse(_frame: InterruptStackFrame) {
+    crate::devices::ps2_mouse::handle_interrupt();
+    // EOI: IRQ12 идёт через PIC2
+    if crate::interrupts::apic::is_active() {
+        crate::interrupts::apic::eoi();
+    } else {
+        unsafe { crate::interrupts::pic::eoi(12); }
+    }
 }
 
 // Spurious: EOI НЕ отправляем
