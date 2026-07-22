@@ -4,3 +4,6 @@ pub mod diskinfo;
 pub mod lsusb;
 pub mod desktop;
 pub mod gfx_demo;
+pub mod gfx_particles;
+pub mod gfx_plasma;
+pub mod gfx_3d;

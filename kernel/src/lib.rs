@@ -25,6 +25,7 @@ pub mod drivers;
 pub mod syscall;
 pub mod script;
 pub mod boot_log;
+pub mod graphics;
 
 // === Limine requests (нужны в lib crate для линкера) ===
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};

@@ -36,6 +36,21 @@ fn register_os_commands() {
         func: commands::gfx_demo::run,
     });
     kernel::commands::register_command(kernel::commands::Command {
+        name: "particles",
+        help: "particle system demo",
+        func: commands::gfx_particles::run,
+    });
+    kernel::commands::register_command(kernel::commands::Command {
+        name: "plasma",
+        help: "plasma effect demo",
+        func: commands::gfx_plasma::run,
+    });
+    kernel::commands::register_command(kernel::commands::Command {
+        name: "wireframe",
+        help: "3D wireframe cube",
+        func: commands::gfx_3d::run,
+    });
+    kernel::commands::register_command(kernel::commands::Command {
         name: "desktop",
         help: "launch graphical desktop",
         func: commands::desktop::run,

@@ -383,6 +383,11 @@ impl Console {
         self.height
     }
 
+    /// Питч фреймбуфера в u32 словах
+    pub fn fb_pitch(&self) -> usize {
+        self.pitch
+    }
+
     /// Читает один пиксель из фреймбуфера
     pub fn read_pixel(&self, x: usize, y: usize) -> u32 {
         if x < self.width && y < self.height {

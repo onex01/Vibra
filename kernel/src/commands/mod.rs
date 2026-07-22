@@ -107,8 +107,8 @@ pub const COMMANDS: &[Command] = &[
 use alloc::vec::Vec;
 use spin::Mutex;
 
-/// Динамический реестр команд (允许 vibra добавлять свои команды)
-static EXTRA_COMMANDS: Mutex<Vec<Command>> = Mutex::new(Vec::new());
+/// Динамический реестр команд (позволяет vibra добавлять свои команды)
+pub static EXTRA_COMMANDS: Mutex<Vec<Command>> = Mutex::new(Vec::new());
 
 /// Добавить команду из внешнего crate (vibra OS)
 pub fn register_command(cmd: Command) {
