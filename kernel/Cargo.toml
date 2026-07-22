@@ -1,0 +1,22 @@
+[package]
+name = "vibra-kernel"
+version = "0.8.0"
+edition = "2021"
+
+[dependencies]
+limine = "0.6"
+spin = "0.9.8"
+
+[features]
+default = ["serial-debug"]
+serial-debug = []
+
+[lib]
+name = "vibra_kernel"
+path = "src/lib.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

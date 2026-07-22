@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.4%20Photon-blue?style=flat-square" alt="Version"/>
-  <img src="https://img.shields.io/badge/kernel-0.4.0-green?style=flat-square" alt="Kernel"/>
+  <img src="https://img.shields.io/badge/version-0.9.0%20Vega-blue?style=flat-square" alt="Version"/>
+  <img src="https://img.shields.io/badge/kernel-0.9.0%20Plasma-green?style=flat-square" alt="Kernel"/>
   <img src="https://img.shields.io/badge/arch-x86__64-orange?style=flat-square" alt="Architecture"/>
   <img src="https://img.shields.io/badge/language-Rust-red?style=flat-square" alt="Rust"/>
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License"/>
@@ -121,22 +121,22 @@ make run SERIAL_DEBUG=0
 ## 🏗️ Архитектура
 
 ```
-┌─────────────────────────────┐
-│   Shell и команды            │  ← Userspace (планируется)
-├─────────────────────────────┤
-│   Модули ядра:              │
-│   • fs (RamFS)              │
-│   • shell                   │
-│   • drivers                 │
-│   • memory                  │
-├─────────────────────────────┤
-│   Монолитное ядро (Rust)    │  ← Kernel space
-├─────────────────────────────┤
-│   Limine Bootloader (UEFI)  │
-├─────────────────────────────┤
-│   x86_64 Hardware / QEMU    │
-└─────────────────────────────┘
+Workspace:
+├── kernel/     (vibra-kernel) — lib crate, ядро ОС
+│   ├── memory/     — PMM, heap, paging, VMM
+│   ├── interrupts/ — IDT, PIC, APIC
+│   ├── gdt.rs      — GDT + TSS
+│   ├── task/       — preemptive scheduler
+│   ├── syscall/    — SYSCALL/SYSRET
+│   ├── fs/         — RamFS, VFS, procfs
+│   ├── drivers/    — PCI, AHCI
+│   ├── shell/      — line editor
+│   └── commands/   — 40+ shell commands
+└── vibra/      (vibra) — bin crate, точка входа
+    └── main.rs     — _start → kernel::boot()
 ```
+
+Можно собирать как ядро отдельно (`cargo build -p vibra-kernel`), так и ОС вместе с ядром (`cargo build -p vibra`).
 
 **Технологии:**
 - Ядро: Rust (no_std, nightly)

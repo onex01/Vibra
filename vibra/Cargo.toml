@@ -1,0 +1,13 @@
+[package]
+name = "vibra"
+version = "0.8.0"
+edition = "2021"
+
+[dependencies]
+vibra-kernel = { path = "../kernel" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
