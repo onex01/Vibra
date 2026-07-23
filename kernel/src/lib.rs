@@ -27,9 +27,11 @@ pub mod script;
 pub mod boot_log;
 pub mod graphics;
 pub mod display;
+pub mod timer;
+pub mod acpi;
 
 // === Limine requests (нужны в lib crate для линкера) ===
-use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest};
+use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest, RsdpRequest};
 use spin::Mutex;
 use commands::CmdResult;
 
@@ -39,6 +41,7 @@ pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 pub static MEMORY_MAP_REQUEST: MemmapRequest = MemmapRequest::new();
 pub static EXECUTABLE_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+pub static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 /// Флаг отмены текущей команды (Ctrl+Z)
 pub static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
@@ -141,11 +144,14 @@ pub fn init() -> BootConsole {
 
     heap_stress();
 
+    crate::acpi::init();
+
     keyboard::init();
     input::init();
     devices::init();
     devices::virtio_block::probe_devices();
     drivers::init();
+    crate::timer::init();
     fs::init_filesystem();
     boot_log::init();
 

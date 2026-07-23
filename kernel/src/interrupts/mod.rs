@@ -1,6 +1,7 @@
 pub mod idt;
 pub mod pic;
 pub mod apic;
+pub mod msi;
 
 use crate::println;
 
@@ -8,6 +9,7 @@ pub fn init() {
     println!("[INTR] Initializing interrupt subsystem...");
     pic::init();
     idt::init();
+    msi::init();
     println!("[INTR] Interrupts enabled!");
 }
 

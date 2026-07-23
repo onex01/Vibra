@@ -21,8 +21,8 @@ use limine::memmap::{Entry, MEMMAP_USABLE};
 use spin::Mutex;
 
 pub const FRAME_SIZE: usize = 4096;
-const MAX_FRAMES: usize = 1_048_576; // 4 GB
-const BITMAP_SIZE: usize = MAX_FRAMES / 8;
+const MAX_FRAMES: usize = 16 * 1024 * 1024; // 64 ГБ (16M фреймов)
+const BITMAP_SIZE: usize = MAX_FRAMES / 8;   // 2 МБ
 
 // Состояние, защищённое локом.
 struct PmmInner {
