@@ -120,7 +120,7 @@ iso: build
 	@echo "==> Copying Limine UEFI bootloader..."
 	@cp $(LIMINE_DIR)/BOOTX64.EFI $(BUILD_DIR)/iso_root/EFI/BOOT/
 
-	@echo "==> Copying Limine BIOS + CD boot files..."
+	@echo "==> Copying Limine BIOS files..."
 	@cp $(LIMINE_DIR)/limine-bios-cd.bin $(BUILD_DIR)/iso_root/limine/
 	@cp $(LIMINE_DIR)/limine-uefi-cd.bin $(BUILD_DIR)/iso_root/limine/
 	@cp $(LIMINE_DIR)/limine-bios.sys $(BUILD_DIR)/iso_root/limine/ || true
@@ -137,7 +137,9 @@ iso: build
 
 	@echo "==> ISO image created: $(BUILD_DIR)/vibra.iso"
 	@ls -lh $(BUILD_DIR)/vibra.iso
-	@echo "==> Flash to USB: sudo dd if=$(BUILD_DIR)/vibra.iso of=/dev/sdX bs=4M status=progress"
+	@echo ""
+	@echo "==> Write to USB with Ventoy: just copy .iso to Ventoy USB drive"
+	@echo "==> Or burn: sudo dd if=$(BUILD_DIR)/vibra.iso of=/dev/sdX bs=4M status=progress"
 
 run-iso: iso
 	@echo "==> Starting QEMU with ISO..."
@@ -156,41 +158,29 @@ USB_IMG := $(BUILD_DIR)/vibra-usb.img
 usb: build
 	@echo "==> Creating USB image ($(USB_SIZE_MB)MB)..."
 	@mkdir -p $(BUILD_DIR)
+	@rm -f $(USB_IMG)
 	@dd if=/dev/zero of=$(USB_IMG) bs=1M count=$(USB_SIZE_MB) status=none
 
-	@echo "==> Creating GPT partition + FAT32..."
-	@# Создаём GPT: 1分区, FAT32, начиная с сектора 2048
-	@echo -e 'g\nn\n\n\n+$(USB_SIZE_MB)M\nt\n\nw\n' | fdisk $(USB_IMG) > /dev/null 2>&1 || true
-	@# Создаём FS на смещении partition 1 (sector 2048 × 512 = 1048576)
+	@echo "==> Creating MBR partition + FAT32..."
+	@printf 'o\nn\np\n1\n\n\na\nt\nc\nw\n' | fdisk $(USB_IMG) > /dev/null 2>&1 || true
 	@PART_SECTORS=$$(( $(USB_SIZE_MB) * 2048 - 2048 )); \
 	dd if=/dev/zero of=$(BUILD_DIR)/usb_part.img bs=512 count=$$PART_SECTORS status=none; \
-	mkfs.fat -F 32 -n VIBRA $(BUILD_DIR)/usb_part.img
-
-	@echo "==> Installing Limine bootloader..."
-	@# Limine BIOS: записываем в MBR gap (сектора 1..2047) — между MBR и partition
-	@dd if=$(LIMINE_DIR)/limine-bios.sys of=$(USB_IMG) bs=512 seek=1 conv=notrunc status=none
-	@# Boot signature
-	@printf '\x55\xAA' | dd of=$(USB_IMG) bs=1 seek=510 count=2 conv=notrunc status=none
-	@# Записываем partition data обратно в GPT (не трогаем MBR gap)
-	@dd if=$(BUILD_DIR)/usb_part.img of=$(USB_IMG) bs=512 seek=2048 conv=notrunc status=none
+	mkfs.fat -F 32 -n VIBRA $(BUILD_DIR)/usb_part.img; \
+	dd if=$(BUILD_DIR)/usb_part.img of=$(USB_IMG) bs=512 seek=2048 conv=notrunc status=none; \
+	rm -f $(BUILD_DIR)/usb_part.img
 
 	@echo "==> Copying files to partition..."
-	@# mtools: partition 1 начинается на offset 2048*512
-	@mmd -i $(BUILD_DIR)/usb_part.img ::/EFI ::/EFI/BOOT ::/limine
-	@mcopy -i $(BUILD_DIR)/usb_part.img target/$(TARGET)/debug/$(KERNEL_NAME) ::/kernel.elf
-	@mcopy -i $(BUILD_DIR)/usb_part.img limine.conf ::/limine/
-	@mcopy -i $(BUILD_DIR)/usb_part.img $(LIMINE_DIR)/BOOTX64.EFI ::/EFI/BOOT/
-	@mcopy -i $(BUILD_DIR)/usb_part.img $(LIMINE_DIR)/limine-bios.sys ::/limine/ || true
-	@# Записываем partition обратно в disk image
-	@dd if=$(BUILD_DIR)/usb_part.img of=$(USB_IMG) bs=512 seek=2048 conv=notrunc status=none
-	@rm -f $(BUILD_DIR)/usb_part.img
+	@mmd -i $(USB_IMG)@@1048576 ::/EFI ::/EFI/BOOT ::/limine
+	@mcopy -i $(USB_IMG)@@1048576 target/$(TARGET)/debug/$(KERNEL_NAME) ::/kernel.elf
+	@mcopy -i $(USB_IMG)@@1048576 limine.conf ::/limine/
+	@mcopy -i $(USB_IMG)@@1048576 $(LIMINE_DIR)/BOOTX64.EFI ::/EFI/BOOT/
+
+	@echo "==> Installing Limine BIOS bootloader..."
+	@$(LIMINE_DIR)/limine bios-install $(USB_IMG) 1 --force
 
 	@echo ""
-	@echo "==> USB image created: $(USB_IMG)"
+	@echo "==> USB image ready: $(USB_IMG)"
 	@ls -lh $(USB_IMG)
 	@echo ""
-	@echo "==> Flash to USB:"
-	@echo "    sudo dd if=$(USB_IMG) of=/dev/sdX bs=4M status=progress"
-	@echo ""
+	@echo "==> Flash: sudo dd if=$(USB_IMG) of=/dev/sdX bs=4M status=progress"
 	@echo "==> ThinkPad T450: Disable Secure Boot in BIOS!"
-	@echo "==> Xeon E5: Enable Legacy BIOS boot if UEFI doesn't work."
