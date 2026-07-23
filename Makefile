@@ -150,7 +150,7 @@ run-iso: iso
 # Создаёт GPT-размеченный FAT32 образ с Limine (BIOS + UEFI).
 # Записывается на USB: sudo dd if=build/vibra-usb.img of=/dev/sdX bs=4M status=progress
 
-USB_SIZE_MB ?= 1024
+USB_SIZE_MB ?= 128
 USB_IMG := $(BUILD_DIR)/vibra-usb.img
 
 usb: build
@@ -160,10 +160,11 @@ usb: build
 
 	@echo "==> Creating GPT partition + FAT32..."
 	@# Создаём GPT: 1分区, FAT32, начиная с сектора 2048
-	@echo -e 'g\nn\n\n\n+$(shell echo "$(USB_SIZE_MB)M - 1M" | numfmt --from=iec)\nt\n\nw\n' | fdisk $(USB_IMG) > /dev/null 2>&1 || true
+	@echo -e 'g\nn\n\n\n+$(USB_SIZE_MB)M\nt\n\nw\n' | fdisk $(USB_IMG) > /dev/null 2>&1 || true
 	@# Создаём FS на смещении partition 1 (sector 2048 × 512 = 1048576)
-	@dd if=/dev/zero of=$(BUILD_DIR)/usb_part.img bs=512 count=$$(( ($(USB_SIZE_MB)*2097152 - 1048576) / 512 )) status=none
-	@mkfs.fat -F 32 -n VIBRA $(BUILD_DIR)/usb_part.img
+	@PART_SECTORS=$$(( $(USB_SIZE_MB) * 2048 - 2048 )); \
+	dd if=/dev/zero of=$(BUILD_DIR)/usb_part.img bs=512 count=$$PART_SECTORS status=none; \
+	mkfs.fat -F 32 -n VIBRA $(BUILD_DIR)/usb_part.img
 
 	@echo "==> Installing Limine bootloader..."
 	@# Limine BIOS: записываем в MBR gap (сектора 1..2047) — между MBR и partition
