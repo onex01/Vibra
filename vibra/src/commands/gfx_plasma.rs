@@ -21,8 +21,8 @@ fn build_plasma_palette() -> [u32; 256] {
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     vibra_kernel::reset_cancel();
 
-    console.enable_back_buffer();
     console.set_virtual_resolution(320, 240);
+    console.enable_back_buffer();
 
     let w = console.fb_width();   // 320
     let h = console.fb_height();  // 240
