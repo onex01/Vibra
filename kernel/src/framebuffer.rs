@@ -415,9 +415,8 @@ impl Console {
         if self.cursor_row >= self.rows {
             self.scroll();
         }
-
-        // Отрисовать курсор после перемещения
-        self.draw_cursor();
+        // НЕ рисуем курсор здесь — курсор рисуется только
+        // через update_cursor_blink() в главном цикле shell
     }
 
     /// Печатает строку
@@ -514,28 +513,48 @@ impl Console {
         }
         let x = self.cursor_col * FONT_WIDTH;
         let y = self.cursor_row * FONT_HEIGHT;
+        // Underline cursor: рисуем горизонтальную линию 2px внизу ячейки
         let inv_bg = !self.bg_color;
-        // Заливаем инвертированным фоном — блочный курсор
-        for dy in 0..FONT_HEIGHT {
-            for dx in 0..FONT_WIDTH {
-                let pixel_x = x + dx;
-                let pixel_y = y + dy;
-                if pixel_x < self.width && pixel_y < self.height {
-                    unsafe {
-                        let offset = pixel_y * self.pitch + pixel_x;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), inv_bg);
-                    }
+        for dx in 0..FONT_WIDTH {
+            let py = y + FONT_HEIGHT - 1;
+            let px = x + dx;
+            if px < self.width && py < self.height {
+                unsafe {
+                    let offset = py * self.pitch + px;
+                    core::ptr::write_volatile(self.fb_addr.add(offset), inv_bg);
+                }
+            }
+            // Вторая строка для толщины
+            let py2 = y + FONT_HEIGHT - 2;
+            if px < self.width && py2 < self.height {
+                unsafe {
+                    let offset = py2 * self.pitch + px;
+                    core::ptr::write_volatile(self.fb_addr.add(offset), inv_bg);
                 }
             }
         }
     }
 
-    /// Удаляет блочный курсор (рисует пробел в его позиции)
+    /// Удаляет underline курсор (рисует bg цвет поверх линии)
     pub fn undraw_cursor(&self) {
         if self.cursor_col >= self.cols || self.cursor_row >= self.rows {
             return;
         }
-        self.draw_char_at(' ', self.cursor_col, self.cursor_row, self.fg_color, self.bg_color);
+        let x = self.cursor_col * FONT_WIDTH;
+        let y = self.cursor_row * FONT_HEIGHT;
+        // Стираем 2 нижних строки
+        for dx in 0..FONT_WIDTH {
+            for dy in FONT_HEIGHT - 2..FONT_HEIGHT {
+                let px = x + dx;
+                let py = y + dy;
+                if px < self.width && py < self.height {
+                    unsafe {
+                        let offset = py * self.pitch + px;
+                        core::ptr::write_volatile(self.fb_addr.add(offset), self.bg_color);
+                    }
+                }
+            }
+        }
     }
 
     /// Обновление мигания курсора — вызывать периодически

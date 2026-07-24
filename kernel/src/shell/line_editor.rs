@@ -194,6 +194,8 @@ impl LineEditor {
             // busy-loop. После принятого serial-байта не спим: так быстро
             // разгружаем 16-байтный FIFO UART и не теряем длинные команды.
             if next_key.is_none() {
+                // Обновляем мигание курсора перед сном
+                console.update_cursor_blink();
                 crate::interrupts::wait();
             }
         }
