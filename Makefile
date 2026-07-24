@@ -23,7 +23,8 @@ endif
 # COM1 привязан к stdin/stdout: можно вводить shell-команды из терминала,
 # сохраняя графическое окно QEMU для framebuffer-консоли.
 QEMU_FLAGS := -m 256M -serial stdio -monitor none -drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
-              -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35
+              -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35 \
+              -device e1000,netdev=net0 -netdev user,id=net0,hostfwd=tcp::2222-:22
 
 .PHONY: all build run clean setup install-kernel iso usb run-iso
 
@@ -96,6 +97,11 @@ build-release:
 
 run: build
 	@echo "==> Starting QEMU..."
+	$(QEMU) $(QEMU_FLAGS)
+
+# QEMU с сетью (e1000 + SSH на порт 2222)
+qemu-net: build
+	@echo "==> Starting QEMU with networking (e1000, SSH on port 2222)..."
 	$(QEMU) $(QEMU_FLAGS)
 
 clean:

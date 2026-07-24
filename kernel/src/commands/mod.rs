@@ -43,6 +43,7 @@ pub mod kill;
 pub mod run;
 pub mod display;
 pub mod history;
+pub mod net;
 
 use crate::framebuffer::Console;
 
@@ -106,6 +107,8 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "quit",    help: "halt the system",            func: quit::run },
     Command { name: "display", help: "show display info",          func: display::run },
     Command { name: "history", help: "show command history",       func: history::run },
+    Command { name: "ping",    help: "ICMP ping to IP address",    func: net::ping },
+    Command { name: "ifconfig", help: "show network interface",    func: net::ifconfig },
 ];
 
 use alloc::vec::Vec;

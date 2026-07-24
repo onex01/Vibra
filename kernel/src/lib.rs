@@ -29,6 +29,7 @@ pub mod graphics;
 pub mod display;
 pub mod timer;
 pub mod acpi;
+pub mod net;
 
 // === Limine requests (нужны в lib crate для линкера) ===
 use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest, RsdpRequest};
@@ -162,6 +163,13 @@ pub fn init() -> BootConsole {
     println!("[BOOT] Step 7: Drivers (PCI+AHCI)");
     drivers::init();
 
+    println!("[BOOT] Step 7.5: Network");
+    if let Some(mac) = crate::drivers::e1000::get_mac() {
+        crate::net::init(mac);
+    } else {
+        println!("[NET] e1000 не найден, сеть не инициализирована");
+    }
+
     println!("[BOOT] Step 8: Timer");
     crate::timer::init();
 
@@ -279,6 +287,9 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
     }
 
     loop {
+        // Опрос сетевых пакетов
+        crate::net::poll_recv_once();
+
         let current_dir = fs::get_current_dir();
         let mut prompt_buf = [0u8; 128];
         let prompt_str = {
