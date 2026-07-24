@@ -131,7 +131,10 @@ iso: build
 		-no-emul-boot \
 		-boot-load-size 4 \
 		-boot-info-table \
-		--efi-boot limine/limine-uefi-cd.bin \
+		-eltorito-alt-boot \
+		-e EFI/BOOT/BOOTX64.EFI \
+		-no-emul-boot \
+		-isohybrid-gpt-basdat \
 		-o $(BUILD_DIR)/vibra.iso \
 		$(BUILD_DIR)/iso_root
 

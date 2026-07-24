@@ -126,32 +126,46 @@ pub fn boot() -> ! {
 /// Вызывается vibra для запуска своего shell loop.
 pub fn init() -> BootConsole {
     serial::init();
+    println!("[BOOT] Step 1: serial OK");
     println!(
         "Vibra {} \"{}\" booting...",
         version::OS_VERSION,
         version::OS_CODENAME
     );
 
+    println!("[BOOT] Step 2: HHDM");
     let hhdm_response = match HHDM_REQUEST.response() {
         Some(r) => r,
         None => { println!("[FATAL] HHDM failed"); loop { halt(); } }
     };
     let hhdm_offset = hhdm_response.offset;
+    println!("[BOOT] HHDM offset: {:#x}", hhdm_offset);
 
+    println!("[BOOT] Step 3: Memory");
     if let Some(mm) = MEMORY_MAP_REQUEST.response() {
+        println!("[BOOT] Memory map: {} entries", mm.entries().len());
         memory::init(mm.entries(), hhdm_offset);
     } else { println!("[FATAL] Memory map failed"); loop { halt(); } }
 
+    println!("[BOOT] Step 4: Heap stress");
     heap_stress();
 
+    println!("[BOOT] Step 5: ACPI");
     crate::acpi::init();
 
+    println!("[BOOT] Step 6: Keyboard");
     keyboard::init();
     input::init();
     devices::init();
     devices::virtio_block::probe_devices();
+
+    println!("[BOOT] Step 7: Drivers (PCI+AHCI)");
     drivers::init();
+
+    println!("[BOOT] Step 8: Timer");
     crate::timer::init();
+
+    println!("[BOOT] Step 9: Filesystem");
     fs::init_filesystem();
     boot_log::init();
 

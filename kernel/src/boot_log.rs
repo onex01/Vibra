@@ -74,10 +74,31 @@ pub fn init() {
     // Raw запись на диск (до ФС)
     flush_raw();
 
-    // Файловая запись (после ФС)
+    // Файловая запись в /var/log/ (после ФС)
     flush_to_file("/var/log/boot.log");
     flush_to_file("/var/log/kernel.log");
 
-    println!("[LOG] Boot log saved ({} bytes)", LOG_POS.load(Ordering::Relaxed));
-    println!("[LOG] /var/log/boot.log + sector 2 on SATA disk");
+    // Записываем boot.log в КОРЕНЬ раздела (рядом с kernel.elf)
+    // Это позволяет прочитать лог на реальном железе с любой ОС
+    flush_to_file("/boot.log");
+
+    let len = LOG_POS.load(Ordering::Relaxed);
+    println!("[LOG] Boot log saved ({} bytes)", len);
+    println!("[LOG] /boot.log + /var/log/boot.log + sector 2 on SATA disk");
+
+    // Дополнительно: выводим лог в serial (для отладки на компьютере с serial)
+    if len > 0 {
+        println!("[LOG] === FULL BOOT LOG ===");
+        let log = get_log();
+        // Печатаем лог построчно через serial
+        for &b in log {
+            if b == b'\n' || b == b'\r' {
+                crate::serial::write_byte(b);
+            } else if b >= 0x20 && b < 0x7F {
+                crate::serial::write_byte(b);
+            }
+        }
+        crate::serial::write_byte(b'\n');
+        crate::serial::write_byte(b'\n');
+    }
 }
