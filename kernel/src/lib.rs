@@ -351,8 +351,36 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    // Выводим в serial
     println!("\n!!! KERNEL PANIC !!!");
     println!("{}", info);
+
+    // Пытаемся показать на framebuffer (если он доступен)
+    if let Some(fb_resp) = FRAMEBUFFER_REQUEST.response() {
+        if let Some(fb) = fb_resp.framebuffers().first() {
+            let mut console = framebuffer::Console::new(fb);
+            // Красный фон
+            console.fill_rect(0, 0, console.fb_width(), console.fb_height(), 0x00CC0000);
+            // Белый текст
+            console.print_colored("\n\n", 0x00FFFFFF);
+            console.print_colored("    !!! KERNEL PANIC !!!\n\n", 0x00FFFFFF);
+            console.print_colored("    ", 0x00FFFFFF);
+            // Печатаем panic info построчно
+            let msg = alloc::format!("{}", info);
+            for ch in msg.chars() {
+                if ch == '\n' {
+                    console.print("\n    ");
+                } else {
+                    console.put_char(ch);
+                }
+            }
+            console.print("\n\n");
+            console.print_colored("    System halted. Restart required.\n", 0x00FF8888);
+        }
+    }
+
     boot_log::flush_to_file("/var/log/error.log");
+    boot_log::flush_to_file("/boot.log");
+
     loop { halt(); }
 }

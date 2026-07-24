@@ -911,7 +911,14 @@ impl Console {
 
     /// Включить back buffer — все рисования идут в off-screen буфер
     pub fn enable_back_buffer(&mut self) {
-        let size = self.pitch * self.height;
+        // Если задано виртуальное разрешение — аллоцируем под него (экономия памяти)
+        let (w, h) = if self.virtual_width > 0 && self.virtual_height > 0 {
+            (self.virtual_width, self.virtual_height)
+        } else {
+            (self.width, self.height)
+        };
+        let back_pitch = w; // в виртуальном режиме pitch = width (плотная упаковка)
+        let size = back_pitch * h;
         let mut buf = Vec::<u32>::with_capacity(size);
         buf.resize(size, 0);
         self.back_buffer_ptr = buf.as_mut_ptr();
@@ -928,13 +935,14 @@ impl Console {
 
     /// Копировать back buffer в фреймбуфер (bulk memcpy)
     pub fn flip(&self) {
-        if !self.back_buffer_ptr.is_null() {
-            let total = self.pitch * self.height;
+        if !self.back_buffer_ptr.is_null() && self.back_buffer_size > 0 {
+            // Копируем только размер back buffer (не pitch*height)
+            let pixel_count = self.back_buffer_size / core::mem::size_of::<u32>();
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     self.back_buffer_ptr as *const u32,
                     self.fb_addr,
-                    total,
+                    pixel_count,
                 );
             }
         }
