@@ -8,8 +8,20 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
 }
 
 fn print_stats(console: &mut Console) {
+    if crate::is_cancelled() {
+        crate::reset_cancel();
+        return;
+    }
     print_cpu_info(console);
+    if crate::is_cancelled() {
+        crate::reset_cancel();
+        return;
+    }
     print_memory_info(console);
+    if crate::is_cancelled() {
+        crate::reset_cancel();
+        return;
+    }
     print_processes(console);
 }
 

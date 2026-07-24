@@ -1,30 +1,22 @@
 use super::CmdResult;
-use crate::framebuffer::{Console, COLOR_RED, COLOR_YELLOW};
+use crate::framebuffer::Console;
+use crate::println;
 
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
-    console.print_colored("Shutting down Vibra OS...\n", COLOR_YELLOW);
+    console.print("System halted.\n");
 
-    // Выключаем прерывания
-    crate::interrupts::disable();
-
-    // Сбрасываем PS/2 контроллер (выключает клавиатуру и мышь)
+    // ACPI shutdown через порт 0x604 (q35)
     unsafe {
-        crate::interrupts::pic::mask_all();
+        core::arch::asm!("out dx, ax", in("dx") 0x604u16, in("ax") 0x2000u16, options(nostack, preserves_flags));
     }
 
-    // QEMU shutdown через ACPI (порт 0x604 на q35)
+    // Альтернативный ACPI shutdown через порт 0x92
     unsafe {
-        core::arch::asm!("out dx, al", in("dx") 0x604u16, in("al") 0x2000u16 as u8, options(nostack, preserves_flags));
+        core::arch::asm!("out dx, al", in("dx") 0x92u16, in("al") 0x03u8, options(nostack, preserves_flags));
     }
 
-    // Если ACPI не сработал — пробуем через порт 0xB000 (ISA debug)
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx") 0xB000u16, in("al") 0x00u8, options(nostack, preserves_flags));
-    }
-
-    // Если ничего не помогло — halt
-    console.print_colored("System halted.\n", COLOR_RED);
+    println!("System halted.");
     loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        crate::interrupts::halt();
     }
 }

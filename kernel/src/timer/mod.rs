@@ -83,8 +83,13 @@ unsafe fn pit_sleep_ms(ms: u64) {
 pub fn init() {
     println!("[TIMER] Инициализация таймерной подсистемы...");
 
+    // Получаем HPET base из ACPI если есть
+    let acpi_hpet = crate::acpi::get()
+        .as_ref()
+        .and_then(|a| a.hpet_base);
+
     // Попытка HPET
-    if hpet::init() {
+    if hpet::init(acpi_hpet) {
         CURRENT_BACKEND.store(1, Ordering::SeqCst);
         TICKS_PER_SEC.store(hpet::ticks_per_second(), Ordering::SeqCst);
         println!("[TIMER] Бэкенд: HPET ({} Гц)", hpet::ticks_per_second());

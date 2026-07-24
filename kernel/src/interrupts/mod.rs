@@ -28,6 +28,12 @@ pub fn wait() {
     unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
 }
 
+/// Однократный HLT (для loop { halt(); } в shutdown)
+#[inline]
+pub fn halt() {
+    unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+}
+
 pub fn without_interrupts<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,

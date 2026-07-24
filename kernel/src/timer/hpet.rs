@@ -95,14 +95,24 @@ unsafe fn hpet_write32(offset: u64, val: u32) {
 // ======================== Init ========================
 
 /// Инициализация HPET таймера
-pub fn init() -> bool {
+/// `acpi_base`: базовый адрес HPET из ACPI таблицы (0 если неизвестен)
+pub fn init(acpi_base: Option<u64>) -> bool {
     let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
     if hhdm == 0 {
         println!("[HPET] HHDM не инициализирован");
         return false;
     }
 
-    let mmio_virt = hhdm_virt(HPET_PHYS_BASE);
+    // Используем адрес из ACPI если есть, иначе fallback на стандартный
+    let phys = acpi_base.unwrap_or(HPET_PHYS_BASE);
+
+    // Проверяем что адрес в разумном диапазоне (ниже 4GB для HHDM)
+    if phys == 0 || phys > 0x1_0000_0000 {
+        println!("[HPET] Адрес {:#x} вне HHDM диапазона — HPET пропущен", phys);
+        return false;
+    }
+
+    let mmio_virt = hhdm + phys;
     HPET_BASE.store(mmio_virt, Ordering::SeqCst);
 
     unsafe {

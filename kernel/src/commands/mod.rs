@@ -44,6 +44,7 @@ pub mod run;
 pub mod display;
 pub mod history;
 pub mod net;
+pub mod systest;
 
 use crate::framebuffer::Console;
 
@@ -82,11 +83,8 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "tasks",   help: "show running processes",     func: tasks::run },
     Command { name: "df",      help: "show disk/filesystem usage", func: df::run },
     Command { name: "uptime",  help: "show system uptime",         func: uptime::run },
-    Command { name: "diag",    help: "kernel diagnostics tests",   func: diag::run },
-    Command { name: "heap",    help: "show heap usage",            func: heap::run },
     Command { name: "neofetch", help: "system info (logo + info)",  func: neofetch::run },
     Command { name: "mount",   help: "mount filesystems",          func: mount::run },
-    Command { name: "test-disk", help: "test disk operations",     func: test_disk::run },
     Command { name: "kstat",    help: "show interrupt statistics", func: kstat::run },
     Command { name: "uname",    help: "system information",        func: uname::run },
     Command { name: "reboot",   help: "reboot the system",        func: reboot::run },
@@ -104,6 +102,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "apic",    help: "APIC management/status",    func: apic::run },
     Command { name: "lspci",   help: "list PCI devices",          func: lspci::run },
     Command { name: "usertest", help: "run user-space process",  func: usertest::run },
+    Command { name: "systest",  help: "interactive system test",   func: systest::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
     Command { name: "display", help: "show display info",          func: display::run },
     Command { name: "history", help: "show command history",       func: history::run },

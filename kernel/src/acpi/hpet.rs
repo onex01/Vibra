@@ -2,49 +2,40 @@
 //
 // Содержит базовый адрес HPET-регистров и количество компариторов.
 
-use crate::acpi::sdt::SdtHeader;
-
-/// Основная структура HPET таблицы (сразу после SDT-заголовка).
-#[repr(C, packed)]
-struct HpetTable {
-    hardware_revision_id: u8,
-    comparator_count: u8,
-    _oem_attributes: u8,
-    _pci_vendor_id: u16,
-    address: HpetAddress,
-    sequence_number: u8,
-    _minimum_tick: u16,
-    _page_protection: u8,
-}
-
-#[repr(C, packed)]
-struct HpetAddress {
-    address_space_id: u8,
-    _register_bit_width: u8,
-    _register_bit_offset: u8,
-    _reserved: u8,
-    address: u64,
-}
-
 /// Парсит HPET таблицу. Возвращает (base_address, comparator_count).
+/// Использует byte-level чтение для packed struct (без unaligned u64).
 pub fn parse(hpet_phys: usize) -> Option<(u64, u8)> {
     let hhdm = crate::memory::paging::HHDM_OFFSET
         .load(core::sync::atomic::Ordering::Relaxed);
     let hpet_virt = hhdm as usize + hpet_phys;
-    let header = unsafe { &*(hpet_virt as *const SdtHeader) };
 
-    if !header.validate() {
-        crate::println!("[ACPI] HPET: неверная контрольная сумма");
+    // Читаем заголовок SDT (36 байт) через copy — safe
+    let mut sdt_hdr = [0u8; 36];
+    unsafe {
+        core::ptr::copy_nonoverlapping(hpet_virt as *const u8, sdt_hdr.as_mut_ptr(), 36);
+    }
+    let sig = [sdt_hdr[0], sdt_hdr[1], sdt_hdr[2], sdt_hdr[3]];
+
+    if sig != *b"HPET" {
         return None;
     }
 
-    if &header.signature != b"HPET" {
-        crate::println!("[ACPI] HPET: неверная сигнатура");
-        return None;
+    // Тело HPET таблицы: сразу после SDT заголовка (36 байт)
+    // Компактная раскладка: revision(1) + comp_count(1) + oem_attr(1) + pci_vendor(2) + HpetAddress(12) + seq(1) + min_tick(2) + prot(1)
+    let body = hpet_virt + 36;
+
+    // comparator_count — offset 1 от начала тела
+    let comparator_count = unsafe { core::ptr::read_volatile((body + 1) as *const u8) };
+
+    // HpetAddress начинается на offset 4: space_id(1) + bit_width(1) + bit_offset(1) + reserved(1) + address(8)
+    // address — u64 на offset 4+4=8 от начала body. Может быть unaligned!
+    let mut addr_buf = [0u8; 8];
+    unsafe {
+        core::ptr::copy_nonoverlapping((body + 8) as *const u8, addr_buf.as_mut_ptr(), 8);
     }
+    let address = u64::from_le_bytes(addr_buf);
 
-    let table = unsafe { &*((hpet_virt + core::mem::size_of::<SdtHeader>()) as *const HpetTable) };
+    crate::println!("[ACPI] HPET: base={:#x}, comparators={}", address, comparator_count);
 
-    // address_space_id == 0 означает Memory-mapped (System Memory)
-    Some((table.address.address, table.comparator_count))
+    Some((address, comparator_count))
 }

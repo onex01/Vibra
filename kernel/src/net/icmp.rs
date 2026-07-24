@@ -105,6 +105,10 @@ pub fn ping(target_ip: [u8; 4], count: u32) {
         let t_start = timer::current_ticks();
         let tps = timer::ticks_per_second();
 
+        // Сбрасываем флаг ответа перед отправкой
+        REPLY_RECEIVED.store(false, Ordering::Relaxed);
+        ICMP_REPLY_AVAIL.store(false, Ordering::Relaxed);
+
         // Формируем payload с временем отправки
         let mut payload = [0u8; 64];
         payload[0] = 0xDE;
@@ -125,8 +129,9 @@ pub fn ping(target_ip: [u8; 4], count: u32) {
         let wait_start = timer::current_ticks();
 
         loop {
-            // Поллим e1000 для получения пакетов
-            super::poll_recv_once();
+            // Поллим e1000 для получения пакетов (статический буфер)
+            super::poll_recv_static();
+            crate::task::yield_now();
 
             let now = timer::current_ticks();
             let elapsed_ms = if tps > 0 { (now - wait_start) * 1000 / tps } else { now - wait_start };
@@ -177,6 +182,9 @@ pub fn ping(target_ip: [u8; 4], count: u32) {
 static ICMP_REPLY_ID: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 static ICMP_REPLY_SEQ: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 static ICMP_REPLY_AVAIL: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Публичный флаг для сброса перед каждым запросом
+pub static REPLY_RECEIVED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
