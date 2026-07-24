@@ -252,6 +252,9 @@ pub fn init() -> BootConsole {
     BootConsole { console }
 }
 
+/// Публичный редактор строк для доступа из команд (history и т.д.)
+pub static LINE_EDITOR: Mutex<shell::LineEditor> = Mutex::new(shell::LineEditor::new());
+
 /// Shell loop — используется и kernel::boot() и vibra.
 /// Vibra может вызвать init() + shell_loop() или написать свой loop.
 pub fn shell_loop(mut bc: BootConsole) -> ! {
@@ -274,8 +277,6 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
     unsafe {
         core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'C', options(nostack, preserves_flags));
     }
-
-    static LINE_EDITOR: Mutex<shell::LineEditor> = Mutex::new(shell::LineEditor::new());
 
     loop {
         let current_dir = fs::get_current_dir();

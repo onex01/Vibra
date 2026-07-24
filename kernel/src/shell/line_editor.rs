@@ -17,6 +17,9 @@ pub struct LineEditor {
     history_idx: usize,
     prompt_buf: [u8; 128], // буфер для prompt строки
     prompt_len: usize,
+    // Для циклического дополнения по Tab
+    tab_index: i32,        // -1 = нет активного дополнения, иначе индекс совпадения
+    tab_match_count: usize, // количество совпадений при последнем нажатии Tab
 }
 
 impl LineEditor {
@@ -31,6 +34,8 @@ impl LineEditor {
             history_idx: 0,
             prompt_buf: [0; 128],
             prompt_len: 0,
+            tab_index: -1,
+            tab_match_count: 0,
         }
     }
 
@@ -111,8 +116,48 @@ impl LineEditor {
                         self.tab_complete(console);
                     }
                     Key::Char(ch) => {
+                        // Сброс циклического дополнения при нажатии любой клавиши
+                        if ch != '\x01' && ch != '\x05' && ch != '\x0B'
+                            && ch != '\x0C' && ch != '\x15' && ch != '\x1A'
+                        {
+                            self.tab_index = -1;
+                        }
+                        // Ctrl+A — начало строки
+                        if ch == '\x01' {
+                            self.cursor = 0;
+                            self.reprint_line(console);
+                        }
+                        // Ctrl+E — конец строки
+                        else if ch == '\x05' {
+                            self.cursor = self.len;
+                            self.reprint_line(console);
+                        }
+                        // Ctrl+K — удалить от курсора до конца
+                        else if ch == '\x0B' {
+                            self.len = self.cursor;
+                            self.reprint_line(console);
+                        }
+                        // Ctrl+U — удалить от начала до курсора
+                        else if ch == '\x15' {
+                            if self.cursor > 0 {
+                                for i in self.cursor..self.len {
+                                    self.buffer[i - self.cursor] = self.buffer[i];
+                                }
+                                self.len -= self.cursor;
+                                self.cursor = 0;
+                                self.reprint_line(console);
+                            }
+                        }
+                        // Ctrl+L — очистить экран и перерисовать prompt + строку
+                        else if ch == '\x0C' {
+                            console.clear();
+                            if let Ok(p) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
+                                console.print(p);
+                            }
+                            self.reprint_line(console);
+                        }
                         // Ctrl+Z (0x1A) — отмена текущей команды
-                        if ch == '\x1A' {
+                        else if ch == '\x1A' {
                             crate::request_cancel();
                             // Очищаем строку и возвращаем пустую
                             self.len = 0;
@@ -120,7 +165,7 @@ impl LineEditor {
                             console.put_char('\n');
                             return "";
                         }
-                        if self.len < MAX_LINE - 1 {
+                        else if self.len < MAX_LINE - 1 {
                             // Вставляем символ
                             for i in (self.cursor..self.len).rev() {
                                 self.buffer[i+1] = self.buffer[i];
@@ -190,7 +235,7 @@ impl LineEditor {
         self.cursor = src_len;
     }
 
-    // Перепечатывает текущую строку (для history)
+    // Перепечатывает текущую строку и позиционирует курсор
     fn reprint_line(&self, console: &mut Console) {
         // Возвращаемся в начало строки
         for _ in 0..self.len {
@@ -208,75 +253,76 @@ impl LineEditor {
         if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
             console.print(s);
         }
+        // Позиционируем курсор на self.cursor (от конца влево)
+        for _ in self.cursor..self.len {
+            console.put_char('\x08');
+        }
     }
 
     fn tab_complete(&mut self, console: &mut Console) {
         let line = self.as_str();
         let trimmed = line.trim();
 
-        if !trimmed.contains(' ') {
-            // Автодополнение команд
-            let mut matches: [&str; 32] = [""; 32];
-            let mut n_matches = 0usize;
-
-            for name in commands::command_names() {
-                if name.starts_with(trimmed) && n_matches < 32 {
-                    matches[n_matches] = name;
-                    n_matches += 1;
-                }
-            }
-
-            if n_matches == 1 {
-                // Один матч — дополняем
-                let full = matches[0];
-                // Очищаем текущий ввод (учитывая длину prompt)
-                let total = self.prompt_len + self.len;
-                for _ in 0..total {
-                    console.put_char('\x08');
-                }
-                for _ in 0..total {
-                    console.put_char(' ');
-                }
-                for _ in 0..total {
-                    console.put_char('\x08');
-                }
-                
-                // Записываем полную команду
-                self.len = 0;
-                self.cursor = 0;
-                self.append_str(full);
-                self.append_str(" ");
-                
-                // Печатаем prompt + команду
-                if let Ok(prompt_str) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
-                    console.print(prompt_str);
-                }
-                if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
-                    console.print(s);
-                }
-            } else if n_matches > 1 {
-                // Несколько матчей — показываем список
-                console.put_char('\n');
-                for i in 0..n_matches {
-                    console.print("  ");
-                    console.print(matches[i]);
-                }
-                console.put_char('\n');
-                // Печатаем prompt + текущий буфер
-                if let Ok(prompt_str) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
-                    console.print(prompt_str);
-                }
-                if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
-                    console.print(s);
-                }
-            }
-        } else {
-            // Автодополнение путей файлов/каталогов
+        // Автодополнение путей файлов: если начинается с / или содержит пробел
+        if trimmed.starts_with('/') || trimmed.contains(' ') {
             self.complete_path(console);
+            return;
+        }
+
+        // Автодополнение команд с циклическим переключением
+        let mut matches: [&str; 32] = [""; 32];
+        let mut n_matches = 0usize;
+
+        for name in commands::command_names() {
+            if name.starts_with(trimmed) && n_matches < 32 {
+                matches[n_matches] = name;
+                n_matches += 1;
+            }
+        }
+
+        if n_matches == 0 {
+            return;
+        }
+
+        self.tab_match_count = n_matches;
+
+        // Циклическое переключение совпадений
+        if self.tab_index < 0 || self.tab_index >= n_matches as i32 {
+            self.tab_index = 0;
+        } else {
+            self.tab_index = (self.tab_index + 1) % n_matches as i32;
+        }
+
+        let selected = matches[self.tab_index as usize];
+
+        // Очищаем текущий ввод (учитывая длину prompt)
+        let total = self.prompt_len + self.len;
+        for _ in 0..total {
+            console.put_char('\x08');
+        }
+        for _ in 0..total {
+            console.put_char(' ');
+        }
+        for _ in 0..total {
+            console.put_char('\x08');
+        }
+
+        // Записываем выбранное совпадение
+        self.len = 0;
+        self.cursor = 0;
+        self.append_str(selected);
+        self.append_str(" ");
+
+        // Печатаем prompt + команду
+        if let Ok(prompt_str) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
+            console.print(prompt_str);
+        }
+        if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
+            console.print(s);
         }
     }
 
-    /// Автодополнение пути к файлу/каталогу
+    /// Автодополнение пути к файлу/каталогу (с циклическим переключением)
     fn complete_path(&mut self, console: &mut Console) {
         // Копируем данные в стековый буфер чтобы избежать borrow conflict
         let mut line_buf = [0u8; 256];
@@ -285,16 +331,35 @@ impl LineEditor {
         line_buf[..copy_len].copy_from_slice(&self.buffer[..copy_len]);
         let line = core::str::from_utf8(&line_buf[..copy_len]).unwrap_or("");
         let parts: alloc::vec::Vec<&str> = line.splitn(2, ' ').collect();
-        if parts.len() < 2 {
-            return;
-        }
 
-        let partial = parts[1];
+        let (cmd_part, partial) = if parts.len() < 2 {
+            // Нет пробела — весь ввод это путь (начинается с /)
+            ("", line.trim())
+        } else {
+            (parts[0], parts[1])
+        };
+
         let current_dir = crate::fs::get_current_dir();
 
         // Определяем директорию для поиска
         let (search_dir, prefix) = if partial.is_empty() || !partial.contains('/') {
-            (current_dir.clone(), String::new())
+            if partial.starts_with('/') {
+                // Абсолютный путь — ищем в корне или по пути
+                if let Some(last_slash) = partial.rfind('/') {
+                    let dir_part = &partial[..last_slash];
+                    let name_part = &partial[last_slash + 1..];
+                    let full_dir = if dir_part.is_empty() {
+                        String::from("/")
+                    } else {
+                        String::from(dir_part)
+                    };
+                    (full_dir, String::from(name_part))
+                } else {
+                    (String::from("/"), String::from(partial))
+                }
+            } else {
+                (current_dir.clone(), String::from(partial))
+            }
         } else {
             if let Some(last_slash) = partial.rfind('/') {
                 let dir_part = &partial[..last_slash];
@@ -322,6 +387,7 @@ impl LineEditor {
                 if !search_dir.ends_with('/') {
                     full.push_str(&search_dir);
                 }
+                full.push('/');
                 full.push_str(&entry.name);
                 if entry.file_type == crate::fs::FileType::Directory {
                     full.push('/');
@@ -330,48 +396,46 @@ impl LineEditor {
             }
         }
 
-        if matches.len() == 1 {
-            // Один матч — дополняем
-            let completion = &matches[0];
-            let total = self.prompt_len + self.len;
-            for _ in 0..total {
-                console.put_char('\x08');
-            }
-            for _ in 0..total {
-                console.put_char(' ');
-            }
-            for _ in 0..total {
-                console.put_char('\x08');
-            }
+        if matches.is_empty() {
+            return;
+        }
 
-            // Очищаем буфер и записываем новую строку
-            self.len = 0;
-            self.cursor = 0;
-            self.append_str(parts[0]);
+        self.tab_match_count = matches.len();
+
+        // Циклическое переключение совпадений
+        if self.tab_index < 0 || self.tab_index >= matches.len() as i32 {
+            self.tab_index = 0;
+        } else {
+            self.tab_index = (self.tab_index + 1) % matches.len() as i32;
+        }
+
+        let completion = &matches[self.tab_index as usize];
+        let total = self.prompt_len + self.len;
+        for _ in 0..total {
+            console.put_char('\x08');
+        }
+        for _ in 0..total {
+            console.put_char(' ');
+        }
+        for _ in 0..total {
+            console.put_char('\x08');
+        }
+
+        // Очищаем буфер и записываем новую строку
+        self.len = 0;
+        self.cursor = 0;
+        if !cmd_part.is_empty() {
+            self.append_str(cmd_part);
             self.append_str(" ");
-            self.append_str(completion);
+        }
+        self.append_str(completion);
 
-            // Печатаем prompt + строку
-            if let Ok(p) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
-                console.print(p);
-            }
-            if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
-                console.print(s);
-            }
-        } else if matches.len() > 1 {
-            // Несколько совпадений — показываем список
-            console.put_char('\n');
-            for m in &matches {
-                console.print("  ");
-                console.print(m);
-            }
-            console.put_char('\n');
-            if let Ok(p) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
-                console.print(p);
-            }
-            if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
-                console.print(s);
-            }
+        // Печатаем prompt + строку
+        if let Ok(p) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
+            console.print(p);
+        }
+        if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
+            console.print(s);
         }
     }
 
@@ -383,5 +447,19 @@ impl LineEditor {
                 self.cursor += 1;
             }
         }
+    }
+
+    /// Количество записей в истории
+    pub fn history_count(&self) -> usize {
+        self.history_count
+    }
+
+    /// Получить строку из истории по индексу
+    pub fn history_entry(&self, idx: usize) -> Option<&str> {
+        if idx >= self.history_count {
+            return None;
+        }
+        let len = self.history_lens[idx];
+        core::str::from_utf8(&self.history[idx][..len]).ok()
     }
 }

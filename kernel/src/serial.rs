@@ -122,6 +122,16 @@ pub fn poll_key() -> Option<crate::keyboard::Key> {
         b'\r' | b'\n' => Some(Key::Enter),
         0x08 | 0x7f => Some(Key::Backspace),
         b'\t' => Some(Key::Tab),
+        // Ctrl+A — начало строки
+        0x01 => Some(Key::Char('\x01')),
+        // Ctrl+E — конец строки
+        0x05 => Some(Key::Char('\x05')),
+        // Ctrl+K — удалить до конца строки
+        0x0B => Some(Key::Char('\x0B')),
+        // Ctrl+L — очистить экран
+        0x0C => Some(Key::Char('\x0C')),
+        // Ctrl+U — удалить до начала строки
+        0x15 => Some(Key::Char('\x15')),
         // Ctrl+Z
         0x1A => Some(Key::Char('\x1A')),
         // ESC sequence start (ansi arrow keys etc.)

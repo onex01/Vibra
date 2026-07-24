@@ -28,22 +28,29 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
         console.print("\n");
 
         for entry in &entries {
+            // Тип файла
             match entry.file_type {
                 fs::FileType::Directory => {
-                    console.print_colored("drwxr-xr-x", COLOR_GREEN);
+                    console.print_colored("d", COLOR_GREEN);
                 }
                 fs::FileType::File => {
-                    console.print_colored("-rw-r--r--", COLOR_WHITE);
+                    console.print_colored("-", COLOR_WHITE);
                 }
                 fs::FileType::Symlink => {
-                    console.print_colored("lrwxrwxrwx", COLOR_CYAN);
+                    console.print_colored("l", COLOR_CYAN);
                 }
                 fs::FileType::Device => {
-                    console.print_colored("crw-rw-rw-", COLOR_YELLOW);
+                    console.print_colored("c", COLOR_YELLOW);
                 }
             }
+
+            // Права доступа из DirEntry
+            let perms = entry.permissions.to_string();
+            console.print(&perms);
+
             console.print(" 1 root root ");
 
+            // Размер с выравниванием
             if entry.size < 10 {
                 console.print("    ");
             } else if entry.size < 100 {
@@ -57,6 +64,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
 
             console.print(" Jan  1 00:00 ");
 
+            // Имя файла с цветом
             match entry.file_type {
                 fs::FileType::Directory => {
                     console.print_colored(&entry.name, COLOR_GREEN);
