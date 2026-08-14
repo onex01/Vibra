@@ -122,6 +122,8 @@ pub fn init() {
                 crate::drivers::usb::xhci::init_controller(bar0_phys, mmio_virt);
                 // Allocate and set up Event Ring / ERST structures (logging only for now)
                 crate::drivers::usb::xhci::init_event_ring(bar0_phys, mmio_virt);
+                // Quick poll of admin completion queue for debug (one-shot)
+                crate::drivers::usb::xhci::poll_admin_acq();
             }
         } else {
             println!("[USB] [{:02X}:{:02X}.{}] I/O BAR, пропуск (требуется memory BAR)",

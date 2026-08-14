@@ -1,4 +1,6 @@
 use crate::println;
+use alloc::vec::Vec;
+use spin::Mutex;
 use core::sync::atomic::Ordering;
 
 // Маленькая инфраструктура xHCI: выделение Admin Submission/Completion queues
@@ -10,6 +12,10 @@ pub struct XhciController {
     pub device: u16,
     pub bar_phys: u64,
     pub op_base_virt: u64,
+    pub asq_phys: usize,
+    pub acq_phys: usize,
+    pub asq_virt: usize,
+    pub acq_virt: usize,
 }
 
 fn hhdm() -> u64 {
@@ -69,7 +75,44 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) {
         core::ptr::write_volatile(acq_ptr_hi, (acq_phys >> 32) as u32);
         println!("[xHCI] wrote ACQ ptr {:#x}", acq_phys);
 
+        // Register this controller for later polling/debugging
+        register_controller(bar_phys, op_base, asq_phys, acq_phys, asq_virt, acq_virt);
+
         // Note: ASQ/ACQ doorbells are not set yet; further steps required.
+    }
+}
+
+static XHCI_CONTROLLERS: Mutex<Vec<XhciController>> = Mutex::new(Vec::new());
+
+/// Add controller metadata to global list for later polling/processing.
+fn register_controller(bar_phys: u64, op_base_virt: u64, asq_phys: usize, acq_phys: usize, asq_virt: usize, acq_virt: usize) {
+    let c = XhciController {
+        vendor: 0,
+        device: 0,
+        bar_phys,
+        op_base_virt,
+        asq_phys,
+        acq_phys,
+        asq_virt,
+        acq_virt,
+    };
+    XHCI_CONTROLLERS.lock().push(c);
+}
+
+/// Простейшая проверка: считать первые 16 байт ACQ для всех контроллеров
+/// и залогировать их как u64/u64. Это даст понимание, пишет ли контроллер
+/// Command Completion TRB в выделенный буфер.
+pub fn poll_admin_acq() {
+    let list = XHCI_CONTROLLERS.lock();
+    for c in list.iter() {
+        println!("[xHCI] poll_admin_acq: controller bar={:#x} acq_phys={:#x} acq_virt={:#x}", c.bar_phys, c.acq_phys, c.acq_virt);
+        unsafe {
+            let p0 = c.acq_virt as *const u64;
+            let p1 = (c.acq_virt + 8) as *const u64;
+            let v0 = core::ptr::read_volatile(p0);
+            let v1 = core::ptr::read_volatile(p1);
+            println!("[xHCI] ACQ TRB0: {:#x} {:#x}", v0, v1);
+        }
     }
 }
 
