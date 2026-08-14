@@ -33,6 +33,27 @@ impl GopBackend {
     }
 }
 
+/// Определить формат пикселя из Limine framebuffer.
+pub fn format_from_framebuffer(fb: &limine::framebuffer::Framebuffer) -> PixelFormat {
+    match fb.bpp {
+        8 => PixelFormat::Indexed8,
+        16 => PixelFormat::Rgb565,
+        24 | 32 => {
+            if fb.red_mask_shift == 16 && fb.green_mask_shift == 8 && fb.blue_mask_shift == 0 {
+                PixelFormat::Rgb888
+            } else if fb.red_mask_shift == 0
+                && fb.green_mask_shift == 8
+                && fb.blue_mask_shift == 16
+            {
+                PixelFormat::Bgr888
+            } else {
+                PixelFormat::Bgr888
+            }
+        }
+        _ => PixelFormat::Bgr888,
+    }
+}
+
 /// Зарегистрировать GOP бэкенд из Limine framebuffer
 pub fn register_from_framebuffer(fb: &limine::framebuffer::Framebuffer) {
     let addr = fb.address() as *mut u8;
@@ -41,8 +62,7 @@ pub fn register_from_framebuffer(fb: &limine::framebuffer::Framebuffer) {
     let pitch = fb.pitch as u32;
     let bpp = fb.bpp as u8;
 
-    // Limine по умолчанию использует BGR888
-    let format = PixelFormat::Bgr888;
+    let format = format_from_framebuffer(fb);
 
     super::register_backend("GOP (UEFI)", w, h, bpp, format);
 

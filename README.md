@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0%20Canopus-blue?style=flat-square" alt="Version"/>
-  <img src="https://img.shields.io/badge/kernel-1.0.0%20Quantum-green?style=flat-square" alt="Kernel"/>
+  <img src="https://img.shields.io/badge/version-1.1.0%20Sirius-blue?style=flat-square" alt="Version"/>
+  <img src="https://img.shields.io/badge/kernel-1.1.0%20Boson-green?style=flat-square" alt="Kernel"/>
   <img src="https://img.shields.io/badge/arch-x86__64-orange?style=flat-square" alt="Architecture"/>
   <img src="https://img.shields.io/badge/language-Rust-red?style=flat-square" alt="Rust"/>
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License"/>
@@ -18,7 +18,7 @@
 
 **Vibra OS** — это хобби-операционная система, разрабатываемая с нуля на языке **Rust**. Проект создан с образовательными целями: изучение низкоуровневого программирования, архитектуры операционных систем и bare-metal разработки.
 
-Vibra работает на реальном железе (x86_64) через UEFI-загрузку и предоставляет пользователю графическую консоль, shell с автодополнением и базовую файловую систему.
+Vibra ориентируется на QEMU и реальное x86_64-железо через Limine. Сейчас система предоставляет графическую консоль, shell с автодополнением, VFS, RamFS, FAT32/Ext2-драйверы, базовый GUI/desktop и набор низкоуровневых драйверов.
 
 ### Основные особенности
 
@@ -26,8 +26,10 @@ Vibra работает на реальном железе (x86_64) через UE
 - 🦀 **Чистый Rust** (no_std) — без зависимостей от стандартной библиотеки
 - 🚀 **UEFI-загрузка** через современный загрузчик Limine
 - 🖥️ **Графическая консоль** с bitmap-шрифтом и поддержкой цветов
-- 📁 **Файловая система в памяти** (RamFS)
-- 🧠 **Физический менеджер памяти** (bitmap allocator)
+- 📁 **VFS + файловые системы** — RamFS, procfs/sysfs/devtmpfs, FAT32, Ext2
+- 🧠 **Подсистема памяти** — PMM, heap, paging, VMM и W^X/NX-диагностика
+- ⚙️ **Планировщик и syscall** — kernel tasks, Ring 3, syscall/sysret
+- 🧩 **Драйверы** — PCI, ACPI, AHCI, NVMe, e1000/RTL8139, VirtIO, USB detection
 - 🎨 **Модульная архитектура** — каждая команда shell в отдельном файле
 
 ---

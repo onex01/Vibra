@@ -1,6 +1,6 @@
 # Roadmap — План развития Vibra OS
 
-> **Текущая версия:** 1.0.0 "Quantum" (ядро) / 1.0.0 "Canopus" (ОС).
+> **Текущая версия:** 1.1.0 "Sirius" (ОС) / 1.1.0 "Boson" (ядро).
 >
 > **Архитектура:** Workspace — `kernel/` (vibra-kernel, lib crate) + `vibra/` (bin crate)
 
@@ -37,7 +37,7 @@
 - [x] Проверка NX/WX-страниц (`wxtest`/`nxtest`)
 - [x] Базовый драйвер VirtIO Block (probe + config read)
 
-## Версия 0.6 "Nucleus" (текущая)
+## Версия 0.6 "Nucleus"
 
 ### Фаза 1 — VMM:
 - [x] VMM: копирование PML4 Limine + переключение CR3
@@ -72,7 +72,7 @@
 - [x] Команда `ps` — PID, состояние, тики, переключения
 - [x] Команда `top` — uptime, tick counter, список задач
 
-### Фаза 3 — APIC вместо PIC (v0.7.5) — КРИТИЧЕСКИЙ БЛОКЕР:
+### Фаза 3 — APIC вместо PIC (v0.7.5):
 - [x] LAPIC: детект (CPUID), MSR enable, SVR=0x1FF, TPR=0, LINT disabled
 - [x] IO APIC: детект, все 24 IRQ замаскированы
 - [x] APIC infrastructure: detect, EOI, IO APIC redirect API, LAPIC timer API
@@ -105,6 +105,22 @@
   - Текстовый редактор
   - Калькулятор
 - [ ] Поддержка мыши
+
+## Версия 1.1 "Sirius/Boson" (текущая)
+
+### Уже есть:
+- [x] Workspace: `kernel/` как lib crate и `vibra/` как bin crate
+- [x] ACPI: RSDP/SDT/MADT/MCFG/HPET базовый парсинг
+- [x] Драйверы реального железа: PCI, AHCI, NVMe, e1000, RTL8139, MSI
+- [x] VirtIO GPU и базовые графические демо
+- [x] Display manager с GOP/PCI VGA бэкендами
+- [x] Vibra Script и демо-приложения в `apps/`
+
+### Ближайшие цели:
+- [ ] USB HID: xHCI keyboard/mouse вместо одной PCI-детекции
+- [ ] Дуал-бут BIOS/UEFI: `run-bios`, корректный pixel format framebuffer
+- [ ] Ускорение desktop-композитора через back buffer и кеш фона
+- [ ] Автомонтирование boot-диска: MBR/FAT32 `/mnt/boot`
 
 ## Версия 2.0 "Andromeda"
 

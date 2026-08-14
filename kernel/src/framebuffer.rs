@@ -309,6 +309,11 @@ impl Console {
         let pitch = framebuffer.pitch as usize / 4; // в u32 словах
         let width = framebuffer.width as usize;
         let height = framebuffer.height as usize;
+        let pixel_format = if framebuffer.bpp == 32 {
+            crate::display::gop::format_from_framebuffer(framebuffer)
+        } else {
+            crate::display::PixelFormat::Bgr888
+        };
 
         let mut console = Console {
             fb_addr,
@@ -321,7 +326,7 @@ impl Console {
             cursor_row: 0,
             fg_color: COLOR_VIBRA_FG,
             bg_color: COLOR_VIBRA_BG,
-            pixel_format: crate::display::PixelFormat::Bgr888,
+            pixel_format,
             back_buffer: None,
             back_buffer_ptr: core::ptr::null_mut(),
             back_buffer_size: 0,
@@ -340,10 +345,11 @@ impl Console {
     /// Очищает весь экран фоновым цветом
     pub fn clear(&mut self) {
         let total_pixels = self.height * self.pitch;
+        let bg = crate::display::color_to_native(self.bg_color, self.pixel_format);
         unsafe {
             // Создаём срез и заполняем его за одну операцию (оптимизируется в memset/stosd)
             let slice = core::slice::from_raw_parts_mut(self.fb_addr, total_pixels);
-            slice.fill(self.bg_color);
+            slice.fill(bg);
         }
         self.cursor_col = 0;
         self.cursor_row = 0;
@@ -370,9 +376,10 @@ impl Console {
                 if pixel_x < self.width && pixel_y < self.height {
                     // Бит 7 = левый пиксель, бит 0 = правый
                     let color = if (line >> (7 - dx)) & 1 == 1 { fg } else { bg };
+                    let native_color = crate::display::color_to_native(color, self.pixel_format);
                     unsafe {
                         let offset = pixel_y * self.pitch + pixel_x;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), color);
+                        core::ptr::write_volatile(self.fb_addr.add(offset), native_color);
                     }
                 }
             }
@@ -496,7 +503,8 @@ impl Console {
             let bottom_start = pixels_to_move;
             let bottom_len = lines_to_move * self.pitch;
             let slice = core::slice::from_raw_parts_mut(self.fb_addr.add(bottom_start), bottom_len);
-            slice.fill(self.bg_color);
+            let bg = crate::display::color_to_native(self.bg_color, self.pixel_format);
+            slice.fill(bg);
         }
         self.cursor_row = self.rows - 1;
     }
@@ -514,7 +522,7 @@ impl Console {
         let x = self.cursor_col * FONT_WIDTH;
         let y = self.cursor_row * FONT_HEIGHT;
         // Underline cursor: рисуем горизонтальную линию 2px внизу ячейки
-        let inv_bg = !self.bg_color;
+        let inv_bg = crate::display::color_to_native(!self.bg_color, self.pixel_format);
         for dx in 0..FONT_WIDTH {
             let py = y + FONT_HEIGHT - 1;
             let px = x + dx;
@@ -542,6 +550,7 @@ impl Console {
         }
         let x = self.cursor_col * FONT_WIDTH;
         let y = self.cursor_row * FONT_HEIGHT;
+        let bg = crate::display::color_to_native(self.bg_color, self.pixel_format);
         // Стираем 2 нижних строки
         for dx in 0..FONT_WIDTH {
             for dy in FONT_HEIGHT - 2..FONT_HEIGHT {
@@ -550,7 +559,7 @@ impl Console {
                 if px < self.width && py < self.height {
                     unsafe {
                         let offset = py * self.pitch + px;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), self.bg_color);
+                        core::ptr::write_volatile(self.fb_addr.add(offset), bg);
                     }
                 }
             }
@@ -591,9 +600,10 @@ impl Console {
                 let pixel_y = start_y + dy;
                 if pixel_x < self.width && pixel_y < self.height {
                     let color = if (line >> (7 - dx)) & 1 == 1 { fg } else { bg };
+                    let native_color = crate::display::color_to_native(color, self.pixel_format);
                     unsafe {
                         let offset = pixel_y * self.pitch + pixel_x;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), color);
+                        core::ptr::write_volatile(self.fb_addr.add(offset), native_color);
                     }
                 }
             }
@@ -731,6 +741,7 @@ impl Console {
         if w == 0 || h == 0 {
             return;
         }
+        let native_color = crate::display::color_to_native(color, self.pixel_format);
 
         // Вычисляем физические координаты прямоугольника
         let (phys_x_start, phys_x_end, phys_y_start, phys_y_end) = if self.virtual_width > 0 {
@@ -770,7 +781,7 @@ impl Console {
 
         if !self.back_buffer_ptr.is_null() {
             // Пакетная запись через back buffer (u64 = 2 пикселя за раз)
-            let double_color = ((color as u64) << 32) | (color as u64);
+            let double_color = ((native_color as u64) << 32) | (native_color as u64);
             for dy in 0..phys_h {
                 let py = phys_y_start + dy;
                 let row_start = py * self.pitch + phys_x_start;
@@ -782,7 +793,7 @@ impl Console {
 
                     // Выравнивание: если нечётный — пишем один u32
                     if (row_start & 1) != 0 && remaining > 0 {
-                        core::ptr::write_volatile(ptr.add(offset), color);
+                        core::ptr::write_volatile(ptr.add(offset), native_color);
                         offset += 1;
                         remaining -= 1;
                     }
@@ -797,7 +808,7 @@ impl Console {
                     // Остаток: один u32
                     let written = pairs * 2;
                     for i in 0..(remaining - written) {
-                        core::ptr::write_volatile(ptr.add(offset + written + i), color);
+                        core::ptr::write_volatile(ptr.add(offset + written + i), native_color);
                     }
                 }
             }
@@ -808,7 +819,7 @@ impl Console {
                 unsafe {
                     let slice =
                         core::slice::from_raw_parts_mut(self.fb_addr.add(row_start), phys_w);
-                    slice.fill(color);
+                    slice.fill(native_color);
                 }
             }
         }

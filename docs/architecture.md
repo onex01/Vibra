@@ -13,9 +13,9 @@
 3. **interrupts** — IDT (исключения CPU + IRQ0 timer + IRQ1 keyboard), PIC, PIT
 4. **memory::pmm** — физический менеджер памяти (bitmap allocator, next-fit, локи)
 5. **memory::heap** — аллокатор кучи (free-list с коалесценцией поверх PMM+HHDM)
-6. **memory::paging** — read-only обход текущих page tables Limine (CR3, virt → phys)
+6. **memory::paging / memory::vmm** — обход page tables, собственная PML4 и переключение CR3
 7. **keyboard** — драйвер PS/2 клавиатуры (порт 0x60, IRQ1)
-8. **fs** — файловая система (RamFS на статических массивах; FAT32 — планируется)
+8. **fs** — VFS, RamFS, FAT32, Ext2, procfs, sysfs, devtmpfs
 9. **shell** — командная оболочка с line editor и tab-completion
 
 ## Загрузка
@@ -27,9 +27,9 @@
    - Memory map (карта памяти)
    - HHDM offset (Higher Half Direct Map)
 4. Ядро инициализирует подсистемы в строгом порядке зависимостей:
-   serial → PMM → heap (alloc_contiguous 4 МБ) → heap-стресс → keyboard →
-   fs → kernel (первые постоянные heap-аллокации) → device/driver →
-   GDT → IDT/PIC/PIT → `sti`
+   serial → PMM → heap (alloc_contiguous 4 МБ) → heap-стресс → ACPI →
+   keyboard/input/devices → PCI/AHCI/NVMe/USB/net drivers → timer → fs →
+   kernel/users/task → VMM → GDT → IDT/PIC/APIC → syscall → `sti`
 5. Входит в главный цикл shell
 
 ## Управление памятью
@@ -42,9 +42,9 @@
 - **Куча (heap):** собственный free-list аллокатор (~250 строк) с address-ordered
   списком и коалесценцией соседей. Бэкенд — регион из PMM (4 МБ), отображённый
   через HHDM. Поддерживает `free` (в отличие от прежнего BumpAllocator).
-- **Виртуальная память:** пока используются таблицы страниц Limine (HHDM маппит
-  всю физику). `memory::paging` уже проверяет CR3 и реальные отображения в
-  read-only режиме; переключение на собственные page tables — следующий подшаг.
+- **Виртуальная память:** `memory::paging` умеет обходить таблицы страниц, а
+  `memory::vmm` строит собственную PML4 на базе карты Limine, включает NX/WP и
+  переключает CR3. Диагностика W^X/NX доступна через shell-команды.
 
 ## Ввод-вывод
 
@@ -63,7 +63,10 @@
 - Heap не использует — полностью статическая
 - Команды: `ls`, `cat`, `touch`, `mkdir`, `cd`, `cp`, `mv`, `rm`, `edit`
 
-### FAT32 (планируется)
-- Чтение/запись на диск
-- Поддержка папок
-- Совместимость с Windows/Linux
+### Дисковые ФС
+- FAT32: чтение/запись, BPB parse, cluster-chain, каталоги
+- Ext2: чтение superblock/inode/dirent, direct blocks
+- VFS mount table объединяет RamFS, procfs, sysfs, devtmpfs и дисковые ФС
+
+### Следующий шаг
+- Автоматически находить boot-диск, разбирать MBR и монтировать FAT32-раздел в `/mnt/boot`
