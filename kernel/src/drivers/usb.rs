@@ -124,6 +124,8 @@ pub fn init() {
                 crate::drivers::usb::xhci::init_event_ring(bar0_phys, mmio_virt);
                 // Quick poll of admin completion queue for debug (one-shot)
                 crate::drivers::usb::xhci::poll_admin_acq();
+                // Submit a dummy TRB into ASQ (local write only) for debug
+                crate::drivers::usb::xhci::submit_dummy_command();
             }
         } else {
             println!("[USB] [{:02X}:{:02X}.{}] I/O BAR, пропуск (требуется memory BAR)",

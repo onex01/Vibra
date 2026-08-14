@@ -116,6 +116,25 @@ pub fn poll_admin_acq() {
     }
 }
 
+/// Записать тестовую TRB в ASQ для первого контроллера (локально, без doorbell)
+pub fn submit_dummy_command() {
+    let mut list = XHCI_CONTROLLERS.lock();
+    if list.is_empty() {
+        println!("[xHCI] submit_dummy_command: no controllers registered");
+        return;
+    }
+    // Возьмём первый контроллер
+    let c = &mut list[0];
+    println!("[xHCI] submit_dummy_command: writing TRB to ASQ virt={:#x}", c.asq_virt);
+    unsafe {
+        let p0 = c.asq_virt as *mut u64;
+        let p1 = (c.asq_virt + 8) as *mut u64;
+        core::ptr::write_volatile(p0, 0xdead_beef_dead_beefu64);
+        core::ptr::write_volatile(p1, 0x1122_3344_5566_7788u64);
+    }
+    println!("[xHCI] dummy TRB written to ASQ");
+}
+
 /// Выделить Event Ring и структуру ERST (Event Ring Segment Table).
 /// Пока что только выделение памяти и логирование адресов — запись
 /// регистров RT (runtime) будет в следующих итерациях.
