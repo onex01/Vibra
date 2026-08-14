@@ -45,6 +45,7 @@ pub mod display;
 pub mod history;
 pub mod net;
 pub mod systest;
+pub mod hidtest;
 
 use crate::framebuffer::Console;
 
@@ -103,6 +104,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "lspci",   help: "list PCI devices",          func: lspci::run },
     Command { name: "usertest", help: "run user-space process",  func: usertest::run },
     Command { name: "systest",  help: "interactive system test",   func: systest::run },
+    Command { name: "hidtest",  help: "inject test keys from HID subsystem", func: hidtest::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
     Command { name: "display", help: "show display info",          func: display::run },
     Command { name: "history", help: "show command history",       func: history::run },
