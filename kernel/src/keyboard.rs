@@ -214,6 +214,13 @@ pub fn poll_key() -> Option<Key> {
     // Лок делится с ISR — берём его только с выключенными прерываниями,
     // иначе IRQ1 во время удержания лока приведёт к дедлоку.
     crate::interrupts::without_interrupts(|| {
+        // Сначала проверяем очередь HID (usb) — она хранит уже распарсенные Key
+        {
+            let mut hid_q = HID_QUEUE.lock();
+            if !hid_q.is_empty() {
+                return Some(hid_q.remove(0));
+            }
+        }
         let mut state = KEYBOARD_STATE.lock();
         let scancode = state.pop_scancode()?;
 
@@ -248,6 +255,16 @@ pub fn poll_key() -> Option<Key> {
             None
         }
     })
+}
+
+use alloc::vec::Vec;
+// Очередь для внешней (USB/HID) инъекции клавиш
+static HID_QUEUE: Mutex<Vec<Key>> = Mutex::new(Vec::new());
+
+/// Внедрить `Key` из внешнего источника (USB/HID). Безопасно вызывать из драйвера.
+pub fn inject_key(k: Key) {
+    let mut q = HID_QUEUE.lock();
+    q.push(k);
 }
 
 /// Debug: распечатать все ожидающие клавиши (вызывается из boot для диагностики)

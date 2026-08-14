@@ -9,6 +9,8 @@ use alloc::vec::Vec;
 use spin::Mutex;
 use core::sync::atomic::Ordering;
 
+pub mod hid;
+
 /// Информация об обнаруженном USB контроллере
 #[derive(Debug, Clone)]
 pub struct UsbController {
@@ -114,4 +116,8 @@ pub fn init() {
     }
 
     println!("[USB] {} controller(s) initialized", controllers.len());
+
+    // Инициализация подсистемы HID (минимальная) — регистрируем тестовую строку
+    // и готовим пространство для дальнейшей реализации HID.
+    crate::drivers::usb::hid::init();
 }
