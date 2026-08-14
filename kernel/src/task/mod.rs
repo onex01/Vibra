@@ -126,6 +126,13 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
     sched.tick_count += 1;
     crate::interrupts::idt::TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
+    // Periodically poll xHCI admin/event rings for debug (every 10 ticks)
+    if sched.tick_count % 10 == 0 {
+        // These functions are no-op if no controllers allocated
+        crate::drivers::usb::xhci::poll_event_ring();
+        crate::drivers::usb::xhci::poll_admin_acq();
+    }
+
     // EOI: PIC или LAPIC — зависит от того, кто управляет IRQ0
     // Если APIC полностью активен → LAPIC EOI, иначе → PIC EOI
     if crate::interrupts::apic::is_active() {

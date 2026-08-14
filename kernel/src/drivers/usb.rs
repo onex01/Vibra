@@ -29,6 +29,90 @@ pub fn get_controllers() -> Vec<UsbController> {
     USB_CONTROLLERS.lock().clone()
 }
 
+/// USB Device Descriptor (parsed minimal fields)
+#[derive(Debug, Clone)]
+pub struct UsbDeviceDescriptor {
+    pub bcd_usb: u16,
+    pub b_device_class: u8,
+    pub b_device_subclass: u8,
+    pub b_device_protocol: u8,
+    pub id_vendor: u16,
+    pub id_product: u16,
+    pub b_num_configurations: u8,
+}
+
+/// Representation of a discovered USB device inside the kernel
+#[derive(Debug, Clone)]
+pub struct UsbDevice {
+    pub vendor: u16,
+    pub product: u16,
+    pub device_class: u8,
+    pub device_subclass: u8,
+    pub device_protocol: u8,
+}
+
+static USB_DEVICES: Mutex<Vec<UsbDevice>> = Mutex::new(Vec::new());
+
+/// Parse a device descriptor buffer (18 bytes) into `UsbDeviceDescriptor`.
+pub fn parse_device_descriptor(buf: &[u8]) -> Option<UsbDeviceDescriptor> {
+    if buf.len() < 18 { return None; }
+    if buf[1] != 0x01 { return None; } // bDescriptorType == DEVICE
+    let bcd_usb = u16::from_le_bytes([buf[2], buf[3]]);
+    let b_device_class = buf[4];
+    let b_device_subclass = buf[5];
+    let b_device_protocol = buf[6];
+    let id_vendor = u16::from_le_bytes([buf[8], buf[9]]);
+    let id_product = u16::from_le_bytes([buf[10], buf[11]]);
+    let b_num_configurations = buf[17];
+    Some(UsbDeviceDescriptor {
+        bcd_usb,
+        b_device_class,
+        b_device_subclass,
+        b_device_protocol,
+        id_vendor,
+        id_product,
+        b_num_configurations,
+    })
+}
+
+/// Register a USB device in kernel device registry based on descriptor.
+pub fn register_device_from_descriptor(desc: &UsbDeviceDescriptor) {
+    // Map USB class to kernel DeviceType
+    use crate::kernel::device::{register as register_dev, DeviceType};
+
+    let dev = UsbDevice {
+        vendor: desc.id_vendor,
+        product: desc.id_product,
+        device_class: desc.b_device_class,
+        device_subclass: desc.b_device_subclass,
+        device_protocol: desc.b_device_protocol,
+    };
+
+    // Decide device type
+    let dtype = match desc.b_device_class {
+        0x03 => { // HID
+            // protocol 1 = keyboard, 2 = mouse (when device-level class used)
+            match desc.b_device_protocol {
+                0x01 => DeviceType::Keyboard,
+                0x02 => DeviceType::Mouse,
+                _ => DeviceType::Unknown,
+            }
+        }
+        0x08 => DeviceType::Disk, // Mass Storage
+        _ => DeviceType::Unknown,
+    };
+
+    let name = alloc::format!("usb:{:04x}:{:04x}", desc.id_vendor, desc.id_product);
+    let id = register_dev(&name, dtype);
+    println!("[USB] registered device id={} name={} class={:#x}", id, name, desc.b_device_class);
+
+    USB_DEVICES.lock().push(dev);
+}
+
+pub fn get_devices() -> Vec<UsbDevice> {
+    USB_DEVICES.lock().clone()
+}
+
 /// Инициализация подсистемы USB — поиск контроллеров через PCI
 pub fn init() {
     // USB контроллеры: class = 0x0C (Serial Bus), subclass = 0x03 (USB)
@@ -122,10 +206,14 @@ pub fn init() {
                 crate::drivers::usb::xhci::init_controller(bar0_phys, mmio_virt);
                 // Allocate and set up Event Ring / ERST structures (logging only for now)
                 crate::drivers::usb::xhci::init_event_ring(bar0_phys, mmio_virt);
+                // Quick poll of Event Ring memory for diagnostics
+                crate::drivers::usb::xhci::poll_event_ring();
                 // Quick poll of admin completion queue for debug (one-shot)
                 crate::drivers::usb::xhci::poll_admin_acq();
                 // Submit a dummy TRB into ASQ (local write only) for debug
                 crate::drivers::usb::xhci::submit_dummy_command();
+                // Try writing a proper Enable Slot TRB (still local, no doorbell)
+                crate::drivers::usb::xhci::submit_enable_slot();
             }
         } else {
             println!("[USB] [{:02X}:{:02X}.{}] I/O BAR, пропуск (требуется memory BAR)",

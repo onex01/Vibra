@@ -143,6 +143,7 @@ extern "x86-interrupt" fn isr_keyboard(_frame: InterruptStackFrame) {
     if status & 0x01 != 0 {
         // Данные есть — читаем scancode
         let scancode = unsafe { inb(0x60) };
+        println!("[IDT] kbd IRQ: scancode={:#x}", scancode);
         crate::keyboard::handle_interrupt(scancode);
     }
     // EOI: PIC или LAPIC — зависит от того, кто управляет IRQ1

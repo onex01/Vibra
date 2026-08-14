@@ -201,6 +201,8 @@ pub fn handle_interrupt(scancode: u8) {
     unsafe { KB_IRQ_COUNT += 1; }
     let mut state = KEYBOARD_STATE.lock();
     
+    println!("[KEYBOARD] IRQ handler got scancode={:#x}", scancode);
+
     state.push_scancode(scancode);
     
     match scancode {

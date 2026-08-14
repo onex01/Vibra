@@ -26,5 +26,14 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
             ctrl.port_count), COLOR_YELLOW);
     }
 
+    // Also show devices discovered by USB subsystem (if any)
+    let devices = vibra_kernel::drivers::usb::get_devices();
+    if !devices.is_empty() {
+        console.print_colored("\nDevices:\n", COLOR_CYAN);
+        for d in devices.iter() {
+            console.print_colored(&format!("  {:04X}:{:04X} class={:#x}\n", d.vendor, d.product, d.device_class), COLOR_YELLOW);
+        }
+    }
+
     CmdResult::Ok
 }
