@@ -117,6 +117,8 @@ pub fn init() {
                     port_count,
                     version: hci_version,
                 });
+                // Initialize xHCI admin queues for this controller
+                crate::drivers::usb::xhci::init_controller(bar0_phys, mmio_virt);
             }
         } else {
             println!("[USB] [{:02X}:{:02X}.{}] I/O BAR, пропуск (требуется memory BAR)",
