@@ -10,6 +10,7 @@ use spin::Mutex;
 use core::sync::atomic::Ordering;
 
 pub mod hid;
+pub mod xhci;
 
 /// Информация об обнаруженном USB контроллере
 #[derive(Debug, Clone)]
