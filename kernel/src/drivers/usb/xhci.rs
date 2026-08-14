@@ -72,3 +72,26 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) {
         // Note: ASQ/ACQ doorbells are not set yet; further steps required.
     }
 }
+
+/// Выделить Event Ring и структуру ERST (Event Ring Segment Table).
+/// Пока что только выделение памяти и логирование адресов — запись
+/// регистров RT (runtime) будет в следующих итерациях.
+pub fn init_event_ring(bar_phys: u64, mmio_virt: u64) {
+    println!("[xHCI] init_event_ring: allocating event ring memory");
+    // Allocate one page for event ring buffer and one for ERST
+    if let Some(ev_phys) = crate::memory::pmm::alloc_contiguous(1) {
+        let h = crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+        let ev_virt = h as usize + ev_phys;
+        println!("[xHCI] Event ring phys={:#x} virt={:#x}", ev_phys, ev_virt);
+    } else {
+        println!("[xHCI] Failed to allocate event ring page");
+    }
+
+    if let Some(erst_phys) = crate::memory::pmm::alloc_contiguous(1) {
+        let h = crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+        let erst_virt = h as usize + erst_phys;
+        println!("[xHCI] ERST table phys={:#x} virt={:#x}", erst_phys, erst_virt);
+    } else {
+        println!("[xHCI] Failed to allocate ERST page");
+    }
+}
