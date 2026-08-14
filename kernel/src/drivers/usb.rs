@@ -59,7 +59,7 @@ pub fn init() {
             let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
             let mmio_virt = hhdm + bar0_phys;
 
-            // Читаем Capability Registers
+            // Читаем Capability Registers и пробуем минимальный reset xHCI
             unsafe {
                 let cap_length = core::ptr::read_volatile(mmio_virt as *const u8) as u64;
                 let hci_version = core::ptr::read_volatile((mmio_virt + 0x02) as *const u16);
@@ -74,6 +74,30 @@ pub fn init() {
                     pci_dev.vendor_id, pci_dev.device_id,
                     version_major, version_minor,
                     port_count, cap_length);
+
+                // Операционные регистры начинаются по смещению cap_length
+                let op_base = mmio_virt + cap_length as u64;
+
+                // USBCMD offset 0x00 (u32). HCRST = bit 1.
+                let usbcmd_ptr = op_base as *mut u32;
+                let usbsts_ptr = (op_base + 0x04) as *mut u32;
+
+                // Попробуем сбросить контроллер (HCRST)
+                let mut cmd = core::ptr::read_volatile(usbcmd_ptr);
+                core::ptr::write_volatile(usbcmd_ptr, cmd | 0x02);
+                // Ждём до 10000 итераций
+                let mut waited = 0;
+                while (core::ptr::read_volatile(usbcmd_ptr) & 0x02) != 0 {
+                    waited += 1;
+                    if waited > 10000 {
+                        println!("[USB] xHCI reset timeout (waited {})", waited);
+                        break;
+                    }
+                }
+
+                let final_cmd = core::ptr::read_volatile(usbcmd_ptr);
+                let sts = core::ptr::read_volatile(usbsts_ptr);
+                println!("[USB] xHCI reset complete: USBCMD={:#x} USBSTS={:#x}", final_cmd, sts);
 
                 controllers.push(UsbController {
                     vendor: pci_dev.vendor_id,
