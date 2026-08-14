@@ -155,9 +155,8 @@ extern "x86-interrupt" fn isr_keyboard(_frame: InterruptStackFrame) {
 
 // Serial port handler (IRQ4 via IO APIC, vector 36)
 extern "x86-interrupt" fn isr_serial(_frame: InterruptStackFrame) {
-    let _data = unsafe { inb(0x3F8) };
-    // Serial идёт через IO APIC → LAPIC EOI
-    crate::interrupts::apic::eoi();
+    // Делегируем обработку в модуль serial (он собирает байты в ring buffer)
+    crate::serial::handle_interrupt();
 }
 
 // PS/2 Mouse handler (IRQ12, vector 44)

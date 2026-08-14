@@ -234,6 +234,10 @@ pub fn init() -> BootConsole {
     interrupts::enable();
     keyboard::post_init();
 
+    // Диагностическая печать ожидающих клавиш и счётчика IRQ — помогает отладить
+    // ситуацию, когда ввод в shell не доходит. Выводится один раз во время boot.
+    keyboard::dump_pending();
+
     println!("[DEBUG] Interrupts enabled, continuing boot...");
 
     let mut console = match FRAMEBUFFER_REQUEST.response() {

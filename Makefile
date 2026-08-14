@@ -3,7 +3,14 @@ TARGET := x86_64-unknown-none
 BUILD_DIR := build
 LIMINE_DIR := limine-bin
 
-QEMU := qemu-system-x86_64
+QEMU := /usr/bin/qemu-system-x86_64
+
+# QEMU environment wrapper: clear env to avoid snap/core20 libs,
+# but preserve display-related vars when run in a GUI session.
+QEMU_ENV := env -i PATH=/usr/bin:/bin TERM=$(TERM)
+ifdef DISPLAY
+QEMU_ENV := env -i PATH=/usr/bin:/bin TERM=$(TERM) DISPLAY=$(DISPLAY) XAUTHORITY=$(XAUTHORITY) XDG_RUNTIME_DIR=$(XDG_RUNTIME_DIR)
+endif
 CARGO := cargo +nightly
 SERIAL_DEBUG ?= 1
 RELEASE ?= 0
@@ -22,17 +29,47 @@ endif
 
 # COM1 привязан к stdin/stdout: можно вводить shell-команды из терминала,
 # сохраняя графическое окно QEMU для framebuffer-консоли.
-QEMU_FLAGS := -m 256M -serial stdio -monitor none -drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
-              -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35 \
-              -device e1000,netdev=net0 -netdev user,id=net0,hostfwd=tcp::2222-:22
+## SERIAL configuration: choose how QEMU exposes the serial port.
+# SERIAL_MODE: stdio (default), tcp (host TCP port), file (log to file)
+SERIAL_MODE ?= stdio
+SERIAL_PORT ?= 4444
+SERIAL_FILE ?= $(BUILD_DIR)/serial.log
 
-.PHONY: all build run clean setup install-kernel iso usb run-iso
+ifeq ($(SERIAL_MODE),tcp)
+QEMU_SERIAL := -serial tcp::$(SERIAL_PORT),server,nowait
+else ifeq ($(SERIAL_MODE),file)
+QEMU_SERIAL := -serial file:$(SERIAL_FILE)
+else
+QEMU_SERIAL := -serial stdio
+endif
+
+QEMU_FLAGS := -m 256M $(QEMU_SERIAL) -monitor none -drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
+              -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35 \
+			  -device e1000,netdev=net0 -netdev user,id=net0,hostfwd=tcp::2222-:22
+
+# Run without graphical display if requested
+HEADLESS ?= 0
+ifeq ($(HEADLESS),1)
+QEMU_FLAGS += -display none
+endif
+
+# Optional USB devices (xHCI + basic keyboard/mouse)
+ENABLE_USB ?= 0
+USB_FLAGS := -device nec-usb-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
+ifeq ($(ENABLE_USB),1)
+QEMU_FLAGS += $(USB_FLAGS)
+endif
+
+.PHONY: all build run clean setup install-kernel iso usb run-iso run-bios qemu-usb
 
 all: run
 
 # Сборка ядра И копирование его на диск
 build:
 	@mkdir -p $(BUILD_DIR)
+	@if [ ! -f "$(BUILD_DIR)/hdd.img" ]; then \
+		$(MAKE) setup; \
+	fi
 	$(CARGO) build -p vibra $(CARGO_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 	@echo "==> Copying kernel to disk image..."
 	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/debug/$(KERNEL_NAME) ::/kernel.elf
@@ -86,7 +123,7 @@ run-release: build-release
 	@echo "==> Starting QEMU (release, no serial shell)..."
 	@$(CARGO) build -p vibra --release --no-default-features -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/release/$(KERNEL_NAME) ::/kernel.elf
-	$(QEMU) -m 256M -serial none -monitor none -drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
+	$(QEMU_ENV) $(QEMU) -m 256M -serial none -monitor none -drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
 	         -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35
 
 build-release:
@@ -97,16 +134,42 @@ build-release:
 
 run: build
 	@echo "==> Starting QEMU..."
-	$(QEMU) $(QEMU_FLAGS)
+	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS)
 
 # QEMU с сетью (e1000 + SSH на порт 2222)
 qemu-net: build
 	@echo "==> Starting QEMU with networking (e1000, SSH on port 2222)..."
-	$(QEMU) $(QEMU_FLAGS)
+	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS)
+
+run-usb: build
+	@echo "==> Starting QEMU with USB devices (xHCI keyboard/mouse)..."
+	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS) $(USB_FLAGS)
+
+run-serial-tcp: build
+	@echo "==> Starting QEMU with serial over TCP (port $(SERIAL_PORT))"
+	@echo "Connect with: telnet localhost $(SERIAL_PORT)  OR  socat -,raw,echo=0 TCP:localhost:$(SERIAL_PORT)"
+	$(MAKE) SERIAL_MODE=tcp run
+
+run-serial-file: build
+	@echo "==> Starting QEMU with serial logged to $(SERIAL_FILE)"
+	$(MAKE) SERIAL_MODE=file run
+
+run-bios-usb: iso
+	@echo "==> Starting QEMU (SeaBIOS) with USB devices..."
+	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS) $(USB_FLAGS) -cdrom $(BUILD_DIR)/vibra.iso -M q35 -display none
+
+run-iso-usb: iso
+	@echo "==> Starting QEMU (UEFI) with USB devices..."
+	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS) $(USB_FLAGS) -cdrom $(BUILD_DIR)/vibra.iso -drive if=pflash,format=raw,file=OVMF.fd,readonly=on -M q35 -display none
 
 clean:
 	$(CARGO) clean
 	rm -rf $(BUILD_DIR) $(LIMINE_DIR) OVMF.fd limine-binary.tar.xz
+
+.PHONY: deps-ubuntu
+deps-ubuntu:
+	@echo "==> Installing common dependencies on Debian/Ubuntu (requires sudo)"
+	@sudo apt update && sudo apt install -y qemu-system-x86 mtools dosfstools xorriso wget mtools mtools
 
 # === ISO image для реального железа ===
 # Собирает ISO с Limine (BIOS + UEFI), ядром и конфигом.
@@ -152,10 +215,23 @@ iso: build
 
 run-iso: iso
 	@echo "==> Starting QEMU with ISO..."
-	$(QEMU) -m 512M -serial stdio -monitor none \
+	$(QEMU_ENV) $(QEMU) -m 512M -serial stdio -monitor none \
 		-cdrom $(BUILD_DIR)/vibra.iso \
 		-drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
 		-M q35 -display none
+
+run-bios: iso
+	@echo "==> Starting QEMU with ISO via SeaBIOS..."
+	$(QEMU_ENV) $(QEMU) -m 512M -serial stdio -monitor none \
+		-cdrom $(BUILD_DIR)/vibra.iso \
+		-M q35 -display none
+
+qemu-usb: build
+	@echo "==> Starting QEMU with xHCI USB keyboard/mouse..."
+	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS) \
+		-device nec-usb-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0
 
 # === USB flash image для реального железа ===
 # Создаёт GPT-размеченный FAT32 образ с Limine (BIOS + UEFI).

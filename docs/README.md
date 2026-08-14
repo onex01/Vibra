@@ -94,8 +94,19 @@ docs/
 ## Сборка и запуск
 
 ```bash
-./build.sh  # Полная сборка и запуск
-make run    # Быстрая сборка и запуск
+./build.sh doctor # проверить зависимости
+./build.sh setup  # первый запуск: Limine/OVMF + build/hdd.img
+./build.sh debug  # сборка и QEMU
+make run          # быстрый запуск через Makefile
+```
+
+Ubuntu/Debian зависимости:
+
+```bash
+sudo apt update
+sudo apt install qemu-system-x86 mtools dosfstools wget xorriso fdisk make
+rustup toolchain install nightly
+rustup target add x86_64-unknown-none --toolchain nightly
 ```
 
 ## Лицензия

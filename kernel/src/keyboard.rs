@@ -249,3 +249,17 @@ pub fn poll_key() -> Option<Key> {
         }
     })
 }
+
+/// Debug: распечатать все ожидающие клавиши (вызывается из boot для диагностики)
+pub fn dump_pending() {
+    // Вывести количество IRQ и все сканкоды, превратив их в Key
+    println!("[KEYBOARD] IRQ count = {}", unsafe { KB_IRQ_COUNT });
+    // Забираем и печатаем все доступные ключи
+    loop {
+        if let Some(k) = poll_key() {
+            println!("[KEYBOARD] pending: {:?}", k);
+        } else {
+            break;
+        }
+    }
+}

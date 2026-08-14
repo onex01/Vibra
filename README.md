@@ -41,14 +41,15 @@ Vibra ориентируется на QEMU и реальное x86_64-желез
 - **ОС хоста:** Linux (Ubuntu 20.04+, Debian 11+, Fedora)
 - **Rust:** nightly toolchain
 - **QEMU:** 6.0+
-- **Утилиты:** `mtools`, `wget`
+- **Утилиты:** `make`, `qemu-system-x86_64`, `mtools`, `dosfstools`, `wget`, `tar`
+- **Для ISO/USB:** `xorriso`, `fdisk`
 
 ### Установка зависимостей
 
 **Ubuntu / Debian:**
 ```bash
 sudo apt update
-sudo apt install qemu-system-x86 mtools wget
+sudo apt install qemu-system-x86 mtools dosfstools wget xorriso fdisk make
 ```
 
 **Rust nightly:**
@@ -56,6 +57,21 @@ sudo apt install qemu-system-x86 mtools wget
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup toolchain install nightly
 rustup target add x86_64-unknown-none --toolchain nightly
+```
+
+### Проверка окружения
+
+`build.sh` умеет проверять зависимости перед сборкой и объясняет, чего не хватает:
+
+```bash
+./build.sh doctor
+```
+
+Для первого запуска достаточно:
+
+```bash
+./build.sh setup   # скачивает Limine/OVMF и создаёт build/hdd.img
+./build.sh debug   # собирает Vibra и запускает QEMU
 ```
 
 ### Сборка и запуск
@@ -82,6 +98,9 @@ chmod +x build.sh
 ./build.sh build          # только development-сборка
 ./build.sh release-build  # только release-сборка
 ./build.sh secure-build   # только защищённая сборка (no serial-debug)
+./build.sh doctor         # проверить зависимости
+./build.sh run-bios       # ISO через SeaBIOS
+./build.sh qemu-usb       # QEMU с xHCI USB keyboard/mouse
 ```
 
 ### Управление в QEMU
