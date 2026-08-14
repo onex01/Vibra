@@ -100,6 +100,15 @@ pub fn init() {
                 let final_cmd = core::ptr::read_volatile(usbcmd_ptr);
                 let sts = core::ptr::read_volatile(usbsts_ptr);
                 println!("[USB] xHCI reset complete: USBCMD={:#x} USBSTS={:#x}", final_cmd, sts);
+                // Попробуем прочитать PORTSC регистры (на offset 0x400 от op_base)
+                let portsc_base = op_base + 0x400;
+                for p in 0..port_count {
+                    let port_off = portsc_base + (p as u64) * 0x10;
+                    let portsc = core::ptr::read_volatile(port_off as *const u32);
+                    // bit 0 = Current Connect Status (CCS)
+                    let ccs = portsc & 0x1 != 0;
+                    println!("[USB] port {}: PORTSC={:#x} connected={}", p+1, portsc, ccs);
+                }
 
                 controllers.push(UsbController {
                     vendor: pci_dev.vendor_id,
