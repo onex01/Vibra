@@ -205,7 +205,7 @@ impl PciVgaBackend {
                 }
                 _ => {
                     // Неизвестный режим
-                    crate::println!("[VGA] Неизвестный режим: {:#x}", mode);
+                    crate::println!("[VGA] Unknown mode: {:#x}", mode);
                     return false;
                 }
             }

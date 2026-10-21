@@ -136,7 +136,7 @@ impl Rtl8139Controller {
             timeout -= 1;
         }
         if timeout == 0 {
-            println!("[RTL8139] Предупреждение: тайм-аут сброса");
+            println!("[RTL8139] Warning: reset timed out");
         }
     }
 
@@ -152,7 +152,7 @@ impl Rtl8139Controller {
         let buf_layout = core::alloc::Layout::from_size_align(RX_BUFFER_SIZE, 256).unwrap();
         self.rx_buffer = alloc::alloc::alloc_zeroed(buf_layout);
         if self.rx_buffer.is_null() {
-            println!("[RTL8139] ОШИБКА: Не удалось выделить RX буфер");
+            println!("[RTL8139] ERROR: failed to allocate RX buffer");
             return;
         }
         self.rx_buffer_phys = virt_to_phys(self.rx_buffer as u64);
@@ -168,7 +168,7 @@ impl Rtl8139Controller {
             let buf_layout = core::alloc::Layout::from_size_align(TX_BUFFER_SIZE, 256).unwrap();
             self.tx_buffers[i] = alloc::alloc::alloc_zeroed(buf_layout);
             if self.tx_buffers[i].is_null() {
-                println!("[RTL8139] ОШИБКА: Не удалось выделить TX буфер {}", i);
+                println!("[RTL8139] ERROR: failed to allocate TX buffer {}", i);
                 return;
             }
             self.tx_buffers_phys[i] = virt_to_phys(self.tx_buffers[i] as u64);
@@ -202,18 +202,18 @@ pub fn init() {
         return;
     }
 
-    println!("[RTL8139] Поиск Realtek RTL8139 контроллера...");
+    println!("[RTL8139] Searching for Realtek RTL8139 controller...");
 
     // Ищем RTL8139 через PCI (vendor 0x10EC, device 0x8139)
     let rtl_device = match super::pci::find_device_by_id(0x10EC, 0x8139) {
         Some(d) => d,
         None => {
-            println!("[RTL8139] Realtek RTL8139 контроллер не найден");
+            println!("[RTL8139] Realtek RTL8139 controller not found");
             return;
         }
     };
 
-    println!("[RTL8139] Найден контроллер PCI [{:02X}:{:02X}.{}]",
+    println!("[RTL8139] Found PCI controller [{:02X}:{:02X}.{}]",
         rtl_device.bus, rtl_device.dev, rtl_device.func);
 
     // Включаем Bus Master и I/O Space
@@ -223,13 +223,13 @@ pub fn init() {
 
     // BAR0 — I/O порты (RTL8139 использует I/O BAR)
     if !rtl_device.is_io_bar(0) {
-        println!("[RTL8139] ОШИБКА: BAR0 не является I/O BAR");
+        println!("[RTL8139] ERROR: BAR0 is not an I/O BAR");
         return;
     }
 
     let io_base = rtl_device.bar0 as u16 & 0xFFFC;
     if io_base == 0 {
-        println!("[RTL8139] ОШИБКА: BAR0 = 0 — контроллер не сконфигурирован");
+        println!("[RTL8139] ERROR: BAR0 is zero; controller is not configured");
         return;
     }
 
@@ -249,7 +249,7 @@ pub fn init() {
     unsafe {
         // Сброс контроллера
         controller.reset();
-        println!("[RTL8139] Контроллер сброшен");
+        println!("[RTL8139] Controller reset");
 
         // Читаем MAC
         controller.read_mac();
@@ -260,14 +260,14 @@ pub fn init() {
         // Настраиваем RX/TX
         controller.setup_rx();
         controller.setup_tx();
-        println!("[RTL8139] RX/TX буферы настроены");
+        println!("[RTL8139] RX/TX buffers configured");
 
         // Включаем приёмник и передатчик
         controller.enable();
-        println!("[RTL8139] RX/TX включены");
+        println!("[RTL8139] RX/TX enabled");
     }
 
-    println!("[RTL8139] Драйвер RTL8139 инициализирован успешно");
+    println!("[RTL8139] Driver initialized successfully");
 
     *RTL8139_CONTROLLER.lock() = Some(controller);
     INITIALIZED.store(true, Ordering::Relaxed);

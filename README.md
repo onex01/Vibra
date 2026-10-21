@@ -3,7 +3,7 @@
 <p align="center"><b>Экспериментальное x86_64-ядро на Rust</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.1.0--Bootstrap-blue?style=flat-square" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-0.2.0--rc.1--Foundation-blue?style=flat-square" alt="Version"/>
   <img src="https://img.shields.io/badge/target-x86__64-orange?style=flat-square" alt="Target"/>
   <img src="https://img.shields.io/badge/Rust-no__std-red?style=flat-square" alt="Rust"/>
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License"/>
@@ -13,8 +13,8 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.1.0`
-означает начало этой фазы; API, структура репозитория и форматы образов могут
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.1`
+обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 
 Текущая цель — надёжный запуск с UEFI/Limine, диагностика через serial и
@@ -22,6 +22,9 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 устройства. Desktop, приложения, скриптовый язык и пользовательская среда не
 являются целями текущего релиза. ARM64 будет начат только после выполнения
 критериев `0.5.0` на реальном x86_64-железе.
+
+Во время загрузки serial-лог также отображается на Limine framebuffer и
+остаётся на экране после перехода в shell; отдельный ASCII-баннер отключён.
 
 ## Что действительно есть
 
@@ -41,8 +44,13 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 ```sh
 ./build.sh doctor
 ./build.sh setup
+./build.sh smoke
 ./build.sh debug
 ```
+
+`smoke` запускает QEMU на 75 секунд, проверяет serial boot log до prompt
+`vibra:/>` и требует не менее 12 heartbeat-сообщений через отдельный debugcon.
+Serial остаётся доступен для ввода команд; логи сохраняются в `build/`.
 
 `debug` включает serial shell. Не используйте его на открытом физическом
 serial-порту. Для образа без serial-ввода используйте `./build.sh secure`.
@@ -73,6 +81,7 @@ rustup target add x86_64-unknown-none --toolchain nightly
 ./build.sh doctor         проверить окружение
 ./build.sh setup          скачать Limine/OVMF и создать QEMU-образ
 ./build.sh build          собрать debug kernel.elf
+./build.sh smoke          проверить UEFI boot и shell prompt в QEMU
 ./build.sh debug          собрать и запустить QEMU
 ./build.sh secure         QEMU без serial shell
 ./build.sh iso            собрать экспериментальный ISO
@@ -85,8 +94,8 @@ rustup target add x86_64-unknown-none --toolchain nightly
 ## Структура
 
 ```text
-kernel/    библиотека и подсистемы ядра
-vibra/     временный x86_64 entry point и диагностические команды
+kernel/    workspace crate: библиотека, entry point и подсистемы ядра
+vibra/     legacy-исходники, не входят в workspace-сборку
 docs/      актуальные ограничения, архитектура и roadmap
 ```
 

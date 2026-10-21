@@ -117,7 +117,7 @@ pub fn find_msi_capabilities(bus: u8, dev: u8, func: u8) -> (Option<MsiCap>, Opt
                     let multi_mask = (msg_control & MSI_MC_MULTIPLE_MASK) >> 1;
                     let max_vectors = 1u8 << multi_mask;
 
-                    println!("    [MSI] Найден MSI capability @ 0x{:02x} (64-bit={}, max_vectors={})",
+                    println!("    [MSI] Found capability @ 0x{:02x} (64-bit={}, max_vectors={})",
                         cap_ptr, is_64bit, max_vectors);
 
                     msi = Some(MsiCap::Msi { offset: cap_ptr, is_64bit, max_vectors });
@@ -137,7 +137,7 @@ pub fn find_msi_capabilities(bus: u8, dev: u8, func: u8) -> (Option<MsiCap>, Opt
                     let pba_bir = (pba_bir_off & 0x07) as u8;
                     let pba_offset = pba_bir_off & 0xFFFFFFF8;
 
-                    println!("    [MSI-X] Найден MSI-X capability @ 0x{:02x} (table_size={}, BAR{}, offset={:#x})",
+                    println!("    [MSI-X] Found capability @ 0x{:02x} (table_size={}, BAR{}, offset={:#x})",
                         cap_ptr, table_size, table_bir, table_offset);
 
                     msix = Some(MsiCap::Msix {
@@ -176,7 +176,7 @@ pub fn enable_msi(bus: u8, dev: u8, func: u8, msi_cap: &MsiCap) -> Option<u8> {
     let (cap_offset, is_64bit) = match msi_cap {
         MsiCap::Msi { offset, is_64bit, .. } => (*offset, *is_64bit),
         _ => {
-            println!("    [MSI] ОШИБКА: передан не MSI capability");
+            println!("    [MSI] ERROR: expected an MSI capability");
             return None;
         }
     };
@@ -214,7 +214,7 @@ pub fn enable_msi(bus: u8, dev: u8, func: u8, msi_cap: &MsiCap) -> Option<u8> {
         msg_control |= MSI_MC_ENABLE;
         pci_config_write_u16(bus, dev, func, cap_offset + 2, msg_control);
 
-        println!("    [MSI] Включён: vector={}, addr={:#x}, data={:#x}",
+        println!("    [MSI] Enabled: vector={}, addr={:#x}, data={:#x}",
             vector, msg_addr, msg_data);
     }
 
@@ -227,7 +227,7 @@ pub fn disable_msi(bus: u8, dev: u8, func: u8, cap_offset: u8) {
         let mut msg_control = pci_config_read_u16(bus, dev, func, cap_offset + 2);
         msg_control &= !MSI_MC_ENABLE;
         pci_config_write_u16(bus, dev, func, cap_offset + 2, msg_control);
-        println!("    [MSI] Отключён");
+        println!("    [MSI] Disabled");
     }
 }
 
@@ -239,7 +239,7 @@ pub fn enable_msix(bus: u8, dev: u8, func: u8, msix_cap: &MsiCap, entry_index: u
     let (cap_offset, table_offset, table_bir) = match msix_cap {
         MsiCap::Msix { offset, table_offset, table_bir, .. } => (*offset, *table_offset, *table_bir),
         _ => {
-            println!("    [MSI-X] ОШИБКА: передан не MSI-X capability");
+            println!("    [MSI-X] ERROR: expected an MSI-X capability");
             return None;
         }
     };
@@ -251,7 +251,7 @@ pub fn enable_msix(bus: u8, dev: u8, func: u8, msix_cap: &MsiCap, entry_index: u
         super::super::drivers::pci::bar_phys(bus, dev, func, table_bir)
     };
     if bar_phys == 0 {
-        println!("    [MSI-X] ОШИБКА: BAR{} = 0", table_bir);
+        println!("    [MSI-X] ERROR: BAR{} is zero", table_bir);
         return None;
     }
 
@@ -274,7 +274,7 @@ pub fn enable_msix(bus: u8, dev: u8, func: u8, msix_cap: &MsiCap, entry_index: u
         msg_control |= MSIX_MC_ENABLE;
         pci_config_write_u16(bus, dev, func, cap_offset + 2, msg_control);
 
-        println!("    [MSI-X] Включён: entry={}, vector={}, addr={:#x}, data={:#x}",
+        println!("    [MSI-X] Enabled: entry={}, vector={}, addr={:#x}, data={:#x}",
             entry_index, vector, msg_addr, msg_data);
     }
 
@@ -287,7 +287,7 @@ pub fn disable_msix(bus: u8, dev: u8, func: u8, cap_offset: u8) {
         let mut msg_control = pci_config_read_u16(bus, dev, func, cap_offset + 2);
         msg_control &= !MSIX_MC_ENABLE;
         pci_config_write_u16(bus, dev, func, cap_offset + 2, msg_control);
-        println!("    [MSI-X] Отключён");
+        println!("    [MSI-X] Disabled");
     }
 }
 
@@ -315,5 +315,5 @@ pub fn try_enable_msi(device: &PciDevice) -> Option<(u8, bool)> {
 
 /// Инициализация MSI/MSI-X подсистемы (пока только логирование)
 pub fn init() {
-    println!("[MSI] Подсистема MSI/MSI-X инициализирована");
+    println!("[MSI] MSI/MSI-X subsystem initialized");
 }

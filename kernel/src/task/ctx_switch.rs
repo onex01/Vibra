@@ -55,11 +55,7 @@ pub unsafe extern "sysv64" fn timer_naked_stub() -> ! {
 
         "mov rdi, rsp",
         "call {handler}",
-
-        "cmp rax, rdi",
-        "je 2f",
         "mov rsp, rax",
-        "2:",
 
         "pop r15",
         "pop r14",
@@ -106,11 +102,7 @@ pub unsafe extern "sysv64" fn softirq_naked_stub() -> ! {
 
         "mov rdi, rsp",
         "call {handler}",
-
-        "cmp rax, rdi",
-        "je 2f",
         "mov rsp, rax",
-        "2:",
 
         "pop r15",
         "pop r14",

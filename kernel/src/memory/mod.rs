@@ -1,5 +1,6 @@
 pub mod pmm;
 pub mod heap;
+pub mod dma;
 pub mod paging;
 pub mod vmm;
 

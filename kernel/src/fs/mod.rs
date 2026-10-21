@@ -58,11 +58,10 @@ pub fn init_filesystem() {
     }
 
     // Системные файлы
-    let files: [(&str, &[u8]); 7] = [
+    let files: [(&str, &[u8]); 6] = [
         ("/cfg/hostname", b"vibra"),
         ("/cfg/passwd", b"root:x:0:0:root:/home/root:/bin/sh\n"),
         ("/cfg/fstab", b"# device  mount  type  options  dump  pass\n/         ramfs  rw    0        0     0\n/dev      devtmpfs rw 0        0     0\n/proc     procfs  ro   0        0     0\n/sys      sysfs   ro   0        0     0\n"),
-        ("/os/kernel/version", b"0.1.0\n"),
         ("/os/kernel/name", b"Vibra\n"),
         ("/os/boot/loader", b"Limine (UEFI)\n"),
         ("/os/boot/config", b"timeout: 0\ngraphics: yes\n"),
@@ -73,6 +72,12 @@ pub fn init_filesystem() {
         if let Ok(_) = ramfs.create(path) {
             let _ = ramfs.write_data(path, data);
         }
+    }
+
+    let version = alloc::format!("{}\n", crate::version::KERNEL_VERSION);
+    let _ = ramfs.remove("/os/kernel/version");
+    if ramfs.create("/os/kernel/version").is_ok() {
+        let _ = ramfs.write_data("/os/kernel/version", version.as_bytes());
     }
 
     // Инициализируем виртуальные ФС и монтируем в VFS

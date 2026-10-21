@@ -38,7 +38,7 @@ pub fn parse(madt_phys: usize) -> Option<MadtInfo> {
     let table_len = u32::from_le_bytes([sdt_hdr[4], sdt_hdr[5], sdt_hdr[6], sdt_hdr[7]]) as usize;
 
     if sig != *b"APIC" {
-        crate::println!("[ACPI] MADT: неверная сигнатура {:?}", core::str::from_utf8(&sig));
+        crate::println!("[ACPI] MADT: invalid signature {:?}", core::str::from_utf8(&sig));
         return None;
     }
 

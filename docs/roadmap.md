@@ -1,6 +1,6 @@
 # Roadmap — Vibra Kernel
 
-> Текущая версия: **0.1.0 «Bootstrap»**.  
+> Текущая версия: **0.2.0-rc.1 «Foundation RC1»**.
 > Цель: стабильное диагностическое ядро на реальном x86_64-железе, не ОС.
 
 ## Принципы
@@ -17,14 +17,33 @@
 - [x] UEFI/Limine boot path в QEMU.
 - [x] Serial, framebuffer, PMM, heap, GDT/IDT, PS/2 и диагностическая shell.
 - [x] Компиляция `x86_64-unknown-none`.
-- [ ] Единый smoke-тест boot-лога и инвентаризация hardware claims.
+- [x] QEMU smoke-тест boot-лога и inventory hardware claims; serial log дошёл
+  до `vibra:/>` без `[FATAL]`.
 
 ## 0.2.0 «Foundation» — воспроизводимый x86_64 boot
 
-- [ ] Чёткий kernel-only build layout и единая версия.
-- [ ] Panic/page-fault отчёт в serial с регистрами и адресом ошибки.
-- [ ] Контроль warnings и QEMU smoke-test в CI.
-- [ ] Проверяемые PMM/heap stress-тесты; DMA-аллокатор с физическими адресами.
+- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.1`.
+- [ ] Runtime-проверка panic/page-fault handler; report выводит CR2, error code,
+  access flags и RIP/RSP/RFLAGS, panic — RSP/RFLAGS/source location.
+- [x] Безопасный runtime W^X check: `diag wxtest` подтвердил read-only `.rodata`
+  mapping без намеренного kernel fault и остановки гостя.
+- [ ] Проверить live boot log на Limine framebuffer и сохранение экрана при
+  переходе в shell; реализация добавлена, QEMU-проверка ожидается.
+- [x] Silent hang через 30–60 секунд: xHCI polling удалён из timer ISR,
+  context-switch stubs больше не сравнивают caller-saved `rdi`, serial dequeue
+  защищён от IRQ4, PIT fallback приведён к 100 Hz. Ручной QEMU+xHCI прогон жил
+  75 секунд, дошёл до shell и записал 12 heartbeat. Heartbeat выведен на QEMU
+  debugcon, COM1 оставлен для shell; после 14 heartbeat `diag pmm` прошёл по COM.
+- [ ] Автоматизировать QEMU+xHCI heartbeat smoke в CI; harness обновлён,
+  первый CI run ожидается.
+- [x] Warning budgets enforced in CI: debug ≤107, no-default ≤110.
+- [ ] QEMU UEFI smoke-test в CI; workflow добавлен, ожидает первого CI-прогона.
+- [x] Проверяемые PMM/heap stress-тесты: boot heap stress и `diag pmm` прошли
+  в QEMU; тест проверяет frame invariants, contiguous alloc/free и DMA buffer.
+- [x] Подключить DMA buffer allocator к e1000 RX/TX rings и buffers; QEMU
+  подтвердил инициализацию и ARP TX/RX.
+- [ ] Интегрировать DMA allocator в блочные драйверы и определить ownership и
+  cache-coherency contract; ICMP gateway reply пока не подтверждён.
 - [ ] Матрица: QEMU UEFI и минимум одна реальная x86_64-машина.
 
 **Выход:** 100 последовательных QEMU boot и 10 boot на тестовом ПК без

@@ -81,7 +81,7 @@ unsafe fn pit_sleep_ms(ms: u64) {
 /// Инициализация таймерной подсистемы.
 /// Пытается HPET, fallback PIT.
 pub fn init() {
-    println!("[TIMER] Инициализация таймерной подсистемы...");
+    println!("[TIMER] Initializing timer subsystem...");
 
     // Получаем HPET base из ACPI если есть
     let acpi_hpet = crate::acpi::get()
@@ -92,15 +92,15 @@ pub fn init() {
     if hpet::init(acpi_hpet) {
         CURRENT_BACKEND.store(1, Ordering::SeqCst);
         TICKS_PER_SEC.store(hpet::ticks_per_second(), Ordering::SeqCst);
-        println!("[TIMER] Бэкенд: HPET ({} Гц)", hpet::ticks_per_second());
+        println!("[TIMER] Backend: HPET ({} Hz)", hpet::ticks_per_second());
     } else {
         // Fallback: PIT channel 0 уже запущен в idt.rs (100 Hz)
         CURRENT_BACKEND.store(2, Ordering::SeqCst);
-        TICKS_PER_SEC.store(PIT_FREQ, Ordering::SeqCst);
-        println!("[TIMER] Бэкенд: PIT fallback ({} Гц)", PIT_HZ);
+        TICKS_PER_SEC.store(PIT_HZ, Ordering::SeqCst);
+        println!("[TIMER] Backend: PIT fallback ({} Hz)", PIT_HZ);
     }
 
-    println!("[TIMER] Инициализация завершена");
+    println!("[TIMER] Initialization complete");
 }
 
 /// Текущее значение аппаратного счётчика

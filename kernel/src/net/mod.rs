@@ -29,12 +29,12 @@ pub fn init(mac: [u8; 6]) {
     let gateway = [10, 0, 2, 2];
     let subnet_mask = [255, 255, 255, 0];
 
-    println!("[NET] Инициализация сетевого интерфейса...");
+    println!("[NET] Initializing network interface...");
     println!("[NET] MAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     println!("[NET] IP: {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
-    println!("[NET] Шлюз: {}.{}.{}.{}", gateway[0], gateway[1], gateway[2], gateway[3]);
-    println!("[NET] Маска: {}.{}.{}.{}", subnet_mask[0], subnet_mask[1], subnet_mask[2], subnet_mask[3]);
+    println!("[NET] Gateway: {}.{}.{}.{}", gateway[0], gateway[1], gateway[2], gateway[3]);
+    println!("[NET] Netmask: {}.{}.{}.{}", subnet_mask[0], subnet_mask[1], subnet_mask[2], subnet_mask[3]);
 
     *NET_INTERFACE.lock() = Some(NetInterface {
         mac,
@@ -43,7 +43,7 @@ pub fn init(mac: [u8; 6]) {
         subnet_mask,
     });
     NET_INITIALIZED.store(true, Ordering::SeqCst);
-    println!("[NET] Сетевой интерфейс инициализирован");
+    println!("[NET] Network interface initialized");
 }
 
 /// Получить MAC адрес локального интерфейса

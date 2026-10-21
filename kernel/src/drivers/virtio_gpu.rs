@@ -490,7 +490,7 @@ impl VirtioGpu {
 
             if !found {
                 // Fallback: 1024x768
-                println!("[GPU] Нет активных дисплеев, используем 1024x768");
+                println!("[GPU] No active displays; using 1024x768");
                 self.width = 1024;
                 self.height = 768;
             }
@@ -701,7 +701,7 @@ pub fn get_gpu() -> spin::MutexGuard<'static, Option<VirtioGpu>> {
 
 /// Инициализация VirtIO-GPU драйвера (вызывается из drivers::init)
 pub fn init() {
-    println!("[GPU] Поиск VirtIO-GPU...");
+    println!("[GPU] Searching for VirtIO-GPU...");
 
     // Ищем VirtIO-GPU через PCI: vendor=0x1AF4, device=0x1050
     // или по class 0x03 (Display) subclass 0x00
@@ -711,7 +711,7 @@ pub fn init() {
     let pci_dev = match pci_dev {
         Some(d) => d,
         None => {
-            println!("[GPU] VirtIO-GPU не найден в PCI");
+            println!("[GPU] VirtIO-GPU not found on PCI bus");
             return;
         }
     };
@@ -761,7 +761,7 @@ pub fn init() {
     }
 
     if mmio_base == 0 {
-        println!("[GPU] VirtIO MMIO не найден (BAR0={:#x} BAR2={:#x})", bar0, bar2);
+        println!("[GPU] VirtIO MMIO not found (BAR0={:#x} BAR2={:#x})", bar0, bar2);
         return;
     }
 
@@ -770,7 +770,7 @@ pub fn init() {
         queue: match VirtQueue::new(32, hhdm) {
             Some(q) => q,
             None => {
-                println!("[GPU] Не удалось создать VirtQueue");
+                println!("[GPU] Failed to create VirtQueue");
                 return;
             }
         },
@@ -786,11 +786,11 @@ pub fn init() {
 
     match gpu.probe() {
         Ok(()) => {
-            println!("[GPU] VirtIO-GPU успешно инициализирован");
+            println!("[GPU] VirtIO-GPU initialized successfully");
             *GPU.lock() = Some(gpu);
         }
         Err(e) => {
-            println!("[GPU] Ошибка инициализации: {}", e);
+            println!("[GPU] Initialization failed: {}", e);
         }
     }
 }

@@ -93,12 +93,12 @@ pub fn init() {
         // Печатаем лог построчно через serial
         for &b in log {
             if b == b'\n' || b == b'\r' {
-                crate::serial::write_byte(b);
+                crate::serial::write_serial_byte(b);
             } else if b >= 0x20 && b < 0x7F {
-                crate::serial::write_byte(b);
+                crate::serial::write_serial_byte(b);
             }
         }
-        crate::serial::write_byte(b'\n');
-        crate::serial::write_byte(b'\n');
+        crate::serial::write_serial_byte(b'\n');
+        crate::serial::write_serial_byte(b'\n');
     }
 }

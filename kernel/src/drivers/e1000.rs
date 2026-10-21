@@ -23,6 +23,7 @@
 //   RAH    (0x5404) — Receive Address High
 
 use crate::println;
+use crate::memory::dma::DmaBuffer;
 use alloc::vec::Vec;
 use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -105,11 +106,6 @@ unsafe fn e1000_write32(offset: u64, val: u32) {
     core::ptr::write_volatile((base + offset) as *mut u32, val);
 }
 
-fn virt_to_phys(virt: u64) -> u64 {
-    let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
-    virt - hhdm
-}
-
 /// e1000 контроллер
 pub struct E1000Controller {
     mmio_base: u64,
@@ -117,15 +113,15 @@ pub struct E1000Controller {
     // RX
     rx_descs: *mut RxDescriptor,
     rx_descs_phys: u64,
-    rx_buffers: Vec<*mut u8>,
-    rx_buffers_phys: Vec<u64>,
+    rx_desc_storage: Option<DmaBuffer>,
+    rx_buffers: Vec<DmaBuffer>,
     rx_head: u16,
     rx_tail: u16,
     // TX
     tx_descs: *mut TxDescriptor,
     tx_descs_phys: u64,
-    tx_buffers: Vec<*mut u8>,
-    tx_buffers_phys: Vec<u64>,
+    tx_desc_storage: Option<DmaBuffer>,
+    tx_buffers: Vec<DmaBuffer>,
     tx_head: u16,
     tx_tail: u16,
 }
@@ -144,7 +140,7 @@ impl E1000Controller {
             timeout -= 1;
         }
         if timeout == 0 {
-            println!("[e1000] Предупреждение: тайм-аут сброса");
+            println!("[e1000] Warning: reset timed out");
         }
     }
 
@@ -162,25 +158,27 @@ impl E1000Controller {
     }
 
     /// Настроить RX дескрипторы
-    unsafe fn setup_rx(&mut self) {
-        // Выделяем дескрипторы
+    unsafe fn setup_rx(&mut self) -> bool {
         let desc_size = core::mem::size_of::<RxDescriptor>() * RX_DESC_COUNT;
-        let desc_layout = core::alloc::Layout::from_size_align(desc_size, 16).unwrap();
-        self.rx_descs = alloc::alloc::alloc_zeroed(desc_layout) as *mut RxDescriptor;
-        self.rx_descs_phys = virt_to_phys(self.rx_descs as u64);
+        let mut desc_storage = match DmaBuffer::allocate(desc_size) {
+            Some(storage) => storage,
+            None => return false,
+        };
+        self.rx_descs = desc_storage.as_mut_ptr() as *mut RxDescriptor;
+        self.rx_descs_phys = desc_storage.physical_address() as u64;
+        self.rx_desc_storage = Some(desc_storage);
 
-        // Выделяем RX буферы
         for _ in 0..RX_DESC_COUNT {
-            let buf_layout = core::alloc::Layout::from_size_align(RX_BUFFER_SIZE, 16).unwrap();
-            let buf = alloc::alloc::alloc_zeroed(buf_layout);
-            let buf_phys = virt_to_phys(buf as u64);
-            self.rx_buffers.push(buf);
-            self.rx_buffers_phys.push(buf_phys);
+            let buffer = match DmaBuffer::allocate(RX_BUFFER_SIZE) {
+                Some(buffer) => buffer,
+                None => return false,
+            };
+            self.rx_buffers.push(buffer);
         }
 
         // Заполняем RX дескрипторы
         for i in 0..RX_DESC_COUNT {
-            (*self.rx_descs.add(i)).addr = self.rx_buffers_phys[i];
+            (*self.rx_descs.add(i)).addr = self.rx_buffers[i].physical_address() as u64;
         }
 
         self.rx_head = 0;
@@ -192,22 +190,26 @@ impl E1000Controller {
         e1000_write32(E1000_RDLEN, desc_size as u32);
         e1000_write32(E1000_RDH, 0);
         e1000_write32(E1000_RDT, (RX_DESC_COUNT - 1) as u32);
+        true
     }
 
     /// Настроить TX дескрипторы
-    unsafe fn setup_tx(&mut self) {
+    unsafe fn setup_tx(&mut self) -> bool {
         let desc_size = core::mem::size_of::<TxDescriptor>() * TX_DESC_COUNT;
-        let desc_layout = core::alloc::Layout::from_size_align(desc_size, 16).unwrap();
-        self.tx_descs = alloc::alloc::alloc_zeroed(desc_layout) as *mut TxDescriptor;
-        self.tx_descs_phys = virt_to_phys(self.tx_descs as u64);
+        let mut desc_storage = match DmaBuffer::allocate(desc_size) {
+            Some(storage) => storage,
+            None => return false,
+        };
+        self.tx_descs = desc_storage.as_mut_ptr() as *mut TxDescriptor;
+        self.tx_descs_phys = desc_storage.physical_address() as u64;
+        self.tx_desc_storage = Some(desc_storage);
 
-        // Выделяем TX буферы
         for _ in 0..TX_DESC_COUNT {
-            let buf_layout = core::alloc::Layout::from_size_align(RX_BUFFER_SIZE, 16).unwrap();
-            let buf = alloc::alloc::alloc_zeroed(buf_layout);
-            let buf_phys = virt_to_phys(buf as u64);
-            self.tx_buffers.push(buf);
-            self.tx_buffers_phys.push(buf_phys);
+            let buffer = match DmaBuffer::allocate(RX_BUFFER_SIZE) {
+                Some(buffer) => buffer,
+                None => return false,
+            };
+            self.tx_buffers.push(buffer);
         }
 
         self.tx_head = 0;
@@ -219,6 +221,7 @@ impl E1000Controller {
         e1000_write32(E1000_TDLEN, desc_size as u32);
         e1000_write32(E1000_TDH, 0);
         e1000_write32(E1000_TDT, 0);
+        true
     }
 
     /// Включить приёмник и передатчик
@@ -240,18 +243,18 @@ static E1000_CONTROLLER: Mutex<Option<E1000Controller>> = Mutex::new(None);
 
 /// Инициализация e1000 драйвера
 pub fn init() {
-    println!("[e1000] Поиск Intel e1000 контроллера...");
+    println!("[e1000] Searching for Intel e1000 controller...");
 
     // Ищем e1000 через PCI (vendor 0x8086, device 0x100E)
     let e1000_device = match super::pci::find_device_by_id(0x8086, 0x100E) {
         Some(d) => d,
         None => {
-            println!("[e1000] Intel e1000 контроллер не найден");
+            println!("[e1000] Intel e1000 controller not found");
             return;
         }
     };
 
-    println!("[e1000] Найден контроллер PCI [{:02X}:{:02X}.{}]",
+    println!("[e1000] Found PCI controller [{:02X}:{:02X}.{}]",
         e1000_device.bus, e1000_device.dev, e1000_device.func);
 
     // Включаем Bus Master и Memory Space
@@ -262,7 +265,7 @@ pub fn init() {
     // BAR0 — MMIO регистры
     let bar0 = e1000_device.bar0 & 0xFFFFFFF0;
     if bar0 == 0 {
-        println!("[e1000] ОШИБКА: BAR0 = 0 — контроллер не сконфигурирован");
+        println!("[e1000] ERROR: BAR0 is zero; controller is not configured");
         return;
     }
 
@@ -270,21 +273,21 @@ pub fn init() {
     let mmio_base = hhdm + bar0 as u64;
     E1000_BASE.store(mmio_base, Ordering::SeqCst);
 
-    println!("[e1000] BAR0: физ={:#x} вирт={:#x}", bar0, mmio_base);
+    println!("[e1000] BAR0: phys={:#x} virt={:#x}", bar0, mmio_base);
 
     let mut controller = E1000Controller {
         mmio_base,
         mac: [0u8; 6],
         rx_descs: core::ptr::null_mut(),
         rx_descs_phys: 0,
+        rx_desc_storage: None,
         rx_buffers: Vec::new(),
-        rx_buffers_phys: Vec::new(),
         rx_head: 0,
         rx_tail: 0,
         tx_descs: core::ptr::null_mut(),
         tx_descs_phys: 0,
+        tx_desc_storage: None,
         tx_buffers: Vec::new(),
-        tx_buffers_phys: Vec::new(),
         tx_head: 0,
         tx_tail: 0,
     };
@@ -292,7 +295,7 @@ pub fn init() {
     unsafe {
         // Сброс контроллера
         controller.reset();
-        println!("[e1000] Контроллер сброшен");
+        println!("[e1000] Controller reset");
 
         // Читаем MAC
         controller.read_mac();
@@ -301,16 +304,18 @@ pub fn init() {
             controller.mac[3], controller.mac[4], controller.mac[5]);
 
         // Настраиваем RX/TX
-        controller.setup_rx();
-        controller.setup_tx();
-        println!("[e1000] RX/TX дескрипторы настроены");
+        if !controller.setup_rx() || !controller.setup_tx() {
+            println!("[e1000] ERROR: failed to allocate DMA buffers");
+            return;
+        }
+        println!("[e1000] RX/TX descriptors configured");
 
         // Включаем приёмник и передатчик
         controller.enable();
-        println!("[e1000] RCTL/TCTL включены");
+        println!("[e1000] RCTL/TCTL enabled");
     }
 
-    println!("[e1000] Драйвер e1000 инициализирован успешно");
+    println!("[e1000] Driver initialized successfully");
 
     *E1000_CONTROLLER.lock() = Some(controller);
 }
@@ -336,12 +341,12 @@ pub fn send_packet(data: &[u8]) -> bool {
         // Копируем данные в TX буфер
         core::ptr::copy_nonoverlapping(
             data.as_ptr(),
-            ctrl.tx_buffers[slot],
+            ctrl.tx_buffers[slot].as_mut_ptr(),
             data_len,
         );
 
         // Заполняем TX дескриптор
-        (*ctrl.tx_descs.add(slot)).addr = ctrl.tx_buffers_phys[slot];
+        (*ctrl.tx_descs.add(slot)).addr = ctrl.tx_buffers[slot].physical_address() as u64;
         (*ctrl.tx_descs.add(slot)).length = data_len as u16;
         (*ctrl.tx_descs.add(slot)).cmd = 0x0B; // RS + IFCS + EOP
         (*ctrl.tx_descs.add(slot)).status = 0;
@@ -374,7 +379,7 @@ pub fn recv_packet(buf: &mut [u8]) -> Option<usize> {
         let copy_len = len.min(buf.len());
 
         // Копируем данные из RX буфера
-        core::ptr::copy_nonoverlapping(ctrl.rx_buffers[slot], buf.as_mut_ptr(), copy_len);
+        core::ptr::copy_nonoverlapping(ctrl.rx_buffers[slot].as_ptr(), buf.as_mut_ptr(), copy_len);
 
         // Сбрасываем дескриптор
         (*ctrl.rx_descs.add(slot)).status = 0;

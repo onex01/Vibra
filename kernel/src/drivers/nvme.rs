@@ -179,7 +179,7 @@ impl NvmeController {
             timeout -= 1;
         }
 
-        println!("[NVMe] Тайм-аут admin команды (opcode={:#x})", cmd.opcode);
+        println!("[NVMe] Admin command timed out (opcode={:#x})", cmd.opcode);
         None
     }
 
@@ -219,7 +219,7 @@ impl NvmeController {
             timeout -= 1;
         }
 
-        println!("[NVMe] Тайм-аут I/O команды (opcode={:#x})", cmd.opcode);
+        println!("[NVMe] I/O command timed out (opcode={:#x})", cmd.opcode);
         None
     }
 
@@ -229,7 +229,7 @@ impl NvmeController {
         let buf_layout = core::alloc::Layout::from_size_align(4096, 4096).unwrap();
         let buf = alloc::alloc::alloc_zeroed(buf_layout);
         if buf.is_null() {
-            println!("[NVMe] Ошибка выделения памяти для Identify");
+            println!("[NVMe] Failed to allocate Identify buffer");
             return;
         }
         self.id_buf = buf;
@@ -281,15 +281,15 @@ impl NvmeController {
                     let serial_end = serial_raw.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
                     let serial = alloc::string::String::from_utf8_lossy(&serial_raw[..serial_end]);
 
-                    println!("[NVMe] Контроллер: {}", model);
-                    println!("[NVMe] Серийный: {}", serial);
-                    println!("[NVMe] Макс. عدد команд в очереди: {}", data[512] as u32 + 1);
+                    println!("[NVMe] Controller: {}", model);
+                    println!("[NVMe] Serial number: {}", serial);
+                    println!("[NVMe] Maximum queue entries: {}", data[512] as u32 + 1);
                 } else {
-                    println!("[NVMe] Identify ошибка: SC={:#x}", sc);
+                    println!("[NVMe] Identify failed: SC={:#x}", sc);
                 }
             }
             None => {
-                println!("[NVMe] Identify не удалась");
+                println!("[NVMe] Identify command failed");
             }
         }
     }
@@ -308,7 +308,7 @@ impl NvmeController {
         self.io_cq = alloc::alloc::alloc_zeroed(cq_layout) as *mut NvmeCompQueueEntry;
 
         if self.io_sq.is_null() || self.io_cq.is_null() {
-            println!("[NVMe] Ошибка выделения памяти для I/O queues");
+            println!("[NVMe] Failed to allocate I/O queues");
             return false;
         }
 
@@ -336,7 +336,7 @@ impl NvmeController {
             Some(comp) => {
                 let sc = (comp.status >> 1) & 0x7F;
                 if sc != 0 {
-                    println!("[NVMe] Ошибка создания I/O CQ: SC={:#x}", sc);
+                    println!("[NVMe] Failed to create I/O CQ: SC={:#x}", sc);
                     return false;
                 }
             }
@@ -364,14 +364,14 @@ impl NvmeController {
             Some(comp) => {
                 let sc = (comp.status >> 1) & 0x7F;
                 if sc != 0 {
-                    println!("[NVMe] Ошибка создания I/O SQ: SC={:#x}", sc);
+                    println!("[NVMe] Failed to create I/O SQ: SC={:#x}", sc);
                     return false;
                 }
             }
             None => return false,
         }
 
-        println!("[NVMe] I/O очереди созданы (SQ + CQ)");
+        println!("[NVMe] I/O queues created (SQ + CQ)");
         true
     }
 
@@ -420,10 +420,10 @@ impl NvmeController {
                         self.block_size = 512; // По умолчанию
                     }
 
-                    println!("[NVMe] Namespace 1: {} блоков, {} байт/блок",
+                    println!("[NVMe] Namespace 1: {} blocks, {} bytes/block",
                         self.total_blocks, self.block_size);
                 } else {
-                    println!("[NVMe] Identify NS ошибка: SC={:#x}", sc);
+                    println!("[NVMe] Namespace Identify failed: SC={:#x}", sc);
                     self.block_size = 512;
                     self.total_blocks = 0;
                 }
@@ -443,18 +443,18 @@ static NVME_CONTROLLER: Mutex<Option<NvmeController>> = Mutex::new(None);
 
 /// Инициализация NVMe драйвера
 pub fn init() {
-    println!("[NVMe] Поиск NVMe контроллера...");
+    println!("[NVMe] Searching for NVMe controller...");
 
     // Ищем NVMe через PCI (class 0x01, subclass 0x08)
     let nvme_device = match super::pci::find_device(0x01, 0x08) {
         Some(d) => d,
         None => {
-            println!("[NVMe] NVMe контроллер не найден");
+            println!("[NVMe] NVMe controller not found");
             return;
         }
     };
 
-    println!("[NVMe] Найден контроллер PCI [{:02X}:{:02X}.{}]",
+    println!("[NVMe] Found PCI controller [{:02X}:{:02X}.{}]",
         nvme_device.bus, nvme_device.dev, nvme_device.func);
     println!("[NVMe]   Vendor: {:04X} Device: {:04X}",
         nvme_device.vendor_id, nvme_device.device_id);
@@ -467,7 +467,7 @@ pub fn init() {
     // BAR0 — MMIO регистры NVMe
     let bar0 = nvme_device.bar0 & 0xFFFFFFF0;
     if bar0 == 0 {
-        println!("[NVMe] ОШИБКА: BAR0 = 0 — контроллер не сконфигурирован");
+        println!("[NVMe] ERROR: BAR0 is zero; controller is not configured");
         return;
     }
 
@@ -476,7 +476,7 @@ pub fn init() {
     let mmio_base = hhdm + bar0 as u64;
     NVME_BASE.store(mmio_base, Ordering::SeqCst);
 
-    println!("[NVMe] BAR0: физ={:#x} вирт={:#x}", bar0, mmio_base);
+    println!("[NVMe] BAR0: phys={:#x} virt={:#x}", bar0, mmio_base);
 
     unsafe {
         // Читаем CAP для определения doorbell stride
@@ -486,7 +486,7 @@ pub fn init() {
 
         let mpsmin = ((cap >> 48) & 0xF) as u32; // CAP.MPSMIN
         let page_size = 1u32 << (12 + mpsmin);
-        println!("[NVMe] CAP: размер страницы = {} байт", page_size);
+        println!("[NVMe] CAP: page size = {} bytes", page_size);
 
         // Сброс контроллера — обнуляем CC
         nvme_write32(NVME_REG_CC, 0);
@@ -497,10 +497,10 @@ pub fn init() {
             timeout -= 1;
         }
         if timeout == 0 {
-            println!("[NVMe] Предупреждение: контроллер не сбросился (CSTS.RDY=1)");
+            println!("[NVMe] Warning: controller reset timed out (CSTS.RDY=1)");
         }
 
-        println!("[NVMe] Контроллер сброшен, начинаем инициализацию");
+        println!("[NVMe] Controller reset; starting initialization");
 
         // Выделяем Admin queues (64 записи каждая)
         let sq_layout = core::alloc::Layout::from_size_align(
@@ -514,15 +514,15 @@ pub fn init() {
         let admin_cq = alloc::alloc::alloc_zeroed(cq_layout) as *mut NvmeCompQueueEntry;
 
         if admin_sq.is_null() || admin_cq.is_null() {
-            println!("[NVMe] ОШИБКА: Не удалось выделить память для Admin queues");
+            println!("[NVMe] ERROR: failed to allocate Admin queues");
             return;
         }
 
         let admin_sq_phys = virt_to_phys(admin_sq as u64);
         let admin_cq_phys = virt_to_phys(admin_cq as u64);
 
-        println!("[NVMe] Admin SQ: вирт={:#x} физ={:#x}", admin_sq as u64, admin_sq_phys);
-        println!("[NVMe] Admin CQ: вирт={:#x} физ={:#x}", admin_cq as u64, admin_cq_phys);
+        println!("[NVMe] Admin SQ: virt={:#x} phys={:#x}", admin_sq as u64, admin_sq_phys);
+        println!("[NVMe] Admin CQ: virt={:#x} phys={:#x}", admin_cq as u64, admin_cq_phys);
 
         // Устанавливаем AQA (Admin Queue Attributes)
         // AQA: ACQS (bits 27:16) = 63, ASQS (bits 11:0) = 63
@@ -544,7 +544,7 @@ pub fn init() {
             | CC_IOCQES;
         nvme_write32(NVME_REG_CC, cc);
 
-        println!("[NVMe] CC записан: {:#x}, ожидаем CSTS.RDY...", cc);
+        println!("[NVMe] CC written: {:#x}; waiting for CSTS.RDY...", cc);
 
         // Ждём пока CSTS.RDY станет 1
         timeout = 5_000_000;
@@ -552,12 +552,12 @@ pub fn init() {
             timeout -= 1;
         }
         if timeout == 0 {
-            println!("[NVMe] ОШИБКА: Тайм-аут ожидания CSTS.RDY");
+            println!("[NVMe] ERROR: timed out waiting for CSTS.RDY");
             println!("[NVMe]   CSTS = {:#x}", nvme_read32(NVME_REG_CSTS));
             return;
         }
 
-        println!("[NVMe] Контроллер готов (CSTS.RDY=1)");
+        println!("[NVMe] Controller ready (CSTS.RDY=1)");
 
         let mut controller = NvmeController {
             mmio_base,
@@ -589,14 +589,14 @@ pub fn init() {
 
         // Создаём I/O очереди
         if !controller.create_io_queues() {
-            println!("[NVMe] ОШИБКА: Не удалось создать I/O очереди");
+            println!("[NVMe] ERROR: failed to create I/O queues");
             return;
         }
 
         // Identify Namespace
         controller.identify_namespace();
 
-        println!("[NVMe] NVMe драйвер инициализирован успешно");
+        println!("[NVMe] Driver initialized successfully");
 
         *NVME_CONTROLLER.lock() = Some(controller);
     }

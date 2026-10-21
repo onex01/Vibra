@@ -65,11 +65,11 @@ pub fn enumerate_xsdt(xsdt_phys: u64) -> alloc::vec::Vec<usize> {
     let is_xsdt = sig == *b"XSDT";
     let is_rsdt = sig == *b"RSDT";
     if !is_xsdt && !is_rsdt {
-        crate::println!("[ACPI] SDT: неверная сигнатура {:?}", core::str::from_utf8(&sig));
+        crate::println!("[ACPI] SDT: invalid signature {:?}", core::str::from_utf8(&sig));
         return result;
     }
     if xsdt_len < header_size || xsdt_len > 0x10000 {
-        crate::println!("[ACPI] SDT: некорректная длина {}", xsdt_len);
+        crate::println!("[ACPI] SDT: invalid length {}", xsdt_len);
         return result;
     }
 
@@ -78,7 +78,7 @@ pub fn enumerate_xsdt(xsdt_phys: u64) -> alloc::vec::Vec<usize> {
     let entry_count = entries_bytes / entry_size;
     let tag = if is_xsdt { "XSDT" } else { "RSDT" };
 
-    crate::println!("[ACPI] {}: {} подтаблиц (len={})", tag, entry_count, xsdt_len);
+    crate::println!("[ACPI] {}: {} tables (len={})", tag, entry_count, xsdt_len);
 
     let table_base = xsdt_virt + header_size;
     for i in 0..entry_count {

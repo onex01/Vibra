@@ -99,7 +99,7 @@ unsafe fn hpet_write32(offset: u64, val: u32) {
 pub fn init(acpi_base: Option<u64>) -> bool {
     let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
     if hhdm == 0 {
-        println!("[HPET] HHDM не инициализирован");
+        println!("[HPET] HHDM is not initialized");
         return false;
     }
 
@@ -108,7 +108,7 @@ pub fn init(acpi_base: Option<u64>) -> bool {
 
     // Проверяем что адрес в разумном диапазоне (ниже 4GB для HHDM)
     if phys == 0 || phys > 0x1_0000_0000 {
-        println!("[HPET] Адрес {:#x} вне HHDM диапазона — HPET пропущен", phys);
+        println!("[HPET] Address {:#x} is outside the HHDM range; skipping", phys);
         return false;
     }
 
@@ -129,7 +129,7 @@ pub fn init(acpi_base: Option<u64>) -> bool {
             pci_vendor_id);
 
         if pci_vendor_id == 0 || pci_vendor_id == 0xFFFF {
-            println!("[HPET] Невалидный vendor ID — HPET не обнаружен");
+            println!("[HPET] Invalid vendor ID; HPET not detected");
             return false;
         }
 
@@ -144,14 +144,14 @@ pub fn init(acpi_base: Option<u64>) -> bool {
             _ => 10_000_000u64,       // По умолчанию 10 МГц (HPET spec)
         };
 
-        println!("[HPET] Частота: {} Гц ({} МГц)", freq, freq / 1_000_000);
+        println!("[HPET] Frequency: {} Hz ({} MHz)", freq, freq / 1_000_000);
         HPET_TICKS_PER_SEC.store(freq, Ordering::SeqCst);
 
         // Отключаем Legacy Replacement (бит 1 в CFG)
         let cfg = hpet_read64(HPET_CFG);
         if cfg & HPET_CFG_LEGACY != 0 {
             hpet_write64(HPET_CFG, cfg & !HPET_CFG_LEGACY);
-            println!("[HPET] Legacy replacement отключён");
+            println!("[HPET] Legacy replacement disabled");
         }
 
         // Включаем основной счётчик
@@ -167,7 +167,7 @@ pub fn init(acpi_base: Option<u64>) -> bool {
         let count2 = hpet_read64(HPET_COUNTER_LO);
 
         if count1 == count2 {
-            println!("[HPET] Счётчик не тикает (count={:#x}), HPET не работает", count1);
+            println!("[HPET] Counter is not advancing (count={:#x}); HPET unavailable", count1);
             // Отключаем обратно
             let cfg = hpet_read64(HPET_CFG);
             hpet_write64(HPET_CFG, cfg & !HPET_CFG_ENABLE);
@@ -175,17 +175,17 @@ pub fn init(acpi_base: Option<u64>) -> bool {
         }
 
         let delta = count2 - count1;
-        println!("[HPET] Счётчик тикает: delta={}", delta);
+        println!("[HPET] Counter is advancing: delta={}", delta);
 
         // Настраиваем компаратор 0 для periodic interrupts (vector 48 = APIC timer vector)
         // Пока только логируем — прерывания не настраиваем без полной APIC интеграции
         if num_timers > 0 {
             let timer_cfg = hpet_read64(HPET_TIMER_CFG);
-            println!("[HPET] Компаратор 0: CFG={:#x}", timer_cfg);
+            println!("[HPET] Comparator 0: CFG={:#x}", timer_cfg);
         }
 
         HPET_READY.store(true, Ordering::SeqCst);
-        println!("[HPET] Инициализирован успешно");
+        println!("[HPET] Initialized successfully");
     }
 
     true

@@ -137,7 +137,7 @@ pub fn init() {
         if !pci_dev.is_io_bar(0) {
             let bar0_phys = pci_dev.bar0_phys();
             if bar0_phys == 0 {
-                println!("[USB] [{:02X}:{:02X}.{}] BAR0 is zero, пропуск",
+                println!("[USB] [{:02X}:{:02X}.{}] BAR0 is zero, skipping",
                     pci_dev.bus, pci_dev.dev, pci_dev.func);
                 continue;
             }
@@ -216,7 +216,7 @@ pub fn init() {
                 crate::drivers::usb::xhci::submit_enable_slot();
             }
         } else {
-            println!("[USB] [{:02X}:{:02X}.{}] I/O BAR, пропуск (требуется memory BAR)",
+            println!("[USB] [{:02X}:{:02X}.{}] I/O BAR, skipping (memory BAR required)",
                 pci_dev.bus, pci_dev.dev, pci_dev.func);
         }
     }

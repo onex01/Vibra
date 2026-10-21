@@ -24,12 +24,12 @@ pub fn parse(mcfg_phys: usize) -> Option<u64> {
     let header = unsafe { &*(mcfg_virt as *const SdtHeader) };
 
     if !header.validate() {
-        crate::println!("[ACPI] MCFG: неверная контрольная сумма");
+        crate::println!("[ACPI] MCFG: invalid checksum");
         return None;
     }
 
     if &header.signature != b"MCFG" {
-        crate::println!("[ACPI] MCFG: неверная сигнатура");
+        crate::println!("[ACPI] MCFG: invalid signature");
         return None;
     }
 

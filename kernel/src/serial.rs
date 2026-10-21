@@ -1,5 +1,7 @@
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU16, Ordering};
+#[cfg(feature = "serial-debug")]
+use core::sync::atomic::AtomicU8;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -14,8 +16,8 @@ const SERIAL_BUF_SIZE: usize = 256;
 static SERIAL_BUF: Mutex<[u8; SERIAL_BUF_SIZE]> = Mutex::new([0u8; SERIAL_BUF_SIZE]);
 static SERIAL_HEAD: AtomicU16 = AtomicU16::new(0);
 static SERIAL_TAIL: AtomicU16 = AtomicU16::new(0);
-
-use core::sync::atomic::AtomicU16;
+#[cfg(feature = "serial-debug")]
+static SERIAL_ESCAPE_STATE: AtomicU8 = AtomicU8::new(0);
 
 #[inline]
 unsafe fn outb(port: u16, value: u8) {
@@ -76,26 +78,56 @@ fn push_byte(b: u8) {
 
 /// Pop байт из ring buffer (безопасно для poll_key)
 fn pop_byte() -> Option<u8> {
-    let head = SERIAL_HEAD.load(Ordering::Acquire);
-    let tail = SERIAL_TAIL.load(Ordering::Relaxed);
-    if head == tail {
-        return None;
-    }
-    let buf = SERIAL_BUF.lock();
-    let b = buf[tail as usize];
-    drop(buf);
-    SERIAL_TAIL.store((tail + 1) % SERIAL_BUF_SIZE as u16, Ordering::Release);
-    Some(b)
+    crate::interrupts::without_interrupts(|| {
+        let head = SERIAL_HEAD.load(Ordering::Acquire);
+        let tail = SERIAL_TAIL.load(Ordering::Relaxed);
+        if head == tail {
+            return None;
+        }
+        let buf = SERIAL_BUF.lock();
+        let byte = buf[tail as usize];
+        drop(buf);
+        SERIAL_TAIL.store((tail + 1) % SERIAL_BUF_SIZE as u16, Ordering::Release);
+        Some(byte)
+    })
 }
 
 pub fn write_byte(b: u8) {
     crate::boot_log::log_byte(b);
+    write_serial_byte(b);
+    crate::framebuffer::write_boot_byte(b);
+}
+
+fn write_byte_without_framebuffer(b: u8) {
+    crate::boot_log::log_byte(b);
+    write_serial_byte(b);
+}
+
+pub(crate) fn write_serial_byte(b: u8) {
     unsafe {
         while (inb(LINE_STATUS) & TRANSMITTER_EMPTY) == 0 {
             core::hint::spin_loop();
         }
         outb(COM1, b);
     }
+}
+
+struct DebugConWriter;
+
+impl Write for DebugConWriter {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        unsafe {
+            for byte in text.bytes() {
+                outb(0xE9, byte);
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn debugcon_println(args: core::fmt::Arguments) {
+    DebugConWriter.write_fmt(args).unwrap();
+    unsafe { outb(0xE9, b'\n'); }
 }
 
 #[cfg(feature = "serial-debug")]
@@ -116,9 +148,51 @@ fn try_read_byte() -> Option<u8> {
 
 #[cfg(feature = "serial-debug")]
 pub fn poll_key() -> Option<crate::keyboard::Key> {
+    loop {
+        if let Some(key) = decode_serial_byte(try_read_byte()?) {
+            return Some(key);
+        }
+    }
+}
+
+#[cfg(feature = "serial-debug")]
+fn decode_serial_byte(byte: u8) -> Option<crate::keyboard::Key> {
     use crate::keyboard::Key;
 
-    match try_read_byte()? {
+    match SERIAL_ESCAPE_STATE.swap(0, Ordering::Relaxed) {
+        1 => match byte {
+            b'[' => {
+                SERIAL_ESCAPE_STATE.store(2, Ordering::Relaxed);
+                None
+            }
+            b'O' => {
+                SERIAL_ESCAPE_STATE.store(3, Ordering::Relaxed);
+                None
+            }
+            _ => decode_plain_byte(byte),
+        },
+        2 | 3 => match byte {
+            b'A' => Some(Key::Up),
+            b'B' => Some(Key::Down),
+            b'C' => Some(Key::Right),
+            b'D' => Some(Key::Left),
+            b'H' => Some(Key::Char('\x01')),
+            b'F' => Some(Key::Char('\x05')),
+            _ => None,
+        },
+        _ if byte == 0x1B => {
+            SERIAL_ESCAPE_STATE.store(1, Ordering::Relaxed);
+            None
+        }
+        _ => decode_plain_byte(byte),
+    }
+}
+
+#[cfg(feature = "serial-debug")]
+fn decode_plain_byte(byte: u8) -> Option<crate::keyboard::Key> {
+    use crate::keyboard::Key;
+
+    match byte {
         b'\r' | b'\n' => Some(Key::Enter),
         0x08 | 0x7f => Some(Key::Backspace),
         b'\t' => Some(Key::Tab),
@@ -134,8 +208,6 @@ pub fn poll_key() -> Option<crate::keyboard::Key> {
         0x15 => Some(Key::Char('\x15')),
         // Ctrl+Z
         0x1A => Some(Key::Char('\x1A')),
-        // ESC sequence start (ansi arrow keys etc.)
-        0x1B => Some(Key::Char('\x1B')),
         byte if (0x20..=0x7e).contains(&byte) => Some(Key::Char(byte as char)),
         _ => None,
     }
@@ -153,9 +225,9 @@ pub fn mirror_console_char(ch: char) {
         if ch.is_ascii() {
             let byte = ch as u8;
             if byte == b'\n' {
-                write_byte(b'\r');
+                write_byte_without_framebuffer(b'\r');
             }
-            write_byte(byte);
+            write_byte_without_framebuffer(byte);
         }
     }
 }

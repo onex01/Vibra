@@ -1,5 +1,6 @@
 use limine::framebuffer::Framebuffer;
 use alloc::vec::Vec;
+use spin::Mutex;
 
 // Размер одного символа
 pub const FONT_WIDTH: usize = 8;
@@ -303,6 +304,43 @@ pub struct Console {
     last_blink_tick: u64,
 }
 
+// SAFETY: Console is accessed through BOOT_CONSOLE's mutex and only the BSP uses it.
+unsafe impl Send for Console {}
+
+static BOOT_CONSOLE: Mutex<Option<Console>> = Mutex::new(None);
+
+pub(crate) fn init_boot_console() {
+    let Some(framebuffer) = crate::FRAMEBUFFER_REQUEST
+        .response()
+        .and_then(|response| response.framebuffers().first())
+    else {
+        return;
+    };
+
+    *BOOT_CONSOLE.lock() = Some(Console::new(framebuffer));
+}
+
+pub(crate) fn write_boot_byte(byte: u8) {
+    if !matches!(byte, b'\r' | b'\n' | b'\t' | 0x08 | 0x20..=0x7e) {
+        return;
+    }
+
+    let Some(mut boot_console) = BOOT_CONSOLE.try_lock() else {
+        return;
+    };
+    if let Some(console) = boot_console.as_mut() {
+        console.put_char_from_serial(char::from(byte));
+    }
+}
+
+pub(crate) fn with_boot_console<R>(f: impl FnOnce(&mut Console) -> R) -> Option<R> {
+    BOOT_CONSOLE.lock().as_mut().map(f)
+}
+
+pub(crate) fn take_boot_console() -> Option<Console> {
+    BOOT_CONSOLE.lock().take()
+}
+
 impl Console {
     pub fn new(framebuffer: &Framebuffer) -> Self {
         let fb_addr = framebuffer.address() as *mut u32;
@@ -388,9 +426,11 @@ impl Console {
 
     /// Печатает символ в текущей позиции курсора с автопереносом
     pub fn put_char(&mut self, ch: char) {
-        // В debug-сборке serial terminal является зеркалом shell-консоли.
-        // Функция превращается в no-op с --no-default-features.
         crate::serial::mirror_console_char(ch);
+        self.put_char_from_serial(ch);
+    }
+
+    pub(crate) fn put_char_from_serial(&mut self, ch: char) {
         match ch {
             '\n' => {
                 self.cursor_col = 0;

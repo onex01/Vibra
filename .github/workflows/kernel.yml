@@ -1,0 +1,48 @@
+name: Kernel CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  qemu-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make qemu-system-x86 mtools dosfstools wget tar xorriso fdisk
+
+      - name: Install Rust nightly target
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup target add x86_64-unknown-none --toolchain nightly
+
+      - name: Check build environment
+        run: ./build.sh doctor
+
+      - name: Create boot image
+        run: ./build.sh setup
+
+      - name: Check warning budgets
+        run: python3 scripts/check-warning-budget.py
+
+      - name: Build and smoke-test UEFI boot
+        env:
+          SMOKE_TIMEOUT: 75
+          SMOKE_MIN_HEARTBEATS: 12
+        run: ./build.sh smoke
+
+      - name: Test panic screen and report
+        run: bash scripts/qemu-exception-smoke.sh panic-test
+
+      - name: Test page fault report
+        run: bash scripts/qemu-exception-smoke.sh fault-test
+
+      - name: Run sequential QEMU boot matrix
+        env:
+          BOOT_ITERATIONS: 100
+        run: python3 scripts/qemu-boot-matrix.py

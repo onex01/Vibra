@@ -69,11 +69,11 @@ pub fn find_rsdp() -> Option<usize> {
     let virt = hhdm as usize + addr;
     let rsdp = unsafe { &*(virt as *const Rsdp) };
     if !rsdp.validate() {
-        crate::println!("[ACPI] RSDP: неверная сигнатура или контрольная сумма");
+        crate::println!("[ACPI] RSDP: invalid signature or checksum");
         return None;
     }
     if !rsdp.validate_extended() {
-        crate::println!("[ACPI] RSDP: неверная расширенная контрольная сумма");
+        crate::println!("[ACPI] RSDP: invalid extended checksum");
         return None;
     }
     Some(addr)

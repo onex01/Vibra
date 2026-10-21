@@ -43,9 +43,9 @@ pub fn init() {
     crate::println!("[KERNEL] Module subsystem initialized");
     
     // Регистрируем встроенные модули (built-in)
-    register_builtin("vfs", "0.1.0", "OneX01", "Virtual File System");
-    register_builtin("console", "0.1.0", "OneX01", "Console Manager");
-    register_builtin("scheduler", "0.1.0", "OneX01", "Task Scheduler (stub)");
+    register_builtin("vfs", crate::version::KERNEL_VERSION, "OneX01", "Virtual File System");
+    register_builtin("console", crate::version::KERNEL_VERSION, "OneX01", "Console Manager");
+    register_builtin("scheduler", crate::version::KERNEL_VERSION, "OneX01", "Task Scheduler (stub)");
 }
 
 fn register_builtin(name: &str, version: &str, author: &str, _desc: &str) {

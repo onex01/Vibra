@@ -44,6 +44,7 @@ impl LineEditor {
         self.cursor = 0;
         self.history_idx = self.history_count;
         self.prompt_len = prompt_len;
+        let mut last_heartbeat_tick = crate::interrupts::idt::ticks();
         loop {
             // Serial (COM1) + PS/2 keyboard. Keyboard Unknown scancodes
             // теперь возвращают None → не блокируют serial polling.
@@ -194,6 +195,16 @@ impl LineEditor {
             // busy-loop. После принятого serial-байта не спим: так быстро
             // разгружаем 16-байтный FIFO UART и не теряем длинные команды.
             if next_key.is_none() {
+                let ticks = crate::interrupts::idt::ticks();
+                if ticks.wrapping_sub(last_heartbeat_tick) >= crate::interrupts::idt::TIMER_HZ * 5 {
+                    crate::serial::debugcon_println(format_args!(
+                        "[HEARTBEAT] uptime={}s ticks={}",
+                        ticks / crate::interrupts::idt::TIMER_HZ,
+                        ticks
+                    ));
+                    last_heartbeat_tick = ticks;
+                }
+
                 // Обновляем мигание курсора перед сном
                 console.update_cursor_blink();
                 crate::interrupts::wait();

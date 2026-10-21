@@ -88,6 +88,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "mount",   help: "mount filesystems",          func: mount::run },
     Command { name: "kstat",    help: "show interrupt statistics", func: kstat::run },
     Command { name: "uname",    help: "system information",        func: uname::run },
+    Command { name: "diag",     help: "run kernel diagnostics",    func: diag::run },
     Command { name: "reboot",   help: "reboot the system",        func: reboot::run },
     Command { name: "tree",     help: "show directory tree",      func: tree::run },
     Command { name: "top",      help: "system monitor (htop-like)", func: top::run },

@@ -60,7 +60,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build run clean setup install-kernel iso usb run-iso run-bios qemu-usb
+.PHONY: all build smoke run clean setup install-kernel iso usb run-iso run-bios qemu-usb
 
 all: run
 
@@ -74,6 +74,9 @@ build:
 	@echo "==> Copying kernel to disk image..."
 	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/debug/$(KERNEL_NAME) ::/kernel.elf
 	@echo "==> Kernel built and installed!"
+
+smoke:
+	@QEMU="$(QEMU)" bash scripts/qemu-smoke.sh
 
 setup:
 	@echo "==> Setting up boot image..."

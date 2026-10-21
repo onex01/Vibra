@@ -33,17 +33,17 @@ pub fn get() -> spin::MutexGuard<'static, Option<AcpiInfo>> {
 
 /// Инициализация ACPI: RSDP → XSDT → MADT/MCFG/HPET.
 pub fn init() {
-    crate::println!("[ACPI] Поиск RSDP...");
+    crate::println!("[ACPI] Searching for RSDP...");
 
     let rsdp_virt = match rsdp::find_rsdp() {
         Some(v) => v,
         None => {
-            crate::println!("[ACPI] RSDP не найден, ACPI недоступен");
+            crate::println!("[ACPI] RSDP not found; ACPI unavailable");
             return;
         }
     };
 
-    crate::println!("[ACPI] RSDP найден по адресу {:#x}", rsdp_virt);
+    crate::println!("[ACPI] RSDP found at {:#x}", rsdp_virt);
 
     // find_rsdp() возвращает виртуальный адрес, доступный напрямую
     let rsdp = unsafe { &*(rsdp_virt as *const rsdp::Rsdp) };
@@ -64,12 +64,12 @@ pub fn init() {
         crate::println!("[ACPI] RSDP rev={}, RSDT={:#x}", rev, rsdt_addr as u64);
         rsdt_addr as u64
     } else {
-        crate::println!("[ACPI] RSDP: ни XSDT, ни RSDT недоступны");
+        crate::println!("[ACPI] RSDP: neither XSDT nor RSDT is available");
         return;
     };
 
     let tables = sdt::enumerate_xsdt(table_addr);
-    crate::println!("[ACPI] XSDT содержит {} подтаблиц", tables.len());
+    crate::println!("[ACPI] XSDT contains {} tables", tables.len());
 
     let mut info = AcpiInfo {
         lapic_addr: None,
@@ -89,14 +89,14 @@ pub fn init() {
 
         match sig {
             b"APIC" => {
-                crate::println!("[ACPI] Найдена MADT (APIC)");
+                crate::println!("[ACPI] MADT (APIC) found");
                 if let Some(madt_info) = madt::parse(table_phys) {
                     info.lapic_addr = Some(madt_info.lapic_addr);
                     info.io_apic_addr = madt_info.io_apic_addr;
                     info.io_apic_id = madt_info.io_apic_id;
                     info.iso = madt_info.iso;
                     crate::println!(
-                        "[ACPI]   LAPIC: {:#x}, IOAPIC: {:?} (id={:?}), ISO: {} записей",
+                        "[ACPI]   LAPIC: {:#x}, IOAPIC: {:?} (id={:?}), ISO entries: {}",
                         info.lapic_addr.unwrap_or(0),
                         info.io_apic_addr,
                         info.io_apic_id,
@@ -105,19 +105,19 @@ pub fn init() {
                 }
             }
             b"MCFG" => {
-                crate::println!("[ACPI] Найдена MCFG (PCIe)");
+                crate::println!("[ACPI] MCFG (PCIe) found");
                 if let Some(base) = mcfg::parse(table_phys) {
                     info.mcfg_base = Some(base);
                     crate::println!("[ACPI]   MMCONFIG base: {:#x}", base);
                 }
             }
             b"HPET" => {
-                crate::println!("[ACPI] Найдена HPET");
+                crate::println!("[ACPI] HPET found");
                 if let Some((base, count)) = hpet::parse(table_phys) {
                     info.hpet_base = Some(base);
                     info.hpet_comparator_count = Some(count);
                     crate::println!(
-                        "[ACPI]   HPET base: {:#x}, компариторов: {}",
+                        "[ACPI]   HPET base: {:#x}, comparators: {}",
                         base,
                         count
                     );
@@ -130,5 +130,5 @@ pub fn init() {
     }
 
     *ACPI_INFO.lock() = Some(info);
-    crate::println!("[ACPI] Инициализация завершена");
+    crate::println!("[ACPI] Initialization complete");
 }

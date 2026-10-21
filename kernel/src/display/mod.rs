@@ -114,7 +114,7 @@ pub fn init() {
         active: 0,
     };
     *DISPLAY.lock() = Some(mgr);
-    crate::println!("[DISPLAY] Дисплей менеджер инициализирован");
+    crate::println!("[DISPLAY] Display manager initialized");
 }
 
 /// Зарегистрировать графический бэкенд
@@ -129,7 +129,7 @@ pub fn register_backend(name: &str, width: u32, height: u32, bpp: u8, format: Pi
         };
         mgr.backends.push(entry);
         crate::println!(
-            "[DISPLAY] Зарегистрирован бэкенд: {} {}x{} {}bpp {:?}",
+            "[DISPLAY] Registered backend: {} {}x{} {}bpp {:?}",
             name, width, height, bpp, format
         );
     }

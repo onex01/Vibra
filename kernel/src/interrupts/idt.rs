@@ -236,13 +236,15 @@ extern "x86-interrupt" fn isr_page_fault(frame: InterruptStackFrame, error_code:
 
     println!("\n!!! PAGE FAULT !!!");
     println!("  Address (CR2) = {:#018x}", cr2);
-    println!("  Error: {} | {} | {}",
-        if error_code & 1 != 0 { "not-present" } else { "protection" },
+    println!("  Error={:#x}: {} | {} | {}",
+        error_code,
+        if error_code & 1 != 0 { "protection violation" } else { "not-present page" },
         if error_code & 2 != 0 { "write" } else { "read" },
         if is_user { "user" } else { "kernel" },
     );
-    println!("  RIP={:#018x} CS={:#x} RFLAGS={:#x} RSP={:#018x}",
-        frame.instruction_pointer, frame.code_segment, frame.cpu_flags, frame.stack_pointer);
+    println!("  Reserved-bit violation={} instruction-fetch={}",
+        error_code & 8 != 0, error_code & 16 != 0);
+    dump_frame(&frame);
 
     if is_user {
         // User page fault — убиваем процесс, ОС продолжает работу

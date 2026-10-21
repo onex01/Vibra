@@ -25,7 +25,9 @@ impl FileSystem for ProcFs {
         let path = path.trim_start_matches('/');
         let mut data: Vec<u8> = Vec::new();
         match path {
-            "version" => data.extend_from_slice(b"Vibra Kernel 0.1.0 (Bootstrap)\n"),
+            "version" => data.extend_from_slice(
+                alloc::format!("Vibra Kernel {} ({})\n", crate::version::KERNEL_VERSION, crate::version::KERNEL_CODENAME).as_bytes(),
+            ),
             "meminfo" => data.extend_from_slice(b"MemTotal: 256 MB\nMemFree: 198 MB\n"),
             "cpuinfo" => data.extend_from_slice(b"processor: 0\nmodel name: QEMU Virtual CPU\ncpu MHz: 2400\n"),
             "uptime" => {

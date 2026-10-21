@@ -127,6 +127,7 @@ pub fn boot() -> ! {
 /// Вызывается vibra для запуска своего shell loop.
 pub fn init() -> BootConsole {
     serial::init();
+    framebuffer::init_boot_console();
     println!("[BOOT] Step 1: serial OK");
     println!(
         "Vibra {} \"{}\" booting...",
@@ -167,7 +168,7 @@ pub fn init() -> BootConsole {
     if let Some(mac) = crate::drivers::e1000::get_mac() {
         crate::net::init(mac);
     } else {
-        println!("[NET] e1000 не найден, сеть не инициализирована");
+        println!("[NET] e1000 not found; network not initialized");
     }
 
     println!("[BOOT] Step 8: Timer");
@@ -194,9 +195,9 @@ pub fn init() -> BootConsole {
     kernel::device::register("ramfs", kernel::device::DeviceType::Disk);
     kernel::device::register("pit-timer", kernel::device::DeviceType::Timer);
 
-    kernel::driver::register("ps2-keyboard", "0.1.0", &[kernel::device::DeviceType::Keyboard]);
-    kernel::driver::register("vga-console", "0.1.0", &[kernel::device::DeviceType::Console]);
-    kernel::driver::register("fbdev", "0.1.0", &[kernel::device::DeviceType::Display]);
+    kernel::driver::register("ps2-keyboard", version::KERNEL_VERSION, &[kernel::device::DeviceType::Keyboard]);
+    kernel::driver::register("vga-console", version::KERNEL_VERSION, &[kernel::device::DeviceType::Console]);
+    kernel::driver::register("fbdev", version::KERNEL_VERSION, &[kernel::device::DeviceType::Display]);
 
     let exec_addr_response = EXECUTABLE_ADDR_REQUEST.response();
     let (kernel_phys_base, kernel_virt_base) = match exec_addr_response {
@@ -240,16 +241,7 @@ pub fn init() -> BootConsole {
 
     println!("[DEBUG] Interrupts enabled, continuing boot...");
 
-    let mut console = match FRAMEBUFFER_REQUEST.response() {
-        Some(fb_resp) => match fb_resp.framebuffers().first() {
-            Some(fb) => framebuffer::Console::new(fb),
-            None => { println!("[FATAL] No framebuffer"); loop { halt(); } }
-        },
-        None => { println!("[FATAL] Framebuffer request failed"); loop { halt(); } }
-    };
-
-    // Попытка переключения на VirtIO-GPU framebuffer
-    crate::drivers::virtio_gpu::try_switch_console(&mut console);
+    framebuffer::with_boot_console(crate::drivers::virtio_gpu::try_switch_console);
 
     // Инициализация display manager
     crate::display::init();
@@ -260,6 +252,17 @@ pub fn init() -> BootConsole {
             crate::display::gop::register_from_framebuffer(fb);
         }
     }
+
+    let console = match framebuffer::take_boot_console() {
+        Some(console) => console,
+        None => match FRAMEBUFFER_REQUEST.response() {
+            Some(fb_resp) => match fb_resp.framebuffers().first() {
+                Some(fb) => framebuffer::Console::new(fb),
+                None => { println!("[FATAL] No framebuffer"); loop { halt(); } }
+            },
+            None => { println!("[FATAL] Framebuffer request failed"); loop { halt(); } }
+        },
+    };
 
     BootConsole { console }
 }
@@ -272,6 +275,7 @@ pub static LINE_EDITOR: Mutex<shell::LineEditor> = Mutex::new(shell::LineEditor:
 pub fn shell_loop(mut bc: BootConsole) -> ! {
     let mut console = bc.console;
 
+    console.clear();
     console.print_colored("\n", framebuffer::COLOR_VIBRA_FG);
     console.print_colored("     __     ___ _           \n", framebuffer::COLOR_CYAN);
     console.print_colored("     \\ \\   / (_) |__  _ __ __ _ \n", framebuffer::COLOR_CYAN);
@@ -357,29 +361,60 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     // Выводим в serial
     println!("\n!!! KERNEL PANIC !!!");
+    let stack_pointer: u64;
+    let rflags: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) stack_pointer, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("pushfq", "pop {}", out(reg) rflags, options(nomem, preserves_flags));
+    }
+    println!("[PANIC] RSP={:#018x} RFLAGS={:#018x}", stack_pointer, rflags);
+    if let Some(location) = info.location() {
+        println!("[PANIC] Location: {}:{}:{}", location.file(), location.line(), location.column());
+    }
     println!("{}", info);
 
     // Пытаемся показать на framebuffer (если он доступен)
     if let Some(fb_resp) = FRAMEBUFFER_REQUEST.response() {
         if let Some(fb) = fb_resp.framebuffers().first() {
             let mut console = framebuffer::Console::new(fb);
-            // Красный фон
-            console.fill_rect(0, 0, console.fb_width(), console.fb_height(), 0x00CC0000);
-            // Белый текст
-            console.print_colored("\n\n", 0x00FFFFFF);
-            console.print_colored("    !!! KERNEL PANIC !!!\n\n", 0x00FFFFFF);
-            console.print_colored("    ", 0x00FFFFFF);
-            // Печатаем panic info построчно
+            const SCREEN_BLUE: u32 = 0x001B4F8A;
+            const PANEL_BLUE: u32 = 0x00123768;
+            const TEXT_WHITE: u32 = 0x00FFFFFF;
+            const TEXT_CYAN: u32 = 0x00C8E8FF;
+            let width = console.fb_width();
+            let height = console.fb_height();
+            console.fill_rect(0, 0, width, height, SCREEN_BLUE);
+            if width > 48 && height > 48 {
+                console.fill_rect(24, 24, width - 48, height - 48, PANEL_BLUE);
+            }
+
+            console.set_cursor(5, 3);
+            console.print_colored("VIBRA KERNEL STOP SCREEN\n\n", TEXT_WHITE);
+            console.print_colored("The kernel stopped after an unrecoverable error.\n\n", TEXT_WHITE);
+            console.print_colored("Stop code: KERNEL_PANIC\n", TEXT_CYAN);
+            console.print_colored("Version: ", TEXT_CYAN);
+            console.print(version::KERNEL_VERSION);
+            console.print(" (");
+            console.print(version::KERNEL_CODENAME);
+            console.print(")\n");
+            console.print_colored("RSP: ", TEXT_CYAN);
+            console.print(&alloc::format!("{:#018x}\n", stack_pointer));
+            console.print_colored("RFLAGS: ", TEXT_CYAN);
+            console.print(&alloc::format!("{:#018x}\n", rflags));
+            if let Some(location) = info.location() {
+                console.print_colored("Location: ", TEXT_CYAN);
+                console.print(&alloc::format!("{}:{}:{}\n", location.file(), location.line(), location.column()));
+            }
+            console.print_colored("\nMessage:\n", TEXT_CYAN);
             let msg = alloc::format!("{}", info);
             for ch in msg.chars() {
                 if ch == '\n' {
-                    console.print("\n    ");
+                    console.print("\n");
                 } else {
                     console.put_char(ch);
                 }
             }
-            console.print("\n\n");
-            console.print_colored("    System halted. Restart required.\n", 0x00FF8888);
+            console.print_colored("\n\nThe system has halted. Restart the machine.\n", TEXT_WHITE);
         }
     }
 
