@@ -43,7 +43,7 @@ pub fn init_filesystem() {
     let mut ramfs = LEGACY_RAMFS.lock();
     ramfs.mount().ok();
 
-    // Уникальная структура каталогов Vibra OS
+    // Временная структура каталогов для отладки ядра.
     let dirs = [
         "/os", "/os/kernel", "/os/boot", "/os/services",
         "/dev", "/cfg", "/lib",
@@ -62,7 +62,7 @@ pub fn init_filesystem() {
         ("/cfg/hostname", b"vibra"),
         ("/cfg/passwd", b"root:x:0:0:root:/home/root:/bin/sh\n"),
         ("/cfg/fstab", b"# device  mount  type  options  dump  pass\n/         ramfs  rw    0        0     0\n/dev      devtmpfs rw 0        0     0\n/proc     procfs  ro   0        0     0\n/sys      sysfs   ro   0        0     0\n"),
-        ("/os/kernel/version", b"0.6.0\n"),
+        ("/os/kernel/version", b"0.1.0\n"),
         ("/os/kernel/name", b"Vibra\n"),
         ("/os/boot/loader", b"Limine (UEFI)\n"),
         ("/os/boot/config", b"timeout: 0\ngraphics: yes\n"),

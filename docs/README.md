@@ -1,114 +1,48 @@
-# Vibra OS
+# Vibra Kernel — статус проекта
 
-**Версия ОС:** 1.1.0 "Sirius"<br>
-**Версия ядра:** 1.1.0 "Boson"<br>
-**Архитектура:** x86_64 (ARM64 подготовлен заглушками)<br>
-**Язык:** Rust (ядро), C (портируемый софт)<br>
-**Загрузчик:** Limine<br>
-**Файловая система:** VFS + RamFS/procfs/sysfs/devtmpfs, FAT32, Ext2
+**Версия:** `0.1.0` «Bootstrap»  
+**Поддерживаемая архитектура:** только `x86_64-unknown-none`  
+**Загрузка:** Limine через UEFI; QEMU — основная тестовая среда
 
-## Описание
+## Назначение
 
-Vibra — это хобби-операционная система, разрабатываемая с нуля на Rust.  
-Цель проекта — создать современную учебную ОС с графическим интерфейсом, приложениями, сетевой и дисковой подсистемами, а в перспективе с поддержкой реального железа и ARM64.
+Vibra Kernel — экспериментальное ядро на Rust `no_std`, а не операционная
+система. Приоритет — воспроизводимый запуск и диагностика на реальном x86_64
+оборудовании. Пользовательская среда, GUI, приложения и ARM64 исключены из
+текущего scope.
 
-## Текущий статус
+## Подтверждённое и экспериментальное
 
-- [x] Загрузка через Limine (UEFI)
-- [x] Вывод в последовательный порт (COM1)
-- [x] Физический менеджер памяти (PMM)
-- [x] Вывод на экран (framebuffer)
-- [x] PS/2 клавиатура с поддержкой Shift
-- [x] Графическая консоль с ASCII-арт логотипом
-- [x] VFS, RamFS, procfs, sysfs, devtmpfs
-- [x] FAT32 read/write и Ext2 read
-- [x] Shell с расширенным набором команд
-- [x] Собственные GDT/TSS/IDT, PMM, heap, paging, VMM
-- [x] Вытесняющий планировщик задач
-- [x] Ring 3 и syscall/sysret
-- [x] ACPI, PCI, AHCI, NVMe, e1000/RTL8139, VirtIO, базовая USB-детекция
-- [x] Графические демо и desktop-команда
-- [ ] Полный USB HID (xHCI keyboard/mouse)
-- [ ] Полная миграция IRQ на APIC
-- [ ] Автомонтирование boot-диска в VFS
+Подтверждено только прохождение компиляции и QEMU-путь, когда он явно
+зафиксирован тестом. Наличие исходного файла не является поддержкой железа.
 
-## Доступные команды shell
+| Подсистема | Состояние 0.1.0 |
+|---|---|
+| Limine, serial, framebuffer | базовый x86_64 boot path |
+| PMM, heap, paging/VMM | экспериментально, требуется стресс на железе |
+| PS/2, PIC/PIT, GDT/IDT | базовый диагностический путь |
+| PCI/ACPI | инвентаризация и частичная инициализация |
+| AHCI/NVMe, FAT32/Ext2 | прототипы; нет интегрированного block layer/mount path |
+| xHCI/HID | только диагностика контроллера, не ввод с USB |
+| e1000/RTL8139, IPv4/ICMP | QEMU-ориентированный прототип, без DHCP/TCP |
+| ARM64 / Orange Pi Zero 3 | не поддерживается |
 
-```bash
-help             # показать справку
-clear            # очистить экран
-echo <text>      # вывести текст
-quit             # остановить систему
-version          # показать версию ОС
-version kernel   # показать версию ядра
-ls               # список файлов и директорий
-touch <name>     # создать пустой файл
-mkdir <name>     # создать директорию
-cat <file>       # прочитать содержимое файла
-rm <name>        # удалить файл или директорию
-run <script.vs>  # запустить Vibra Script
-desktop          # открыть графический desktop
-display          # показать графические бэкенды
-heap             # статистика кучи
-diag             # диагностика ядра
-tasks / ps / top # задачи и планировщик
-```
+## Границы репозитория
 
-## Структура проекта
+`kernel/` — ядро и его подсистемы. `vibra/` пока содержит временную точку
+входа и диагностические интерфейсы; это не отдельная ОС. Каталоги `apps/` и
+GUI-код считаются legacy-экспериментами и не входят в критерии релиза 0.1–0.5.
 
-```
-kernel/                  # vibra-kernel, no_std lib crate
-├── src/
-│   ├── lib.rs           # boot/init и публичные модули ядра
-│   ├── memory/          # PMM, heap, paging, VMM
-│   ├── interrupts/      # IDT, PIC, APIC, MSI
-│   ├── task/            # вытесняющий планировщик
-│   ├── syscall/         # syscall/sysret
-│   ├── fs/              # VFS, RamFS, FAT32, Ext2, proc/sys/dev tmpfs
-│   ├── drivers/         # PCI, AHCI, NVMe, USB, net, VirtIO GPU
-│   └── commands/        # kernel shell commands
-vibra/                   # bin crate ОС
-├── src/
-│   ├── main.rs          # _start -> kernel::init() + команды ОС
-│   ├── commands/        # GUI/железные команды ОС
-│   └── gui/             # compositor, cursor, widgets
-docs/
-├── README.md            # этот файл
-├── architecture.md      # архитектура системы
-├── memory.md            # подсистема памяти
-├── vibra_script.md      # язык Vibra Script
-└── roadmap.md           # план развития
-├── Makefile
-├── limine.conf
-├── linker.ld
-└── Cargo.toml
-```
+## Документы
+
+- `architecture.md` — фактическая архитектура и ограничения.
+- `memory.md` — модель памяти и известные риски.
+- `usb_and_boot.md` — QEMU/UEFI-процедуры и статус USB.
+- `roadmap.md` — измеримые критерии версий.
+- `usb_progress.md` — инженерные заметки о незавершённом xHCI.
 
 ## Версионирование
 
-**Версия ОС** обновляется при добавлении новых модулей и приложений.<br>
-**Версия ядра** обновляется при изменениях в ядре (память, драйверы, планировщик).
-
-Пример: `Vibra OS v1.1.0 "Sirius" | Kernel v1.1.0 "Boson"`
-
-## Сборка и запуск
-
-```bash
-./build.sh doctor # проверить зависимости
-./build.sh setup  # первый запуск: Limine/OVMF + build/hdd.img
-./build.sh debug  # сборка и QEMU
-make run          # быстрый запуск через Makefile
-```
-
-Ubuntu/Debian зависимости:
-
-```bash
-sudo apt update
-sudo apt install qemu-system-x86 mtools dosfstools wget xorriso fdisk make
-rustup toolchain install nightly
-rustup target add x86_64-unknown-none --toolchain nightly
-```
-
-## Лицензия
-
-MIT License
+Единственная публичная версия — версия ядра. До `0.5.0` minor-версии отражают
+достигнутые проверяемые hardware milestones, а не количество файлов или
+демонстраций. `0.1.0` — начало kernel-only фазы.

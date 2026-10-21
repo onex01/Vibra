@@ -130,8 +130,8 @@ pub fn init() -> BootConsole {
     println!("[BOOT] Step 1: serial OK");
     println!(
         "Vibra {} \"{}\" booting...",
-        version::OS_VERSION,
-        version::OS_CODENAME
+        version::KERNEL_VERSION,
+        version::KERNEL_CODENAME
     );
 
     println!("[BOOT] Step 2: HHDM");

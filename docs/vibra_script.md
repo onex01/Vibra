@@ -1,8 +1,8 @@
-# Vibra Script (.vs) — Язык программирования Vibra OS
+# Vibra Script (.vs) — legacy-эксперимент
 
 ## Обзор
 
-Vibra Script — простой интерпретируемый язык программирования для Vibra OS.
+Vibra Script — простой интерпретируемый язык программирования для Vibra Kernel; этот интерпретатор не входит в kernel-only roadmap.
 Предназначен для скриптов, автоматизации, игр и обучения программированию.
 
 ## Запуск скриптов
@@ -31,7 +31,7 @@ run -e var x = 10; while x > 0 { print x; x = x - 1 }
 ```vs
 var x = 10              # Объявление переменной
 x = x + 1               # Присваивание
-var name = "Vibra OS"   # Строка
+var name = "Vibra Kernel"   # Строка
 var flag = true          # Булево (1 = true, 0 = false)
 ```
 

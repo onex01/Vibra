@@ -1,72 +1,41 @@
-# Архитектура Vibra OS
+# Архитектура Vibra Kernel
 
-## Ядро
+## Область действия
 
-**Тип:** Модульное монолитное ядро  
-**Язык:** Rust (no_std)  
-**Загрузчик:** Limine (UEFI)
+Vibra Kernel 0.1.0 — экспериментальное модульное монолитное ядро для
+`x86_64-unknown-none`. Оно загружается Limine в UEFI и использует QEMU как
+основной тестовый стенд. Реальное оборудование пока не считается
+поддержанным; каждый драйвер должен получить отдельную hardware-валидацию.
 
-### Модули ядра:
+## Текущий boot path
 
-1. **serial** — драйвер последовательного порта COM1 (0x3F8)
-2. **gdt** — собственные GDT + TSS + IST-стеки (Double Fault, NMI)
-3. **interrupts** — IDT (исключения CPU + IRQ0 timer + IRQ1 keyboard), PIC, PIT
-4. **memory::pmm** — физический менеджер памяти (bitmap allocator, next-fit, локи)
-5. **memory::heap** — аллокатор кучи (free-list с коалесценцией поверх PMM+HHDM)
-6. **memory::paging / memory::vmm** — обход page tables, собственная PML4 и переключение CR3
-7. **keyboard** — драйвер PS/2 клавиатуры (порт 0x60, IRQ1)
-8. **fs** — VFS, RamFS, FAT32, Ext2, procfs, sysfs, devtmpfs
-9. **shell** — командная оболочка с line editor и tab-completion
+1. Limine передаёт framebuffer, memory map, HHDM, executable address и ACPI RSDP.
+2. Ядро запускает serial, PMM и heap; затем ACPI, PCI-пробы и диагностические
+   прототипы драйверов.
+3. Создаются VMM, GDT, IDT и системные обработчики; включаются прерывания.
+4. Запускается framebuffer/serial shell.
 
-## Загрузка
+Этот порядок не означает, что все вызываемые драйверы готовы к железу: xHCI,
+диски и NIC должны быть отделены от boot-critical пути и получить тайм-ауты,
+DMA-контракты и обработку ошибок.
 
-1. UEFI BIOS (OVMF) загружает Limine
-2. Limine читает `limine.conf` и загружает `kernel.elf`
-3. Limine передаёт ядру:
-   - Framebuffer (адрес, размер, pitch)
-   - Memory map (карта памяти)
-   - HHDM offset (Higher Half Direct Map)
-4. Ядро инициализирует подсистемы в строгом порядке зависимостей:
-   serial → PMM → heap (alloc_contiguous 4 МБ) → heap-стресс → ACPI →
-   keyboard/input/devices → PCI/AHCI/NVMe/USB/net drivers → timer → fs →
-   kernel/users/task → VMM → GDT → IDT/PIC/APIC → syscall → `sti`
-5. Входит в главный цикл shell
+## Подсистемы
 
-## Управление памятью
+| Блок | Роль | Статус |
+|---|---|---|
+| `memory` | PMM, heap, page tables, VMM | экспериментальный |
+| `interrupts`, `gdt` | IDT, PIC, APIC-задел, TSS | PIC baseline; миграция не завершена |
+| `drivers/pci`, `acpi` | обнаружение x86-оборудования | частично реализовано |
+| `drivers/usb` | xHCI probe | не выполняет USB enumeration/HID |
+| `fs` | RamFS, VFS, прототипы FAT32/Ext2 | нет общего подключённого block layer |
+| `net` | Ethernet/ARP/IPv4/ICMP | QEMU-ориентированный, без DHCP/TCP |
 
-Подробное описание — в [`memory.md`](memory.md).
+## Ограничения архитектуры
 
-- **Физическая память (PMM):** битмап-аллокатор (1 бит на 4 КБ-фрейм), next-fit
-  поиск, локи через `without_interrupts`. Намеренно не раздаёт
-  `BOOTLOADER_RECLAIMABLE` (там стек BSP).
-- **Куча (heap):** собственный free-list аллокатор (~250 строк) с address-ordered
-  списком и коалесценцией соседей. Бэкенд — регион из PMM (4 МБ), отображённый
-  через HHDM. Поддерживает `free` (в отличие от прежнего BumpAllocator).
-- **Виртуальная память:** `memory::paging` умеет обходить таблицы страниц, а
-  `memory::vmm` строит собственную PML4 на базе карты Limine, включает NX/WP и
-  переключает CR3. Диагностика W^X/NX доступна через shell-команды.
+- ARM64-код является заглушкой и не входит в сборку/поддержку.
+- DMA-контракт и ownership страниц ещё не унифицированы.
+- Нет готового драйверного lifecycle, partition layer и автомонтирования.
+- GUI и `vibra/` не являются ядром release scope.
 
-## Ввод-вывод
-
-- **Serial:** Port-mapped I/O (0x3F8)
-- **Serial debug shell:** development feature `serial-debug` читает COM1
-  polling-ом и зеркалит shell в порт; `--no-default-features` исключает этот
-  канал ввода из образа.
-- **Framebuffer:** Memory-mapped I/O (через HHDM)
-- **Клавиатура:** PS/2 (порт 0x60, прерывание IRQ1)
-
-## Файловая система
-
-### RamFS (реализована)
-- Хранение в памяти на статических массивах (`[u8; 4096]`, `[Option<FsEntry>; 64]`)
-- Поддержка файлов и каталогов
-- Heap не использует — полностью статическая
-- Команды: `ls`, `cat`, `touch`, `mkdir`, `cd`, `cp`, `mv`, `rm`, `edit`
-
-### Дисковые ФС
-- FAT32: чтение/запись, BPB parse, cluster-chain, каталоги
-- Ext2: чтение superblock/inode/dirent, direct blocks
-- VFS mount table объединяет RamFS, procfs, sysfs, devtmpfs и дисковые ФС
-
-### Следующий шаг
-- Автоматически находить boot-диск, разбирать MBR и монтировать FAT32-раздел в `/mnt/boot`
+Следующий архитектурный шаг — общий read-only `BlockDevice`, затем USB HID и
+реальная валидация на x86_64. См. [roadmap.md](roadmap.md).

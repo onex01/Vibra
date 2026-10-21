@@ -70,7 +70,7 @@ build:
 	@if [ ! -f "$(BUILD_DIR)/hdd.img" ]; then \
 		$(MAKE) setup; \
 	fi
-	$(CARGO) build -p vibra $(CARGO_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
+	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 	@echo "==> Copying kernel to disk image..."
 	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/debug/$(KERNEL_NAME) ::/kernel.elf
 	@echo "==> Kernel built and installed!"
@@ -121,13 +121,13 @@ install-kernel:
 # Target for optimized release builds without serial shell
 run-release: build-release
 	@echo "==> Starting QEMU (release, no serial shell)..."
-	@$(CARGO) build -p vibra --release --no-default-features -Z build-std=core,alloc,compiler_builtins -Z build-std-features
+	@$(CARGO) build -p vibra-kernel --release --no-default-features -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/release/$(KERNEL_NAME) ::/kernel.elf
 	$(QEMU_ENV) $(QEMU) -m 256M -serial none -monitor none -drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
 	         -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35
 
 build-release:
-	@$(CARGO) build -p vibra --release --no-default-features -Z build-std=core,alloc,compiler_builtins -Z build-std-features
+	@$(CARGO) build -p vibra-kernel --release --no-default-features -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 	@echo "==> Copying release kernel to disk image..."
 	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/release/$(KERNEL_NAME) ::/kernel.elf
 	@echo "==> Release kernel built and installed!"

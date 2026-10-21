@@ -81,8 +81,7 @@ fn info_lines() -> alloc::vec::Vec<String> {
     };
 
     alloc::vec![
-        format!("{}{}OS{}        Vibra OS v{} \"{}\"", CYL, BOLD, RST, version::OS_VERSION, version::OS_CODENAME),
-        format!("{}{}Kernel{}    v{} \"{}\"", CYL, BOLD, RST, version::KERNEL_VERSION, version::KERNEL_CODENAME),
+        format!("{}{}Kernel{}    Vibra v{} \"{}\"", CYL, BOLD, RST, version::KERNEL_VERSION, version::KERNEL_CODENAME),
         format!("{}{}CPU{}       {} ({}, {})", CYL, BOLD, RST, cpu_brand, cpu_info.cores, cpu_freq),
         format!("{}{}Arch{}       {}", CYL, BOLD, RST, version::ARCHITECTURE),
         format!("{}{}Uptime{}     {}", CYL, BOLD, RST, uptime_str),

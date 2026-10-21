@@ -20,10 +20,8 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print(" vibra ");
         console.print(crate::version::ARCHITECTURE);
         console.print(" ");
-        console.print(crate::version::OS_VERSION);
-        console.print(" \"");
-        console.print(crate::version::OS_CODENAME);
-        console.print("\"\n");
+        console.print(crate::version::KERNEL_VERSION);
+        console.print("\n");
     } else if args[0] == "-r" {
         console.print(crate::version::KERNEL_VERSION);
         console.print("\n");

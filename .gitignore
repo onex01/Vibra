@@ -1,4 +1,4 @@
-/target
+target/
 limine-bin/
 build/
 OVMF.fd

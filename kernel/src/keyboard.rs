@@ -117,14 +117,17 @@ pub fn init() {
 
         // Устанавливаем правильное значение command byte:
         // bit 0 = 1 (IRQ1 enable - keyboard)
-        // bit 1 = 1 (IRQ12 enable - mouse)
+        // bit 1 = 0 (mouse пока не инициализирован)
         // bit 2 = 1 (system flag)
-        // bit 4 = 1 (enable keyboard)
-        // bit 5 = 1 (enable mouse)
+        // bit 4 = 0 (не блокировать clock первого PS/2-порта)
+        // bit 5 = 0 (не блокировать clock второго PS/2-порта)
         // bit 6 = 1 (scan code translation to Set 1)
         // bit 3 = 0 (DON'T ignore keyboard clock!)
         // bit 7 = 0 (reserved)
-        let new_cmd: u8 = 0x6D; // 0110_1101
+        // 0x45 = IRQ1 + system flag + Set 1 translation.
+        // В прежнем 0x6D был выставлен bit 3, который отключает clock
+        // первого PS/2-порта. Из-за этого QEMU не доставлял IRQ1.
+        let new_cmd: u8 = 0x45;
 
         if cmd != new_cmd {
             outb(0x64, 0x60); // Write command byte
@@ -151,9 +154,10 @@ pub fn post_init() {
         io_wait();
         let cmd = inb(0x60);
 
-        if cmd & 0x01 == 0 {
-            // IRQ1 выключен — включаем
-            let new_cmd = cmd | 0x01;
+        // IRQ1 и clock первого порта должны быть включены. Bit 3 = 1
+        // отключает keyboard clock, поэтому его обязательно сбрасываем.
+        if cmd & 0x09 != 0x01 {
+            let new_cmd = (cmd | 0x01) & !0x08;
             outb(0x64, 0x60);
             io_wait();
             outb(0x60, new_cmd);
@@ -201,8 +205,6 @@ pub fn handle_interrupt(scancode: u8) {
     unsafe { KB_IRQ_COUNT += 1; }
     let mut state = KEYBOARD_STATE.lock();
     
-    println!("[KEYBOARD] IRQ handler got scancode={:#x}", scancode);
-
     state.push_scancode(scancode);
     
     match scancode {

@@ -1,4 +1,4 @@
-// VFS — Virtual File System для Vibra OS
+// VFS — Virtual File System для Vibra Kernel
 //
 // Единый интерфейс для всех файловых систем.
 // Поддерживает: права доступа, ownership, symbolic links (планируется).
