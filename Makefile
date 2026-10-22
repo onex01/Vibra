@@ -60,7 +60,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build smoke run clean setup install-kernel iso usb run-iso run-bios qemu-usb
+.PHONY: all build smoke run clean setup install-kernel iso usb uefi-usb run-iso run-bios qemu-usb
 
 all: run
 
@@ -242,6 +242,7 @@ qemu-usb: build
 
 USB_SIZE_MB ?= 128
 USB_IMG := $(BUILD_DIR)/vibra-usb.img
+UEFI_USB_OVERWRITE ?= 0
 
 usb: build
 	@echo "==> Creating USB image ($(USB_SIZE_MB)MB)..."
@@ -272,3 +273,8 @@ usb: build
 	@echo ""
 	@echo "==> Flash: sudo dd if=$(USB_IMG) of=/dev/sdX bs=4M status=progress"
 	@echo "==> ThinkPad T450: Disable Secure Boot in BIOS!"
+
+# UEFI-only GPT image with a standards-compliant EFI System Partition.
+uefi-usb:
+	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
+	@UEFI_USB_OVERWRITE="$(UEFI_USB_OVERWRITE)" USB_SIZE_MB="$(USB_SIZE_MB)" bash scripts/build-uefi-usb.sh

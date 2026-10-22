@@ -23,8 +23,8 @@
 ## 0.2.0 «Foundation» — воспроизводимый x86_64 boot
 
 - [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.1`.
-- [ ] Runtime-проверка panic/page-fault handler; report выводит CR2, error code,
-  access flags и RIP/RSP/RFLAGS, panic — RSP/RFLAGS/source location.
+- [x] Runtime panic/page-fault checks в изолированной QEMU VM: panic screen,
+  CR2, error code, access flags, RIP/RSP/RFLAGS и source location подтверждены.
 - [x] Безопасный runtime W^X check: `diag wxtest` подтвердил read-only `.rodata`
   mapping без намеренного kernel fault и остановки гостя.
 - [ ] Проверить live boot log на Limine framebuffer и сохранение экрана при
@@ -34,17 +34,22 @@
   защищён от IRQ4, PIT fallback приведён к 100 Hz. Ручной QEMU+xHCI прогон жил
   75 секунд, дошёл до shell и записал 12 heartbeat. Heartbeat выведен на QEMU
   debugcon, COM1 оставлен для shell; после 14 heartbeat `diag pmm` прошёл по COM.
-- [ ] Автоматизировать QEMU+xHCI heartbeat smoke в CI; harness обновлён,
+- [x] QEMU+xHCI heartbeat smoke и panic/page-fault checks добавлены в CI;
   первый CI run ожидается.
 - [x] Warning budgets enforced in CI: debug ≤107, no-default ≤110.
 - [ ] QEMU UEFI smoke-test в CI; workflow добавлен, ожидает первого CI-прогона.
+- [ ] 100 последовательных QEMU boots: matrix runner и CI job добавлены; локально
+  подтверждён 1 boot, полный цикл прерывался до checkpoint.
+- [x] GPT/FAT32 ESP UEFI test image target (`./build.sh uefi-usb`); `sfdisk`
+  verification и OVMF boot прошли.
 - [x] Проверяемые PMM/heap stress-тесты: boot heap stress и `diag pmm` прошли
   в QEMU; тест проверяет frame invariants, contiguous alloc/free и DMA buffer.
 - [x] Подключить DMA buffer allocator к e1000 RX/TX rings и buffers; QEMU
   подтвердил инициализацию и ARP TX/RX.
 - [ ] Интегрировать DMA allocator в блочные драйверы и определить ownership и
   cache-coherency contract; ICMP gateway reply пока не подтверждён.
-- [ ] Матрица: QEMU UEFI и минимум одна реальная x86_64-машина.
+- [ ] Hardware matrix: 10 boot с отдельного тестового USB на реальной
+  x86_64-машине; запуск пока не выполнен.
 
 **Выход:** 100 последовательных QEMU boot и 10 boot на тестовом ПК без
 повреждения носителя.

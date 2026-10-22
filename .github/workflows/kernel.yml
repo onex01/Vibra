@@ -36,13 +36,21 @@ jobs:
           SMOKE_MIN_HEARTBEATS: 12
         run: ./build.sh smoke
 
+      - name: Build GPT/ESP UEFI test image
+        run: ./build.sh uefi-usb
+
       - name: Test panic screen and report
+        env:
+          BOOT_SOURCE_IMAGE: build/vibra-uefi.img
         run: bash scripts/qemu-exception-smoke.sh panic-test
 
       - name: Test page fault report
+        env:
+          BOOT_SOURCE_IMAGE: build/vibra-uefi.img
         run: bash scripts/qemu-exception-smoke.sh fault-test
 
       - name: Run sequential QEMU boot matrix
         env:
           BOOT_ITERATIONS: 100
+          BOOT_SOURCE_IMAGE: build/vibra-uefi.img
         run: python3 scripts/qemu-boot-matrix.py

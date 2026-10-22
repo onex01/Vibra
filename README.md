@@ -45,6 +45,7 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 ./build.sh doctor
 ./build.sh setup
 ./build.sh smoke
+./build.sh uefi-usb
 ./build.sh debug
 ```
 
@@ -54,6 +55,9 @@ Serial остаётся доступен для ввода команд; лог�
 
 `debug` включает serial shell. Не используйте его на открытом физическом
 serial-порту. Для образа без serial-ввода используйте `./build.sh secure`.
+`uefi-usb` создаёт GPT-образ с FAT32 EFI System Partition. Для bundled Limine
+отключите Secure Boot. Команда создаёт только файл образа и ничего не пишет на
+физический носитель.
 
 ### Debian/Ubuntu
 

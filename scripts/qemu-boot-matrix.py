@@ -70,7 +70,13 @@ def run_boot(disk_image: Path, debug_log: Path, iteration: int) -> None:
                 raise RuntimeError(f"serial closed during boot {iteration}")
             output.extend(chunk)
 
-        raise RuntimeError(f"boot {iteration} timed out:\n{output.decode('ascii', 'replace')[-2000:]}")
+        missing_markers = [marker.decode("ascii", "replace") for marker in BOOT_MARKERS if marker not in output]
+        debug_output = debug_log.read_bytes() if debug_log.exists() else b""
+        raise RuntimeError(
+            f"boot {iteration} timed out; missing markers={missing_markers!r}; "
+            f"heartbeat={b'[HEARTBEAT]' in debug_output}:\n"
+            f"{output.decode('ascii', 'replace')[-2000:]}"
+        )
     finally:
         if connection is not None:
             connection.close()
@@ -81,7 +87,7 @@ def run_boot(disk_image: Path, debug_log: Path, iteration: int) -> None:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-            listener.close()
+        listener.close()
 
 
 def main() -> None:
@@ -95,9 +101,9 @@ def main() -> None:
         shutil.copyfile(SOURCE_IMAGE, test_image)
         for iteration in range(1, ITERATIONS + 1):
             debug_log = Path(temp_dir) / f"debug-{iteration}.log"
+            print(f"QEMU boot matrix: {iteration}/{ITERATIONS} starting", flush=True)
             run_boot(test_image, debug_log, iteration)
-            if iteration % 10 == 0 or iteration == ITERATIONS:
-                print(f"QEMU boot matrix: {iteration}/{ITERATIONS} passed", flush=True)
+            print(f"QEMU boot matrix: {iteration}/{ITERATIONS} passed", flush=True)
 
 
 if __name__ == "__main__":
