@@ -14,7 +14,6 @@ pub struct CpuFeatures {
     pub msr: bool,
     pub apic: bool,
     pub cx8: bool,
-    pub nx: bool,
     pub pse: bool,
     pub pge: bool,
     pub pat: bool,
@@ -38,6 +37,7 @@ pub struct CpuFeatures {
     pub smep: bool,
     pub smap: bool,
     // Leaf 0x80000001 EDX
+    pub nx: bool,     // NX/XD (bit 20) — только этот лист, в leaf 1 бит 20 зарезервирован
     pub lm: bool,     // long mode (64-bit)
     pub syscall_sysret: bool,
     // Leaf 0x80000001 ECX
@@ -206,7 +206,6 @@ pub fn detect() -> CpuInfo {
             f.msr = edx & (1 << 5) != 0;
             f.apic = edx & (1 << 9) != 0;
             f.cx8 = edx & (1 << 8) != 0;
-            f.nx = edx & (1 << 20) != 0;
             f.pse = edx & (1 << 3) != 0;
             f.pge = edx & (1 << 11) != 0;
             f.pat = edx & (1 << 16) != 0;
@@ -245,6 +244,7 @@ pub fn detect() -> CpuInfo {
             let (_, _, ecx, edx) = cpuid_raw(0x80000001, 0);
             info.features.lm = edx & (1 << 29) != 0;
             info.features.syscall_sysret = edx & (1 << 11) != 0;
+            info.features.nx = edx & (1 << 20) != 0;
             info.features.pdpe1gb = ecx & (1 << 26) != 0;
         }
 

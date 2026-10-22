@@ -37,6 +37,9 @@ DMA-контракты и обработку ошибок.
 - Нет единого driver lifecycle: AHCI/NVMe/xHCI инициализируются разными путями,
   а запись на диск пока не поддерживается ни одной ФС (только read-only).
 - GUI и `vibra/` не являются ядром release scope.
+- NX/XD опционален: `EFER.NXE` включается только при `CPUID.80000001H:EDX[20]`.
+  Если в BIOS выключен «Execute Disable Bit», ядро не пишет MSR (иначе `#GP(0)`)
+  и не ставит NX-биты в PTE — W^X деградирует, но boot продолжается.
 
 Следующие архитектурные шаги — PIC → LAPIC/IOAPIC и политика MSI/MSI-X, затем
 полный xHCI lifecycle и USB HID keyboard. См. [roadmap.md](roadmap.md).

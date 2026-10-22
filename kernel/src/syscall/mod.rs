@@ -115,8 +115,27 @@ unsafe fn sys_write(_fd: usize, ptr: *const u8, len: usize) -> u64 {
     len as u64
 }
 
+/// CPUID: SEP (leaf 1 EDX[11]) разрешает запись EFER.SCE, а SYSCALL/SYSRET
+/// в long mode объявлен в leaf 0x80000001 EDX[11]. Без них WRMSR в EFER
+/// даёт #GP(0) — та же ловушка, что и с EFER.NXE в VMM.
+fn syscall_supported() -> bool {
+    let leaf1_edx = core::arch::x86_64::__cpuid(1).edx;
+    if leaf1_edx & (1 << 11) == 0 {
+        return false;
+    }
+    let max_ext = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+    if max_ext < 0x8000_0001 {
+        return false;
+    }
+    core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 11) != 0
+}
+
 pub fn init() {
     println!("[SYSCALL] Initializing syscall/sysret...");
+    if !syscall_supported() {
+        println!("[SYSCALL] CPU has no SYSCALL/SYSRET — skipping, EFER.SCE untouched");
+        return;
+    }
     unsafe {
         let mut efer = rdmsr(MSR_EFER);
         if efer & (1 << 0) == 0 { efer |= 1; wrmsr(MSR_EFER, efer); }

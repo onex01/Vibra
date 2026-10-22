@@ -22,14 +22,28 @@ unsafe fn enable_efer_nxe() {
     const NXE_BIT: u64 = 1 << 11;
     let mut lo: u32; let mut hi: u32;
     core::arch::asm!("rdmsr", in("ecx") EFER_MSR, out("eax") lo, out("edx") hi);
-    let mut efer = ((hi as u64) << 32) | (lo as u64);
-    if efer & NXE_BIT == 0 {
-        efer |= NXE_BIT;
-        core::arch::asm!("wrmsr", in("ecx") EFER_MSR, in("eax") efer as u32, in("edx") (efer >> 32) as u32);
-        println!("[VMM] EFER.NXE enabled");
-    } else {
+    let efer = ((hi as u64) << 32) | (lo as u64);
+
+    if efer & NXE_BIT != 0 {
         println!("[VMM] EFER.NXE already set");
+        return;
     }
+
+    // WRMSR в EFER с NXE=1 на процессоре без NX (CPUID.80000001H:EDX[20]=0,
+    // например когда в BIOS выключен «Execute Disable Bit») даёт #GP(0).
+    // Без этой проверки ядро падало здесь же на реальном ноутбуке, хотя в
+    // QEMU с NX всё работало. NX — оптимизация W^X, а не требование boot.
+    if !paging::cpu_has_nx() {
+        println!(
+            "[VMM] EFER={:#x}: CPU has no NX (CPUID.80000001H:EDX[20]=0) — NX disabled, continuing",
+            efer
+        );
+        return;
+    }
+
+    let new_efer = efer | NXE_BIT;
+    core::arch::asm!("wrmsr", in("ecx") EFER_MSR, in("eax") new_efer as u32, in("edx") (new_efer >> 32) as u32);
+    println!("[VMM] EFER.NXE enabled");
 }
 
 unsafe fn enable_cr0_wp() {
@@ -271,7 +285,7 @@ pub fn map_user_pages(virt: u64, phys: u64, writable: bool, executable: bool) ->
         let pt = (hhdm + pt_phys) as *mut u64;
         let mut flags = paging::ENTRY_PRESENT | paging::ENTRY_USER;
         if writable { flags |= paging::ENTRY_WRITABLE; }
-        if !executable { flags |= paging::ENTRY_NX; }
+        flags |= paging::nx_flags(executable);
 
         let entry = phys | flags;
         core::ptr::write_volatile(pt.add(pt_idx), entry);
@@ -330,7 +344,7 @@ pub fn map_user_page_fresh(phys: u64, writable: bool, executable: bool) -> Optio
         let pt = (hhdm + pt_phys) as *mut u64;
         let mut flags = paging::ENTRY_PRESENT | paging::ENTRY_USER;
         if writable { flags |= paging::ENTRY_WRITABLE; }
-        if !executable { flags |= paging::ENTRY_NX; }
+        flags |= paging::nx_flags(executable);
         core::ptr::write_volatile(pt.add(0), phys | flags);
 
         // TLB flush

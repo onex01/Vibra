@@ -24,6 +24,51 @@ const PAGE_1G_ADDRESS_MASK: u64 = ADDRESS_MASK & !PAGE_1G_MASK;
 
 pub(crate) static HHDM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
+/// Поддерживает ли процессор NX/XD: `CPUID.80000001H:EDX[20]`.
+///
+/// Проверка обязательна перед записью `EFER.NXE`: по SDM `WRMSR` в
+/// `IA32_EFER` с `NXE=1` на CPU без NX (или с выключенным в BIOS
+/// «Execute Disable Bit») даёт `#GP(0)`. Именно так падало ядро на
+/// ноутбуке сразу после `[VMM] Activating new address space...`.
+pub fn cpu_has_nx() -> bool {
+    // Extended leaf доступен только если максимальный extended leaf его включает.
+    let max_ext = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+    if max_ext < 0x8000_0001 {
+        return false;
+    }
+    let edx = core::arch::x86_64::__cpuid(0x8000_0001).edx;
+    edx & (1 << 20) != 0
+}
+
+/// Фактически включённый `EFER.NXE` (бит 11).
+///
+/// Пока NX выключен, бит 63 (NX) в PTE/PDE — reserved bit: page walk даст
+/// `#PF` с reserved-bit violation. Поэтому таблицы страниц обязаны узнавать
+/// реальное состояние, а не полагаться на поддержку CPU.
+pub fn nx_enabled() -> bool {
+    const EFER_MSR: u32 = 0xC000_0080;
+    let (lo, hi): (u32, u32);
+    unsafe {
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") EFER_MSR,
+            out("eax") lo,
+            out("edx") hi,
+            options(nomem, nostack)
+        );
+    }
+    (((hi as u64) << 32) | lo as u64) & (1 << 11) != 0
+}
+
+/// Биты защиты для PTE: `ENTRY_NX`, только если NX реально включён.
+pub(crate) fn nx_flags(executable: bool) -> u64 {
+    if executable || !nx_enabled() {
+        0
+    } else {
+        ENTRY_NX
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageSize {
     Size4KiB,
