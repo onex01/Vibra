@@ -63,6 +63,11 @@ struct IdtPointer {
 
 static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
 
+/// Виртуальный адрес IDT — VMM проверяет его маппинг перед сменой CR3.
+pub fn base_address() -> u64 {
+    unsafe { core::ptr::addr_of!(IDT) as u64 }
+}
+
 pub static TICKS: AtomicU64 = AtomicU64::new(0);
 
 #[inline]

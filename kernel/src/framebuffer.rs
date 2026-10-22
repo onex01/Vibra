@@ -279,6 +279,19 @@ pub static FONT_DATA: [[u8; 16]; 256] = [
     [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], // 0xFF
 ];
 
+/// Ячейка текстовой сетки — RAM-тень экрана.
+///
+/// Нужна, чтобы `scroll()` не читал из WC-памяти фреймбуфера: uncached read
+/// на каждый пиксель был самым медленным местом консоли (на реальном железе
+/// прокрутка занимала десятки миллисекунд). Теперь сдвиг идёт по обычной
+/// памяти, а из фреймбуфера только пишем.
+#[derive(Clone, Copy)]
+struct TextCell {
+    ch: u8,
+    fg: u32,
+    bg: u32,
+}
+
 pub struct Console {
     fb_addr: *mut u32,
     pitch: usize,
@@ -302,6 +315,11 @@ pub struct Console {
     // Мигающий курсор
     cursor_blink_state: bool,
     last_blink_tick: u64,
+    // RAM-тень текстовой сетки (для быстрой прокрутки без чтения WC-памяти).
+    cells: Vec<TextCell>,
+    // false, если экран рисовался примитивами напрямую — тогда тень устарела
+    // и scroll() обязан идти медленным путём.
+    cells_valid: core::cell::Cell<bool>,
 }
 
 // SAFETY: Console is accessed through BOOT_CONSOLE's mutex and only the BSP uses it.
@@ -319,6 +337,12 @@ pub(crate) fn init_boot_console() {
 
     *BOOT_CONSOLE.lock() = Some(Console::new(framebuffer));
 }
+
+/// Включить RAM-тень текстовой сетки после инициализации кучи.
+pub(crate) fn after_heap_init() {
+    with_boot_console(|console| console.rebuild_cells());
+}
+
 
 pub(crate) fn write_boot_byte(byte: u8) {
     if !matches!(byte, b'\r' | b'\n' | b'\t' | 0x08 | 0x20..=0x7e) {
@@ -374,10 +398,42 @@ impl Console {
             scale_y: 0,
             cursor_blink_state: true,
             last_blink_tick: 0,
+            cells: Vec::new(),
+            cells_valid: core::cell::Cell::new(true),
         };
 
+        console.reset_cells();
         console.clear();
         console
+    }
+
+    /// Пересоздаёт RAM-тень текстовой сетки под текущие cols/rows.
+    ///
+    /// ВАЖНО: `Console::new()` вызывается ДО `memory::init()` (нужен вывод на
+    /// экран уже с первых строк), а куча в этот момент ещё не создана. Поэтому
+    /// до инициализации кучи тень не выделяется: консоль работает «медленным»
+    /// путём, рисуя прямо во фреймбуфер. После `memory::init()` boot вызывает
+    /// `rebuild_cells()`, и тень включается.
+    fn reset_cells(&mut self) {
+        let (heap_start, heap_end) = crate::memory::heap::region();
+        if heap_end <= heap_start {
+            self.cells.clear();
+            self.cells_valid.set(false);
+            return;
+        }
+
+        let count = self.cols.saturating_mul(self.rows);
+        self.cells.clear();
+        self.cells.resize(
+            count,
+            TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color },
+        );
+        self.cells_valid.set(true);
+    }
+
+    /// Перестроить тень ячеек (вызывается после инициализации кучи).
+    pub(crate) fn rebuild_cells(&mut self) {
+        self.reset_cells();
     }
 
     /// Очищает весь экран фоновым цветом
@@ -389,12 +445,13 @@ impl Console {
             let slice = core::slice::from_raw_parts_mut(self.fb_addr, total_pixels);
             slice.fill(bg);
         }
+        self.reset_cells();
         self.cursor_col = 0;
         self.cursor_row = 0;
     }
 
     /// Рисует один символ в позиции (col, row)
-    pub fn draw_char_at(&self, ch: char, col: usize, row: usize, fg: u32, bg: u32) {
+    pub fn draw_char_at(&mut self, ch: char, col: usize, row: usize, fg: u32, bg: u32) {
         if col >= self.cols || row >= self.rows {
             return;
         }
@@ -402,22 +459,61 @@ impl Console {
         let code = ch as usize;
         let font_index = if code < 256 { code } else { 0 };
 
-        let glyph = &FONT_DATA[font_index];
+        let cell = TextCell { ch: font_index as u8, fg, bg };
+        if self.cells_valid.get() {
+            let index = row * self.cols + col;
+            if let Some(slot) = self.cells.get_mut(index) {
+                *slot = cell;
+            }
+        }
+        self.draw_cell_pixels(cell, col, row);
+    }
+
+    /// Рисует пиксели одной ячейки.
+    ///
+    /// Цвета конвертируются ОДИН раз на символ, а не на каждый из 128 пикселей
+    /// (раньше `color_to_native` вызывался 128 раз на символ).
+    fn draw_cell_pixels(&self, cell: TextCell, col: usize, row: usize) {
         let start_x = col * FONT_WIDTH;
         let start_y = row * FONT_HEIGHT;
+        if start_x >= self.width || start_y >= self.height {
+            return;
+        }
 
+        let fg = crate::display::color_to_native(cell.fg, self.pixel_format);
+        let bg = crate::display::color_to_native(cell.bg, self.pixel_format);
+
+        // Пробел — самый частый символ при прокрутке: заливаем построчно срезом.
+        if cell.ch == b' ' {
+            let row_len = FONT_WIDTH.min(self.width - start_x);
+            for dy in 0..FONT_HEIGHT {
+                let pixel_y = start_y + dy;
+                if pixel_y >= self.height {
+                    break;
+                }
+                unsafe {
+                    let row_ptr = self.fb_addr.add(pixel_y * self.pitch + start_x);
+                    core::slice::from_raw_parts_mut(row_ptr, row_len).fill(bg);
+                }
+            }
+            return;
+        }
+
+        let glyph = &FONT_DATA[cell.ch as usize];
         for dy in 0..FONT_HEIGHT {
             let line = glyph[dy];
+            let pixel_y = start_y + dy;
+            if pixel_y >= self.height {
+                break;
+            }
             for dx in 0..FONT_WIDTH {
                 let pixel_x = start_x + dx;
-                let pixel_y = start_y + dy;
-                if pixel_x < self.width && pixel_y < self.height {
+                if pixel_x < self.width {
                     // Бит 7 = левый пиксель, бит 0 = правый
                     let color = if (line >> (7 - dx)) & 1 == 1 { fg } else { bg };
-                    let native_color = crate::display::color_to_native(color, self.pixel_format);
                     unsafe {
                         let offset = pixel_y * self.pitch + pixel_x;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), native_color);
+                        core::ptr::write_volatile(self.fb_addr.add(offset), color);
                     }
                 }
             }
@@ -526,26 +622,50 @@ impl Console {
         }
     }
 
-    /// Прокрутка экрана на одну строку вверх
+    /// Прокрутка экрана на одну строку вверх.
+    ///
+    /// Сдвиг делается memmove'ом по фреймбуферу, а RAM-тень ячеек (если она
+    /// есть) синхронизируется отдельно. Раньше здесь был полный перерисон
+    /// экрана из тени (rows*cols*FONT_W*FONT_H пиксельных записей). На реальном
+    /// GPU это терпимо, но во фреймбуфере QEMU (MMIO) каждая запись — выход в
+    /// эмулятор, и загрузка с печатью boot-лога растягивалась на минуты.
     fn scroll(&mut self) {
-        let lines_to_move = FONT_HEIGHT;
-        let pixels_to_move = (self.height - lines_to_move) * self.pitch;
-        
-        unsafe {
-            // copy безопасно работает с перекрывающимися областями памяти (как memmove)
-            core::ptr::copy(
-                self.fb_addr.add(lines_to_move * self.pitch),
-                self.fb_addr,
-                pixels_to_move,
-            );
-            
-            // Очищаем нижние строки фоновым цветом
-            let bottom_start = pixels_to_move;
-            let bottom_len = lines_to_move * self.pitch;
-            let slice = core::slice::from_raw_parts_mut(self.fb_addr.add(bottom_start), bottom_len);
-            let bg = crate::display::color_to_native(self.bg_color, self.pixel_format);
-            slice.fill(bg);
+        if self.rows == 0 || self.cols == 0 {
+            return;
         }
+
+        let lines_to_move = FONT_HEIGHT;
+        let shift_pixels = lines_to_move * self.pitch;
+
+        if self.height > lines_to_move {
+            let pixels_to_move = (self.height - lines_to_move) * self.pitch;
+            unsafe {
+                // copy безопасно работает с перекрывающимися областями (memmove).
+                core::ptr::copy(
+                    self.fb_addr.add(shift_pixels),
+                    self.fb_addr,
+                    pixels_to_move,
+                );
+
+                // Очищаем нижние строки фоновым цветом.
+                let slice = core::slice::from_raw_parts_mut(
+                    self.fb_addr.add(pixels_to_move),
+                    shift_pixels,
+                );
+                slice.fill(crate::display::color_to_native(self.bg_color, self.pixel_format));
+            }
+        }
+
+        // Синхронизируем RAM-тень: сдвиг строк и пустая последняя строка.
+        if self.cells.len() == self.cols * self.rows {
+            self.cells.copy_within(self.cols.., 0);
+            let blank = TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color };
+            let last_row = (self.rows - 1) * self.cols;
+            for cell in &mut self.cells[last_row..] {
+                *cell = blank;
+            }
+        }
+
         self.cursor_row = self.rows - 1;
     }
 
@@ -628,6 +748,8 @@ impl Console {
         if col >= self.cols || row >= self.rows {
             return;
         }
+        // Символ рисуется мимо текстовой сетки (нет &mut self) — тень устарела.
+        self.cells_valid.set(false);
         let font_index = ch as usize;
         let glyph = &FONT_DATA[font_index];
         let start_x = col * FONT_WIDTH;
@@ -734,6 +856,9 @@ impl Console {
 
     /// Записывает один пиксель в фреймбуфер (с масштабированием виртуальных координат)
     pub fn put_pixel(&self, x: usize, y: usize, color: u32) {
+        // Прямое рисование мимо текстовой сетки — RAM-тень больше не совпадает
+        // с экраном, scroll() переключится на медленный путь.
+        self.cells_valid.set(false);
         // Конвертация цвета из Rgb888 в native format
         let native_color = crate::display::color_to_native(color, self.pixel_format);
 
@@ -781,6 +906,8 @@ impl Console {
         if w == 0 || h == 0 {
             return;
         }
+        // Прямое рисование мимо текстовой сетки — RAM-тень устарела.
+        self.cells_valid.set(false);
         let native_color = crate::display::color_to_native(color, self.pixel_format);
 
         // Вычисляем физические координаты прямоугольника
@@ -897,6 +1024,8 @@ impl Console {
 
     /// Копирует буфер пикселей в фреймбуфер
     pub fn blit(&self, x: usize, y: usize, src: &[u32], src_w: usize, src_h: usize) {
+        // Прямое рисование мимо текстовой сетки — RAM-тень устарела.
+        self.cells_valid.set(false);
         for sy in 0..src_h {
             let dy = y + sy;
             if dy >= self.height {
@@ -923,6 +1052,8 @@ impl Console {
 
     /// Рисует текст в позиции (x, y) пиксельными координатами (с масштабированием)
     pub fn draw_text_at(&self, x: usize, y: usize, text: &str, fg: u32, bg: u32) {
+        // Пиксельный текст мимо сетки — RAM-тень устарела.
+        self.cells_valid.set(false);
         let max_x = self.fb_width();
         let max_y = self.fb_height();
         for (i, ch) in text.chars().enumerate() {

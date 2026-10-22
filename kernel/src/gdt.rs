@@ -56,6 +56,24 @@ static mut TSS: Tss = Tss {
 // GDT: 5 обычных дескрипторов + 2 слота под 16-байтовый TSS-дескриптор
 static mut GDT: [u64; 7] = [0; 7];
 
+/// Виртуальный адрес GDT — VMM проверяет его маппинг перед сменой CR3.
+pub fn gdt_address() -> u64 {
+    core::ptr::addr_of!(GDT) as u64
+}
+
+/// Виртуальный адрес TSS (в нём живут rsp0 и IST-стеки).
+pub fn tss_address() -> u64 {
+    core::ptr::addr_of!(TSS) as u64
+}
+
+/// Верхушки IST-стеков (double fault, NMI) — тоже обязаны пережить смену CR3.
+pub fn ist_stack_tops() -> (u64, u64) {
+    (
+        core::ptr::addr_of!(DF_STACK) as u64 + IST_STACK_SIZE as u64,
+        core::ptr::addr_of!(NMI_STACK) as u64 + IST_STACK_SIZE as u64,
+    )
+}
+
 #[repr(C, packed)]
 struct GdtPointer {
     limit: u16,

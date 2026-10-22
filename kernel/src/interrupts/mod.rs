@@ -10,7 +10,9 @@ pub fn init() {
     pic::init();
     idt::init();
     msi::init();
-    println!("[INTR] Interrupts enabled!");
+    // Прерывания здесь ещё НЕ включены: это делает interrupts::enable() после
+    // переключения CR3, чтобы обработчики гарантированно работали на новых tables.
+    println!("[INTR] IDT + PIC ready (interrupts still disabled)");
 }
 
 #[inline]

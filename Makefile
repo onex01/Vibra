@@ -27,6 +27,9 @@ else
 PROFILE := debug
 endif
 
+# Путь к собранному ядру (без привязки к диску — нужен и для ISO, и для hdd.img).
+KERNEL_ELF := target/$(TARGET)/$(PROFILE)/$(KERNEL_NAME)
+
 # COM1 привязан к stdin/stdout: можно вводить shell-команды из терминала,
 # сохраняя графическое окно QEMU для framebuffer-консоли.
 ## SERIAL configuration: choose how QEMU exposes the serial port.
@@ -60,23 +63,30 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build smoke run clean setup install-kernel iso usb uefi-usb run-iso run-bios qemu-usb
+.PHONY: all build kernel smoke run clean setup install-kernel iso usb uefi-usb run-iso run-bios qemu-usb fs-test
 
 all: run
 
+# Только компиляция ядра — без диска. Нужна ISO/USB-сборкам.
+kernel:
+	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
+
 # Сборка ядра И копирование его на диск
-build:
+build: kernel
 	@mkdir -p $(BUILD_DIR)
 	@if [ ! -f "$(BUILD_DIR)/hdd.img" ]; then \
 		$(MAKE) setup; \
 	fi
-	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 	@echo "==> Copying kernel to disk image..."
-	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/debug/$(KERNEL_NAME) ::/kernel.elf
+	@mcopy -o -i $(BUILD_DIR)/hdd.img $(KERNEL_ELF) ::/kernel.elf
 	@echo "==> Kernel built and installed!"
 
 smoke:
 	@QEMU="$(QEMU)" bash scripts/qemu-smoke.sh
+
+# End-to-end проверка FAT32/разделов: второй диск + команды через serial.
+fs-test:
+	@QEMU="$(QEMU)" bash scripts/qemu-fs-test.sh
 
 setup:
 	@echo "==> Setting up boot image..."
@@ -175,27 +185,28 @@ deps-ubuntu:
 	@sudo apt update && sudo apt install -y qemu-system-x86 mtools dosfstools xorriso wget mtools mtools
 
 # === ISO image для реального железа ===
-# Собирает ISO с Limine (BIOS + UEFI), ядром и конфигом.
+# Собирает гибридный ISO (BIOS El Torito + UEFI) с Limine, ядром и конфигом.
 # Записывается на USB/CD-R для запуска на реальном PC.
-
-iso: build
+#
+# Зависит только от `kernel`: hdd.img для ISO не нужен.
+iso: kernel
 	@echo "==> Creating ISO image..."
+	@mkdir -p $(BUILD_DIR)
+	@rm -rf $(BUILD_DIR)/iso_root
 	@mkdir -p $(BUILD_DIR)/iso_root/limine
 	@mkdir -p $(BUILD_DIR)/iso_root/EFI/BOOT
 
 	@echo "==> Copying kernel to ISO root..."
-	@cp target/$(TARGET)/debug/$(KERNEL_NAME) $(BUILD_DIR)/iso_root/kernel.elf
+	@cp $(KERNEL_ELF) $(BUILD_DIR)/iso_root/kernel.elf
 
 	@echo "==> Copying Limine config..."
 	@cp limine.conf $(BUILD_DIR)/iso_root/limine/
 
-	@echo "==> Copying Limine UEFI bootloader..."
+	@echo "==> Copying Limine bootloaders (UEFI + BIOS CD)..."
 	@cp $(LIMINE_DIR)/BOOTX64.EFI $(BUILD_DIR)/iso_root/EFI/BOOT/
-
-	@echo "==> Copying Limine BIOS files..."
 	@cp $(LIMINE_DIR)/limine-bios-cd.bin $(BUILD_DIR)/iso_root/limine/
 	@cp $(LIMINE_DIR)/limine-uefi-cd.bin $(BUILD_DIR)/iso_root/limine/
-	@cp $(LIMINE_DIR)/limine-bios.sys $(BUILD_DIR)/iso_root/limine/ || true
+	@cp $(LIMINE_DIR)/limine-bios.sys $(BUILD_DIR)/iso_root/limine/
 
 	@echo "==> Creating bootable ISO with xorriso..."
 	xorriso -as mkisofs \
@@ -203,12 +214,19 @@ iso: build
 		-no-emul-boot \
 		-boot-load-size 4 \
 		-boot-info-table \
-		-eltorito-alt-boot \
-		-e EFI/BOOT/BOOTX64.EFI \
-		-no-emul-boot \
-		-isohybrid-gpt-basdat \
+		--efi-boot limine/limine-uefi-cd.bin \
+		-efi-boot-part \
+		--efi-boot-image \
+		--protective-msdos-label \
 		-o $(BUILD_DIR)/vibra.iso \
 		$(BUILD_DIR)/iso_root
+
+	@echo "==> Installing Limine BIOS bootloader (hybrid MBR)..."
+	@if [ ! -x $(LIMINE_DIR)/limine ]; then \
+		echo "    building limine host tool from limine.c"; \
+		cc -O2 -o $(LIMINE_DIR)/limine $(LIMINE_DIR)/limine.c; \
+	fi
+	@$(LIMINE_DIR)/limine bios-install $(BUILD_DIR)/vibra.iso
 
 	@echo "==> ISO image created: $(BUILD_DIR)/vibra.iso"
 	@ls -lh $(BUILD_DIR)/vibra.iso
@@ -260,7 +278,7 @@ usb: build
 
 	@echo "==> Copying files to partition..."
 	@mmd -i $(USB_IMG)@@1048576 ::/EFI ::/EFI/BOOT ::/limine
-	@mcopy -i $(USB_IMG)@@1048576 target/$(TARGET)/debug/$(KERNEL_NAME) ::/kernel.elf
+	@mcopy -i $(USB_IMG)@@1048576 $(KERNEL_ELF) ::/kernel.elf
 	@mcopy -i $(USB_IMG)@@1048576 limine.conf ::/limine/
 	@mcopy -i $(USB_IMG)@@1048576 $(LIMINE_DIR)/BOOTX64.EFI ::/EFI/BOOT/
 

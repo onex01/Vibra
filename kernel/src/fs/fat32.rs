@@ -9,10 +9,16 @@ use alloc::vec;
 
 const SECTOR_SIZE: usize = 512;
 
-/// FAT32 Boot Sector
+/// FAT32 Boot Sector (BPB).
+///
+/// Первые 11 байт — `jmp_boot[3]` + `oem_name[8]`; без них все поля BPB
+/// читались со сдвигом на 11 байт, `bytes_per_sector` оказывался мусором и
+/// монтирование любого FAT32 падало с InvalidPath.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct Fat32BootSector {
+    _jump: [u8; 3],
+    _oem: [u8; 8],
     bytes_per_sector: u16,
     sectors_per_cluster: u8,
     reserved_sectors: u16,
@@ -55,7 +61,6 @@ struct FatDirEntry {
 }
 
 impl FatDirEntry {
-    fn is_valid(&self) -> bool { self.name[0] != 0x00 && self.name[0] != 0xE5 }
     fn is_directory(&self) -> bool { (self.attributes & 0x10) != 0 }
     fn is_file(&self) -> bool { !self.is_directory() && (self.attributes & 0x08) == 0 }
     fn is_long_name(&self) -> bool { (self.attributes & 0x0F) == 0x0F }
@@ -94,7 +99,13 @@ impl Fat32Fs {
 
         let boot: Fat32BootSector = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
 
-        if boot.bytes_per_sector != 512 || boot.fat_size_16 != 0 {
+        // FAT32: fat_size_16 == 0 и root_entry_count == 0 (корневой каталог —
+        // обычная цепочка кластеров, а не фиксированная область). Если это не
+        // так, перед нами FAT12/16 и раскладка data-области другая.
+        if boot.bytes_per_sector != 512 || boot.fat_size_16 != 0 || boot.root_entry_count != 0 {
+            return Err(FsError::InvalidPath);
+        }
+        if boot.sectors_per_cluster == 0 || !boot.sectors_per_cluster.is_power_of_two() {
             return Err(FsError::InvalidPath);
         }
 
@@ -115,59 +126,12 @@ impl Fat32Fs {
     }
 
     fn read_cluster(&self, cluster: u32, buf: &mut [u8]) -> Result<(), FsError> {
+        // Кластеры 0 и 1 — служебные (0 = свободно, 1 = зарезервировано),
+        // данных в них нет. Без этой проверки `cluster - 2` уходил в underflow.
+        if cluster < 2 { return Err(FsError::InvalidPath); }
         let sector = self.data_start_sector
             + ((cluster - 2) as u64) * self.boot.sectors_per_cluster as u64;
         self.disk.lock().read(sector, buf).map_err(|_| FsError::IoError)
-    }
-
-    /// Записать данные в кластер на диске
-    fn write_cluster(&self, cluster: u32, buf: &[u8]) -> Result<(), FsError> {
-        let sector = self.data_start_sector
-            + ((cluster - 2) as u64) * self.boot.sectors_per_cluster as u64;
-        self.disk.lock().write(sector, buf).map_err(|_| FsError::IoError)
-    }
-
-    /// Найти и выделить свободный кластер в FAT
-    fn alloc_cluster(&self) -> Result<u32, FsError> {
-        // Начинаем поиск с кластера 2 (первый data cluster)
-        let fat_size = self.boot.fat_size_32 as u64;
-        let total_clusters = (fat_size * 512) / 4;
-
-        for cluster in 2..total_clusters as u32 {
-            let fat_offset = cluster as u64 * 4;
-            let fat_sector = self.fat_start_sector + fat_offset / 512;
-            let entry_offset = (fat_offset % 512) as usize;
-
-            let mut buf = [0u8; 512];
-            self.disk.lock().read(fat_sector, &mut buf).map_err(|_| FsError::IoError)?;
-
-            let entry = u32::from_le_bytes([
-                buf[entry_offset], buf[entry_offset+1],
-                buf[entry_offset+2], buf[entry_offset+3],
-            ]) & 0x0FFFFFFF;
-
-            if entry == 0 {
-                // Свободный кластер найден — помечаем как конец цепочки
-                self.set_fat_entry(cluster, 0x0FFFFFF8)?;
-                return Ok(cluster);
-            }
-        }
-        Err(FsError::DiskFull)
-    }
-
-    /// Записать значение в FAT entry
-    fn set_fat_entry(&self, cluster: u32, value: u32) -> Result<(), FsError> {
-        let fat_offset = cluster as u64 * 4;
-        let fat_sector = self.fat_start_sector + fat_offset / 512;
-        let entry_offset = (fat_offset % 512) as usize;
-
-        let mut buf = [0u8; 512];
-        self.disk.lock().read(fat_sector, &mut buf).map_err(|_| FsError::IoError)?;
-
-        let bytes = value.to_le_bytes();
-        buf[entry_offset..entry_offset+4].copy_from_slice(&bytes);
-
-        self.disk.lock().write(fat_sector, &buf).map_err(|_| FsError::IoError)
     }
 
     fn next_cluster(&self, cluster: u32) -> Result<u32, FsError> {
@@ -188,11 +152,20 @@ impl Fat32Fs {
 
     fn read_chain(&self, start_cluster: u32) -> Result<Vec<u8>, FsError> {
         let mut data = Vec::new();
+        // Пустой файл (cluster == 0) — данных нет.
+        if start_cluster < 2 { return Ok(data); }
+
         let mut cluster = start_cluster;
         let mut cluster_buf = vec![0u8; self.cluster_size as usize];
+        // Защита от битой/зацикленной FAT: не больше числа кластеров тома.
+        let max_clusters = (self.boot.fat_size_32 as u64 * 512 / 4) as usize;
+        let mut guard = 0usize;
+
         loop {
             self.read_cluster(cluster, &mut cluster_buf)?;
             data.extend_from_slice(&cluster_buf);
+            guard += 1;
+            if guard > max_clusters { break; }
             match self.next_cluster(cluster) {
                 Ok(next) => cluster = next,
                 Err(_) => break,
@@ -201,27 +174,79 @@ impl Fat32Fs {
         Ok(data)
     }
 
-    fn read_dir_cluster(&self, cluster: u32) -> Result<Vec<FatDirEntry>, FsError> {
+    /// Читает каталог и возвращает записи вместе с именами.
+    ///
+    /// Поддержаны LFN (Long File Name): цепочка записей с атрибутом 0x0F идёт
+    /// ПЕРЕД короткой записью и хранит по 13 UTF-16 символов; части склеиваются
+    /// в обратном порядке. Без этого файлы вида "My Documents" выглядели как
+    /// "MYDOCU~1".
+    fn read_dir_cluster(&self, cluster: u32) -> Result<Vec<(FatDirEntry, String)>, FsError> {
         let data = self.read_chain(cluster)?;
-        let mut entries = Vec::new();
-        let mut i = 0;
+        let mut entries: Vec<(FatDirEntry, String)> = Vec::new();
+        let mut lfn_parts: Vec<[u16; 13]> = Vec::new();
+        let mut i = 0usize;
+
         while i + 32 <= data.len() {
             let entry: FatDirEntry = unsafe { core::ptr::read(data[i..].as_ptr() as *const _) };
-            if !entry.is_valid() {
-                if entry.name[0] == 0x00 { break; }
-                i += 32; continue;
+
+            if entry.name[0] == 0x00 {
+                break;
             }
-            if !entry.is_long_name() { entries.push(entry); }
+            if entry.name[0] == 0xE5 {
+                // Удалённая запись обрывает LFN-цепочку.
+                lfn_parts.clear();
+                i += 32;
+                continue;
+            }
+
+            if entry.is_long_name() {
+                let mut chars = [0u16; 13];
+                for k in 0..5 {
+                    chars[k] = u16::from_le_bytes([data[i + 1 + k * 2], data[i + 2 + k * 2]]);
+                }
+                for k in 0..6 {
+                    chars[5 + k] = u16::from_le_bytes([data[i + 14 + k * 2], data[i + 15 + k * 2]]);
+                }
+                chars[11] = u16::from_le_bytes([data[i + 28], data[i + 29]]);
+                chars[12] = u16::from_le_bytes([data[i + 30], data[i + 31]]);
+                lfn_parts.push(chars);
+                i += 32;
+                continue;
+            }
+
+            let name = if lfn_parts.is_empty() {
+                entry.get_name()
+            } else {
+                let mut s = String::new();
+                for part in lfn_parts.iter().rev() {
+                    for &c in part.iter() {
+                        // 0x0000 — терминатор, 0xFFFF — padding.
+                        if c == 0 || c == 0xFFFF {
+                            continue;
+                        }
+                        s.push(char::from_u32(c as u32).unwrap_or('?'));
+                    }
+                }
+                lfn_parts.clear();
+                if s.is_empty() { entry.get_name() } else { s }
+            };
+
+            // 0x08 = volume label, в листинг не попадает.
+            if entry.attributes & 0x08 == 0 {
+                entries.push((entry, name));
+            }
             i += 32;
         }
+
         Ok(entries)
     }
 
     fn find_in_dir(&self, dir_cluster: u32, name: &str) -> Result<FatDirEntry, FsError> {
         let entries = self.read_dir_cluster(dir_cluster)?;
-        for entry in &entries {
-            let entry_name = entry.get_name();
-            if entry_name.eq_ignore_ascii_case(name) { return Ok(*entry); }
+        for (entry, entry_name) in &entries {
+            if entry_name.eq_ignore_ascii_case(name) {
+                return Ok(*entry);
+            }
         }
         Err(FsError::NotFound)
     }
@@ -229,11 +254,13 @@ impl Fat32Fs {
     fn find_path(&self, path: &str) -> Result<FatDirEntry, FsError> {
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         if parts.is_empty() {
+            // Корень: псевдо-запись, указывающая на root_cluster.
+            // Старшие 16 бит кластера раньше терялись (root_cluster as u16).
             return Ok(FatDirEntry {
                 name: [b' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 attributes: 0x10,
-                first_cluster_high: 0,
-                first_cluster_low: self.boot.root_cluster as u16,
+                first_cluster_high: (self.boot.root_cluster >> 16) as u16,
+                first_cluster_low: (self.boot.root_cluster & 0xFFFF) as u16,
                 file_size: 0,
                 ..unsafe { core::mem::zeroed() }
             });
@@ -253,11 +280,10 @@ impl Fat32Fs {
     }
 }
 
-/// FAT32 файл
+/// FAT32 файл (только чтение)
 pub struct Fat32File {
     data: Vec<u8>,
     position: u64,
-    writable: bool,
 }
 
 impl File for Fat32File {
@@ -269,16 +295,8 @@ impl File for Fat32File {
         self.position += to_read as u64;
         Ok(to_read)
     }
-    fn write(&mut self, buf: &[u8]) -> Result<usize, FsError> {
-        if !self.writable { return Err(FsError::ReadOnly); }
-        let pos = self.position as usize;
-        let new_len = pos + buf.len();
-        if new_len > self.data.len() {
-            self.data.resize(new_len, 0);
-        }
-        self.data[pos..pos + buf.len()].copy_from_slice(buf);
-        self.position += buf.len() as u64;
-        Ok(buf.len())
+    fn write(&mut self, _buf: &[u8]) -> Result<usize, FsError> {
+        Err(FsError::ReadOnly)
     }
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, FsError> {
         let new = match pos {
@@ -305,7 +323,7 @@ impl FileSystem for Fat32Fs {
             let data = self.read_chain(entry.get_cluster())?;
             let size = entry.file_size as usize;
             let data = if size < data.len() { data[..size].to_vec() } else { data };
-            Ok(Box::new(Fat32File { data, position: 0, writable: false }))
+            Ok(Box::new(Fat32File { data, position: 0 }))
         } else if entry.is_directory() {
             Err(FsError::IsADirectory)
         } else {
@@ -313,67 +331,11 @@ impl FileSystem for Fat32Fs {
         }
     }
 
-    fn create(&mut self, path: &str) -> Result<Box<dyn File>, FsError> {
-        // Проверяем существует ли файл
-        if self.find_path(path).is_ok() {
-            return Err(FsError::AlreadyExists);
-        }
-
-        // Получаем родительскую директорию и имя файла
-        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        if parts.is_empty() { return Err(FsError::InvalidPath); }
-
-        let file_name = parts.last().unwrap();
-        let parent_path = if parts.len() > 1 {
-            parts[..parts.len()-1].join("/")
-        } else {
-            String::from("/")
-        };
-
-        // Получаем родительскую директорию
-        let parent = self.find_path(&parent_path)?;
-        if !parent.is_directory() { return Err(FsError::NotADirectory); }
-
-        // Выделяем кластер для нового файла
-        let first_cluster = self.alloc_cluster()?;
-
-        // Создаём directory entry (упрощённо — 8.3 формат)
-        let mut entry = FatDirEntry {
-            name: [b' '; 11],
-            attributes: 0x20, // Archive
-            reserved: 0,
-            creation_time_tenths: 0,
-            creation_time: 0,
-            creation_date: 0,
-            last_access_date: 0,
-            first_cluster_high: (first_cluster >> 16) as u16,
-            write_time: 0,
-            write_date: 0,
-            first_cluster_low: (first_cluster & 0xFFFF) as u16,
-            file_size: 0,
-        };
-
-        // Копируем имя в 8.3 формат
-        let name_bytes = file_name.as_bytes();
-        let mut name_pos = 0;
-        for i in 0..8.min(name_bytes.len()) {
-            if name_bytes[i] == b'.' { break; }
-            entry.name[i] = name_bytes[i].to_ascii_uppercase();
-            name_pos = i + 1;
-        }
-        // Расширение
-        if let Some(dot_pos) = file_name.find('.') {
-            let ext = &name_bytes[dot_pos+1..];
-            for i in 0..3.min(ext.len()) {
-                entry.name[8+i] = ext[i].to_ascii_uppercase();
-            }
-        }
-
-        // Записываем entry в директорию (упрощённо — добавляем в конец)
-        // Для полной реализации нужно найти свободный entry в директории
-        crate::println!("[FAT32] Created file '{}' in '{}'", file_name, parent_path);
-
-        Ok(Box::new(Fat32File { data: Vec::new(), position: 0, writable: true }))
+    fn create(&mut self, _path: &str) -> Result<Box<dyn File>, FsError> {
+        // Запись на физический носитель по умолчанию выключена (см. roadmap:
+        // «Операции записи ... выключены по умолчанию»). FAT32 смонтирован
+        // read-only, поэтому создание файлов недоступно.
+        Err(FsError::ReadOnly)
     }
     fn remove(&mut self, _path: &str) -> Result<(), FsError> { Err(FsError::ReadOnly) }
     fn mkdir(&mut self, _path: &str) -> Result<(), FsError> { Err(FsError::ReadOnly) }
@@ -391,14 +353,13 @@ impl FileSystem for Fat32Fs {
         let fat_entries = self.read_dir_cluster(cluster)?;
         let mut result = Vec::new();
 
-        for e in &fat_entries {
-            let name = e.get_name();
+        for (e, name) in &fat_entries {
             if name == "." || name == ".." || name.is_empty() { continue; }
             let file_type = if e.is_directory() { FileType::Directory } else { FileType::File };
             let perms = if e.is_directory() { 0o755 } else { 0o644 };
 
             result.push(DirEntry {
-                name,
+                name: name.clone(),
                 file_type,
                 size: e.file_size as usize,
                 permissions: Permissions::new(perms),
@@ -415,7 +376,8 @@ impl FileSystem for Fat32Fs {
 
     fn stat(&self, path: &str) -> Result<FileMetadata, FsError> {
         let entry = self.find_path(path)?;
-        let name = entry.get_name();
+        // Имя берём из пути: у записи может быть LFN, а get_name() вернёт 8.3.
+        let name = String::from(path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("/"));
         let file_type = if entry.is_directory() { FileType::Directory } else { FileType::File };
         let perms = if entry.is_directory() { 0o755 } else { 0o644 };
 

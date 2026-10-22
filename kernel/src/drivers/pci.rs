@@ -178,43 +178,63 @@ impl PciDevice {
 
 static PCI_DEVICES: Mutex<Vec<PciDevice>> = Mutex::new(Vec::new());
 
-/// Сканировать PCI шину и найти все устройства
+/// Сканировать PCI шину и найти все устройства.
+///
+/// Оптимизации (на реальном железе порт I/O ~1 мкс на обращение, полный обход
+/// 256×32×8 — это сотни тысяч обращений и секунды простоя):
+///   1. Пустая шина (ни одного устройства) означает, что дальше шин нет —
+///      выходим из цикла, а не сканируем все 256.
+///   2. Заголовок читается 3 словами (0x00, 0x08, 0x0C) вместо 6 полей.
+///   3. BAR'ы берутся из уже прочитанных слов, без повторного чтения.
 pub fn init() {
     println!("[PCI] Scanning PCI bus...");
 
     let mut devices = PCI_DEVICES.lock();
     let mut count = 0u32;
+    let mut buses_scanned = 0u32;
+    let mut empty_streak = 0u32;
 
     for bus in 0..=MAX_BUS {
+        let mut bus_has_device = false;
+        buses_scanned += 1;
+
         for dev in 0..MAX_DEV {
             for func in 0..MAX_FUNC {
                 unsafe {
-                    let vendor = pci_read_u16(bus, dev, func, 0x00);
+                    // vendor(0x00) + device(0x02) одним 32-битным чтением.
+                    let id_reg = pci_read_u32(bus, dev, func, 0x00);
+                    let vendor = (id_reg & 0xFFFF) as u16;
                     if vendor == 0xFFFF {
                         // No device at this slot
                         if func == 0 { break; } // Skip rest of functions
                         continue;
                     }
 
-                    let device_id = pci_read_u16(bus, dev, func, 0x02);
+                    bus_has_device = true;
+                    let device_id = (id_reg >> 16) as u16;
+
                     let class_reg = pci_read_u32(bus, dev, func, 0x08);
-                    let header_type = pci_read_u8(bus, dev, func, 0x0E);
+                    // 0x0C: cache line, latency, header type (0x0E), BIST.
+                    let header_reg = pci_read_u32(bus, dev, func, 0x0C);
+                    let header_type = ((header_reg >> 16) & 0xFF) as u8;
 
                     let class = ((class_reg >> 24) & 0xFF) as u8;
                     let subclass = ((class_reg >> 16) & 0xFF) as u8;
                     let prog_if = ((class_reg >> 8) & 0xFF) as u8;
 
-                    let bar0 = pci_read_u32(bus, dev, func, 0x10);
-                    let bar1 = pci_read_u32(bus, dev, func, 0x14);
-                    let bar2 = pci_read_u32(bus, dev, func, 0x18);
-                    let bar3 = pci_read_u32(bus, dev, func, 0x1C);
-                    let bar4 = pci_read_u32(bus, dev, func, 0x20);
-                    let bar5 = pci_read_u32(bus, dev, func, 0x24);
+                    let bars = [
+                        pci_read_u32(bus, dev, func, 0x10),
+                        pci_read_u32(bus, dev, func, 0x14),
+                        pci_read_u32(bus, dev, func, 0x18),
+                        pci_read_u32(bus, dev, func, 0x1C),
+                        pci_read_u32(bus, dev, func, 0x20),
+                        pci_read_u32(bus, dev, func, 0x24),
+                    ];
+                    let [bar0, bar1, bar2, bar3, bar4, bar5] = bars;
 
-                    let irq_reg = pci_read_u32(bus, dev, func, 0x0C);
                     let irq = pci_read_u8(bus, dev, func, 0x3C);
 
-                    let device = PciDevice {
+                    let mut device = PciDevice {
                         bus, dev, func,
                         vendor_id: vendor,
                         device_id,
@@ -225,10 +245,9 @@ pub fn init() {
                         irq,
                     };
 
-                    // Вычисляем физические адреса всех BAR
-                    let mut device = device;
-                    for i in 0..6u8 {
-                        let raw = pci_read_u32(bus, dev, func, 0x10 + i * 4);
+                    // Вычисляем физические адреса всех BAR из уже прочитанных слов.
+                    for i in 0..6usize {
+                        let raw = bars[i];
                         if raw == 0 || raw == 0xFFFFFFFF {
                             continue;
                         }
@@ -237,14 +256,13 @@ pub fn init() {
                             let bar_type = (raw >> 1) & 0x3;
                             if bar_type == 2 && i < 5 {
                                 // 64-bit: объединяем BAR[n] + BAR[n+1]
-                                let high = pci_read_u32(bus, dev, func, 0x10 + (i + 1) * 4);
-                                device.bar_phys[i as usize] = ((high as u64) << 32) | ((raw as u64) & 0xFFFFFFF0);
+                                device.bar_phys[i] = ((bars[i + 1] as u64) << 32) | ((raw as u64) & 0xFFFFFFF0);
                             } else {
-                                device.bar_phys[i as usize] = raw as u64 & 0xFFFFFFF0;
+                                device.bar_phys[i] = raw as u64 & 0xFFFFFFF0;
                             }
                         } else {
                             // I/O BAR
-                            device.bar_phys[i as usize] = (raw & !0x3) as u64;
+                            device.bar_phys[i] = (raw & !0x3) as u64;
                         }
                     }
 
@@ -258,9 +276,22 @@ pub fn init() {
                 }
             }
         }
+
+        // Пустая шина => следующих шин почти наверняка нет (стандартная
+        // эвристика PCI/PCIe: нумерация начинается с 0 и не имеет длинных
+        // дырок). Выходим после 4 пустых подряд, чтобы не потерять устройства
+        // за редким разрывом нумерации. Главное ускорение: 1-3 шины вместо 256.
+        if bus_has_device {
+            empty_streak = 0;
+        } else {
+            empty_streak += 1;
+            if empty_streak >= 4 {
+                break;
+            }
+        }
     }
 
-    println!("[PCI] Found {} devices", count);
+    println!("[PCI] Found {} devices on {} bus(es)", count, buses_scanned);
 
     // Выводим список
     for dev in devices.iter() {

@@ -36,68 +36,132 @@ fn alloc_contiguous_page() -> Option<usize> {
     crate::memory::pmm::alloc_contiguous(1)
 }
 
+/// Zeroed физический фрейм (возвращает phys). Нужен для DCBAA/CRCR: контроллер
+/// читает их сам, поэтому виртуальный адрес не годится.
+fn alloc_zeroed_frame() -> Option<u64> {
+    let phys = alloc_contiguous_page()? as u64;
+    let virt = hhdm() + phys;
+    unsafe {
+        let words = virt as *mut u64;
+        for i in 0..(crate::memory::pmm::FRAME_SIZE / 8) {
+            core::ptr::write_volatile(words.add(i), 0);
+        }
+    }
+    Some(phys)
+}
+
+/// Ждёт, пока `mask` в MMIO-регистре станет нулём. Ограничение по итерациям
+/// обязательно: без него неотвечающий контроллер вешает boot навсегда.
+unsafe fn wait_bits_clear(reg: *const u32, mask: u32, limit: u32) -> bool {
+    let mut spins = 0u32;
+    while (core::ptr::read_volatile(reg) & mask) != 0 {
+        core::hint::spin_loop();
+        spins += 1;
+        if spins >= limit {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn write_u64(addr: u64, value: u64) {
+    core::ptr::write_volatile(addr as *mut u32, value as u32);
+    core::ptr::write_volatile((addr + 4) as *mut u32, (value >> 32) as u32);
+}
+
 pub fn init_controller(bar_phys: u64, mmio_virt: u64) {
     println!("[xHCI] init_controller: bar_phys={:#x} mmio_virt={:#x}", bar_phys, mmio_virt);
 
-    // CAPLENGTH at mmio_virt[0]
     unsafe {
+        // === Capability registers ===
+        // 0x00 CAPLENGTH(u8) + HCIVERSION(u16), 0x04 HCSPARAMS1,
+        // 0x10 HCCPARAMS1, 0x14 DBOFF, 0x18 RTSOFF.
         let cap_len = core::ptr::read_volatile(mmio_virt as *const u8) as u64;
+        let hci_version = core::ptr::read_volatile((mmio_virt + 0x02) as *const u16);
+        let hcsparams1 = core::ptr::read_volatile((mmio_virt + 0x04) as *const u32);
+        let dboff = core::ptr::read_volatile((mmio_virt + 0x14) as *const u32);
+        let rtsoff = core::ptr::read_volatile((mmio_virt + 0x18) as *const u32);
+
+        let max_slots = hcsparams1 & 0xFF;
+        let max_ports = (hcsparams1 >> 24) & 0xFF;
         let op_base = mmio_virt + cap_len;
-        println!("[xHCI] cap_len={} op_base={:#x}", cap_len, op_base);
 
-        // Try to read the runtime register space offset (RTSOFF) from capability region
-        // Commonly present around capability offsets; read as u32 and store for diagnostics.
-        let rtsoff_ptr = (mmio_virt + 0x18) as *const u32;
-        let rtsoff_raw = core::ptr::read_volatile(rtsoff_ptr);
-        println!("[xHCI] RTSOFF raw from cap+0x18 = {:#x}", rtsoff_raw);
-        let runtime_base = mmio_virt + (rtsoff_raw as u64);
-        println!("[xHCI] runtime_base candidate = {:#x}", runtime_base);
+        println!(
+            "[xHCI] v{}.{} CAPLEN={} slots={} ports={} DBOFF={:#x} RTSOFF={:#x}",
+            hci_version >> 8,
+            hci_version & 0xFF,
+            cap_len,
+            max_slots,
+            max_ports,
+            dboff,
+            rtsoff
+        );
 
-        // Allocate ASQ and ACQ (one page each)
-        let asq_phys = match alloc_contiguous_page() {
-            Some(p) => p,
-            None => { println!("[xHCI] failed to allocate ASQ phys"); return; }
+        // === Operational registers ===
+        // USBCMD 0x00, USBSTS 0x04, CRCR 0x18 (64), DCBAAP 0x30 (64), CONFIG 0x38.
+        let usbcmd = op_base as *mut u32;
+        let usbsts = (op_base + 0x04) as *const u32;
+
+        // 1. Контроллер должен быть остановлен (USBSTS.HCH, bit 0).
+        if !wait_bits_clear(usbsts, 1 << 0, 100_000) {
+            println!("[xHCI] controller is not halted, skipping init");
+            return;
+        }
+
+        // 2. Reset (USBCMD.HCRST, bit 1): бит самоочищается, затем ждём CNR (bit 11).
+        let cmd = core::ptr::read_volatile(usbcmd);
+        core::ptr::write_volatile(usbcmd, cmd | (1 << 1));
+        if !wait_bits_clear(usbcmd, 1 << 1, 1_000_000) {
+            println!("[xHCI] reset timeout (HCRST stuck)");
+            return;
+        }
+        if !wait_bits_clear(usbsts, 1 << 11, 1_000_000) {
+            println!("[xHCI] reset timeout (Controller Not Ready stuck)");
+            return;
+        }
+
+        // 3. Device Context Base Address Array (DCBAAP, 0x30).
+        let Some(dcbaa_phys) = alloc_zeroed_frame() else {
+            println!("[xHCI] no memory for DCBAA");
+            return;
         };
-        let acq_phys = match alloc_contiguous_page() {
-            Some(p) => p,
-            None => { println!("[xHCI] failed to allocate ACQ phys"); return; }
+        write_u64(op_base + 0x30, dcbaa_phys);
+
+        // 4. Command Ring (CRCR, 0x18) — cycle state = 1.
+        let Some(cr_phys) = alloc_zeroed_frame() else {
+            println!("[xHCI] no memory for command ring");
+            return;
         };
+        write_u64(op_base + 0x18, cr_phys | 1);
 
-        let asq_virt = hhdm() as usize + asq_phys;
-        let acq_virt = hhdm() as usize + acq_phys;
+        // 5. CONFIG.MaxSlotsEn (биты 7:0) — иначе Enable Slot не работает.
+        core::ptr::write_volatile((op_base + 0x38) as *mut u32, max_slots & 0xFF);
 
-        println!("[xHCI] ASQ phys={:#x} virt={:#x}", asq_phys, asq_virt);
-        println!("[xHCI] ACQ phys={:#x} virt={:#x}", acq_phys, acq_virt);
+        // 6. Run (USBCMD.RS, bit 0) и дождаться снятия HCHalted.
+        let cmd = core::ptr::read_volatile(usbcmd);
+        core::ptr::write_volatile(usbcmd, cmd | 1);
+        if !wait_bits_clear(usbsts, 1 << 0, 1_000_000) {
+            println!("[xHCI] controller did not leave HCHalted — USB unusable");
+            return;
+        }
 
-        // AQA at offset 0x24 (u32): bits [15:0] = ASQ size -1, bits [31:16] = ACQ size-1
-        let aqa_ptr = (op_base + 0x24) as *mut u32;
-        // For now choose size 0x0 (meaning 1 entry) to be conservative
-        let asq_entries = 0x1u32; // ASQ size - 1 => 1 => 2 entries? keep small
-        let acq_entries = 0x1u32;
-        let aqa_val: u32 = ((acq_entries & 0xffff) << 16) | (asq_entries & 0xffff);
-        core::ptr::write_volatile(aqa_ptr, aqa_val);
-        println!("[xHCI] wrote AQA={:#x} to {:#x}", aqa_val, aqa_ptr as u64);
+        println!(
+            "[xHCI] running: DCBAAP={:#x} CRCR={:#x} CONFIG={:#x}",
+            dcbaa_phys,
+            cr_phys | 1,
+            core::ptr::read_volatile((op_base + 0x38) as *const u32)
+        );
 
-        // ASQ pointer at 0x28 (64-bit)
-        let asq_ptr_lo = (op_base + 0x28) as *mut u32;
-        let asq_ptr_hi = (op_base + 0x2C) as *mut u32;
-        core::ptr::write_volatile(asq_ptr_lo, asq_phys as u32);
-        core::ptr::write_volatile(asq_ptr_hi, (asq_phys >> 32) as u32);
-        println!("[xHCI] wrote ASQ ptr {:#x}", asq_phys);
-
-        // ACQ pointer at 0x30 (64-bit)
-        let acq_ptr_lo = (op_base + 0x30) as *mut u32;
-        let acq_ptr_hi = (op_base + 0x34) as *mut u32;
-        core::ptr::write_volatile(acq_ptr_lo, acq_phys as u32);
-        core::ptr::write_volatile(acq_ptr_hi, (acq_phys >> 32) as u32);
-        println!("[xHCI] wrote ACQ ptr {:#x}", acq_phys);
-
-        // Register this controller for later polling/debugging, include runtime offset
-        register_controller(bar_phys, mmio_virt, op_base, asq_phys, acq_phys, asq_virt, acq_virt, Some(rtsoff_raw));
-        // Emit immediate diagnostic dump of runtime candidate words so serial logs capture them
-        crate::drivers::usb::xhci::log_runtime_regs();
-
-        // Note: ASQ/ACQ doorbells are not set yet; further steps required.
+        register_controller(
+            bar_phys,
+            mmio_virt,
+            op_base,
+            cr_phys as usize,
+            0,
+            (hhdm() + cr_phys) as usize,
+            0,
+            Some(rtsoff),
+        );
     }
 }
 
@@ -141,7 +205,8 @@ pub fn log_runtime_regs() {
     let list = XHCI_CONTROLLERS.lock();
     for c in list.iter() {
         if let Some(rt) = c.cap_rt_off {
-            let rt_base = (c.op_base_virt as u64).wrapping_sub(0) + (rt as u64);
+            // RTSOFF отсчитывается от НАЧАЛА MMIO-бара, а не от operational base.
+            let rt_base = c.mmio_base_virt + (rt as u64);
             println!("[xHCI] controller {:#x} runtime candidate={:#x}", c.bar_phys, rt_base);
             unsafe {
                 for i in 0..8 {
@@ -162,6 +227,10 @@ pub fn log_runtime_regs() {
 pub fn poll_admin_acq() {
     let list = XHCI_CONTROLLERS.lock();
     for c in list.iter() {
+        if c.acq_virt == 0 {
+            // Event ring ещё не настроен — читать нечего.
+            continue;
+        }
         println!("[xHCI] poll_admin_acq: controller bar={:#x} acq_phys={:#x} acq_virt={:#x}", c.bar_phys, c.acq_phys, c.acq_virt);
         unsafe {
             let p0 = c.acq_virt as *const u64;

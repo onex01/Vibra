@@ -27,15 +27,16 @@ DMA-контракты и обработку ошибок.
 | `interrupts`, `gdt` | IDT, PIC, APIC-задел, TSS | PIC baseline; миграция не завершена |
 | `drivers/pci`, `acpi` | обнаружение x86-оборудования | частично реализовано |
 | `drivers/usb` | xHCI probe | не выполняет USB enumeration/HID |
-| `fs` | RamFS, VFS, прототипы FAT32/Ext2 | нет общего подключённого block layer |
+| `fs` | RamFS, VFS, block layer, FAT32/Ext2/NTFS (ro) | block layer + разделы + mount работают в QEMU |
 | `net` | Ethernet/ARP/IPv4/ICMP | QEMU-ориентированный, без DHCP/TCP |
 
 ## Ограничения архитектуры
 
 - ARM64-код является заглушкой и не входит в сборку/поддержку.
 - DMA-контракт и ownership страниц ещё не унифицированы.
-- Нет готового драйверного lifecycle, partition layer и автомонтирования.
+- Нет единого driver lifecycle: AHCI/NVMe/xHCI инициализируются разными путями,
+  а запись на диск пока не поддерживается ни одной ФС (только read-only).
 - GUI и `vibra/` не являются ядром release scope.
 
-Следующий архитектурный шаг — общий read-only `BlockDevice`, затем USB HID и
-реальная валидация на x86_64. См. [roadmap.md](roadmap.md).
+Следующие архитектурные шаги — PIC → LAPIC/IOAPIC и политика MSI/MSI-X, затем
+полный xHCI lifecycle и USB HID keyboard. См. [roadmap.md](roadmap.md).

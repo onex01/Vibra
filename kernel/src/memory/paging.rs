@@ -145,9 +145,26 @@ pub fn sandbox_mapping_test() -> Result<SandboxMapping, &'static str> {
     result
 }
 
+/// Включён ли 5-level paging (CR4.LA57). Limine может включить его сам — тогда
+/// корневая таблица это PML5, а не PML4, и обход начинается с битов 56:48.
+pub fn la57_enabled() -> bool {
+    let cr4: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+    }
+    cr4 & (1 << 12) != 0
+}
+
 /// Та же операция для указанной корневой PML4. Нужна следующему этапу, где
 /// будет построено новое адресное пространство, но CR3 ещё не переключён.
 pub unsafe fn translate_from_root(root_phys: u64, virtual_address: u64) -> Option<Mapping> {
+    // 5-level paging: корень — PML5, перед PML4 появляется ещё один уровень.
+    let root_phys = if la57_enabled() {
+        read_entry(root_phys, index(virtual_address, 48))? & ADDRESS_MASK
+    } else {
+        root_phys
+    };
+
     let pml4e = read_entry(root_phys, index(virtual_address, 39))?;
     let pdpte = read_entry(pml4e & ADDRESS_MASK, index(virtual_address, 30))?;
     if pdpte & ENTRY_HUGE_PAGE != 0 {
@@ -173,6 +190,44 @@ pub unsafe fn translate_from_root(root_phys: u64, virtual_address: u64) -> Optio
         page_size: PageSize::Size4KiB,
         flags: pte,
     })
+}
+
+/// Проверяет, что перечисленные виртуальные адреса отображены в адресном
+/// пространстве с корнем `root_phys` (CR3 при этом ещё не переключён).
+///
+/// Возвращает `(mapped, failed)`. Отчёт печатается построчно, чтобы на экране
+/// ноутбука без serial было видно, какой именно регион теряется.
+pub fn validate_space(root_phys: u64, regions: &[(&'static str, u64)]) -> (usize, usize) {
+    crate::println!(
+        "[PAGING] Validating {} regions against root {:#x} (LA57={})",
+        regions.len(),
+        root_phys,
+        la57_enabled()
+    );
+
+    let mut mapped = 0usize;
+    let mut failed = 0usize;
+
+    for (name, virtual_address) in regions {
+        match unsafe { translate_from_root(root_phys, *virtual_address) } {
+            Some(mapping) => {
+                mapped += 1;
+                crate::println!(
+                    "  [ OK ] {:<14} {:#018x} -> {:#012x} ({:?})",
+                    name,
+                    virtual_address,
+                    mapping.physical_address,
+                    mapping.page_size
+                );
+            }
+            None => {
+                failed += 1;
+                crate::println!("  [FAIL] {:<14} {:#018x} NOT MAPPED", name, virtual_address);
+            }
+        }
+    }
+
+    (mapped, failed)
 }
 
 #[inline]

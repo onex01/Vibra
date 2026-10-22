@@ -24,6 +24,11 @@ pub const FRAME_SIZE: usize = 4096;
 const MAX_FRAMES: usize = 16 * 1024 * 1024; // 64 ГБ (16M фреймов)
 const BITMAP_SIZE: usize = MAX_FRAMES / 8;   // 2 МБ
 
+// Первый мегабайт физической памяти не отдаём никогда: IVT/BDA (0x0000-0x04FF),
+// EBDA, VGA/ROM-окна и SMM-регионы, которые прошивка может пометить как
+// USABLE. На реальном железе выдача этих фреймов под page tables ломает boot.
+const RESERVED_LOW_MEM: usize = 0x10_0000;
+
 // Состояние, защищённое локом.
 struct PmmInner {
     free_frames: usize,
@@ -55,24 +60,34 @@ pub fn init(memory_map: &[&Entry]) {
 
         for entry in memory_map {
             // Только USABLE. BOOTLOADER_RECLAIMABLE не трогаем (см. комментарий выше).
-            if entry.type_ == MEMMAP_USABLE {
-                let base = entry.base as usize;
-                let length = entry.length as usize;
+            if entry.type_ != MEMMAP_USABLE {
+                continue;
+            }
 
-                let start_frame = base / FRAME_SIZE;
-                let frame_count = length / FRAME_SIZE;
+            let entry_end = entry.base.saturating_add(entry.length) as usize;
+            // Отсекаем первый мегабайт целиком (см. RESERVED_LOW_MEM).
+            let base = (entry.base as usize).max(RESERVED_LOW_MEM);
+            if entry_end <= base {
+                continue;
+            }
+            let length = entry_end - base;
 
-                for i in 0..frame_count {
-                    let frame_index = start_frame + i;
-                    if frame_index < MAX_FRAMES {
-                        // set_frame_free безопасна только когда мы держим лок.
-                        unsafe { set_frame_free(&mut bitmap, frame_index); }
-                        pmm.free_frames += 1;
-                        pmm.total_frames += 1;
-                    }
+            let start_frame = base / FRAME_SIZE;
+            let frame_count = length / FRAME_SIZE;
+
+            for i in 0..frame_count {
+                let frame_index = start_frame + i;
+                if frame_index < MAX_FRAMES {
+                    // set_frame_free безопасна только когда мы держим лок.
+                    unsafe { set_frame_free(&mut bitmap, frame_index); }
+                    pmm.free_frames += 1;
+                    pmm.total_frames += 1;
                 }
             }
         }
+
+        // Первое выделение начинаем сразу за зарезервированным низом памяти.
+        pmm.next_hint = RESERVED_LOW_MEM / FRAME_SIZE;
 
         let free_ram_mb = (pmm.free_frames * FRAME_SIZE) / (1024 * 1024);
         println!(

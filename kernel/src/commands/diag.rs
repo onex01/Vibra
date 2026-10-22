@@ -7,6 +7,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  pmm        - test PMM alloc/free\n");
         console.print("  paging     - test page table walker\n");
         console.print("  paging-test - test page table builder\n");
+        console.print("  vmm        - verify active address space mappings\n");
         console.print("  wxtest     - verify .rodata mapping is read-only\n");
             console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
         console.print("  panic-test - test fatal error screen (halts VM)\n");
@@ -17,6 +18,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "pmm" => diag_pmm(console),
         "paging" => diag_paging(console),
         "paging-test" => diag_paging_test(console),
+        "vmm" => diag_vmm(console),
         "wxtest" => diag_wxtest(console),
         "fault-test" => diag_fault_test(console),
         "panic-test" => panic!("diagnostic panic screen test"),
@@ -173,6 +175,47 @@ fn diag_paging_test(console: &mut Console) {
             console.print("\n");
             console.print_colored("[PAGING TEST] FAIL\n", crate::framebuffer::COLOR_RED);
         }
+    }
+}
+
+fn diag_vmm(console: &mut Console) {
+    use crate::memory::paging;
+
+    console.print_colored("[VMM DIAG] Active address space\n", crate::framebuffer::COLOR_YELLOW);
+    console.print("  CR3 root:     0x");
+    console.print_num(paging::current_root_phys() as usize);
+    console.print("\n  Kernel root:  0x");
+    console.print_num(crate::memory::vmm::new_pml4_phys() as usize);
+    console.print("\n  Paging mode:  ");
+    console.print(if paging::la57_enabled() { "5-level (LA57)\n" } else { "4-level\n" });
+    console.print("  VMM active:   ");
+    console.print(if crate::memory::vmm::is_ready() { "yes\n" } else { "no\n" });
+
+    let regions = crate::vmm_region_checks();
+    let mut failed = 0usize;
+
+    for (name, virtual_address) in &regions {
+        console.print("  ");
+        console.print(name);
+        console.print(" @ 0x");
+        console.print_num(*virtual_address as usize);
+        match paging::translate(*virtual_address) {
+            Some(mapping) => {
+                console.print(" -> 0x");
+                console.print_num(mapping.physical_address as usize);
+                console.print("\n");
+            }
+            None => {
+                failed += 1;
+                console.print(" -> NOT MAPPED\n");
+            }
+        }
+    }
+
+    if failed == 0 {
+        console.print_colored("[VMM DIAG] PASS\n", crate::framebuffer::COLOR_GREEN);
+    } else {
+        console.print_colored("[VMM DIAG] FAIL (unmapped regions above)\n", crate::framebuffer::COLOR_RED);
     }
 }
 

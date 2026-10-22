@@ -32,6 +32,39 @@ pub fn get_log() -> &'static [u8] {
     unsafe { &LOG_BUF[..actual_len] }
 }
 
+/// Записать текущее состояние лога на диск (checkpoint).
+///
+/// Вызывается на ключевых шагах загрузки, чтобы при зависании/панике на
+/// реальном железе на носителе остался хотя бы хвост лога. Пишем два сектора
+/// в зарезервированной области FAT32:
+///   * LBA 2 — первые 512 байт (начало загрузки);
+///   * LBA 3 — последние 512 байт (то, что случилось непосредственно перед
+///     падением).
+///
+/// LBA 2..3 входят в reserved sectors (обычно 32), поэтому данные ФС не
+/// затрагиваются. Если SATA-диска нет — молча выходим.
+pub fn checkpoint() {
+    let log = get_log();
+    if log.is_empty() { return; }
+
+    let port = match crate::drivers::ahci::first_port() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let mut head = [0u8; 512];
+    let n = log.len().min(512);
+    head[..n].copy_from_slice(&log[..n]);
+    let _ = crate::drivers::ahci::write_sectors(port, 2, 1, &head);
+
+    let mut tail = [0u8; 512];
+    let start = log.len().saturating_sub(512);
+    let tail_bytes = &log[start..];
+    let dst = 512 - tail_bytes.len();
+    tail[dst..].copy_from_slice(tail_bytes);
+    let _ = crate::drivers::ahci::write_sectors(port, 3, 1, &tail);
+}
+
 /// Raw запись лога на диск (через AHCI) — работает ДО init_filesystem().
 /// Записывает в сектор 2 (LBA=2) на первом SATA порту.
 /// Сектор 2 — первый свободный sector после boot sector (LBA 0) и FSInfo (LBA 1).

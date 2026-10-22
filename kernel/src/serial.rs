@@ -1,5 +1,5 @@
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 #[cfg(feature = "serial-debug")]
 use core::sync::atomic::AtomicU8;
 use alloc::vec::Vec;
@@ -10,6 +10,17 @@ const LINE_STATUS: u16 = COM1 + 5;
 const TRANSMITTER_EMPTY: u8 = 0x20;
 const DATA_READY: u8 = 0x01;
 const RX_DATA: u16 = COM1; // Receive buffer register
+const MODEM_CONTROL: u16 = COM1 + 4;
+const SCRATCH: u16 = COM1 + 7;
+
+// Сколько итераций ждать THRE, прежде чем признать UART мёртвым.
+// Без ограничения отсутствующий/сломанный COM1 вешает ядро навсегда
+// (ровно на первом println! после смены CR3 на реальном железе).
+const TX_SPIN_LIMIT: u32 = 100_000;
+
+/// Отвечает ли COM1 на loopback-пробу. На ноутбуках без физического UART
+/// порт может читаться как 0x00 (THRE всегда 0) — тогда писать в него нельзя.
+static SERIAL_PRESENT: AtomicBool = AtomicBool::new(false);
 
 /// Ring buffer для serial input (IRQ4 driven)
 const SERIAL_BUF_SIZE: usize = 256;
@@ -33,6 +44,18 @@ unsafe fn inb(port: u16) -> u8 {
 
 pub fn init() {
     unsafe {
+        // Проба UART: loopback + scratch-регистр (0x3F8+7).
+        // Только после успешной пробы можно доверять LSR.THRE.
+        outb(MODEM_CONTROL, 0x1E); // loopback: DTR|RTS|OUT1|OUT2
+        outb(SCRATCH, 0xAE);
+        let present = inb(SCRATCH) == 0xAE;
+        outb(MODEM_CONTROL, 0x0F); // выходим из loopback
+        SERIAL_PRESENT.store(present, Ordering::SeqCst);
+
+        if !present {
+            return;
+        }
+
         // Выключаем interrupts на время конфигурации
         outb(COM1 + 1, 0x00);
         // DLAB + divisor
@@ -45,6 +68,11 @@ pub fn init() {
         // Включаем receive interrupt (bit 0 = RX data ready)
         outb(COM1 + 1, 0x01);
     }
+}
+
+/// Есть ли на машине живой COM1 (loopback-проба в `init`).
+pub fn is_present() -> bool {
+    SERIAL_PRESENT.load(Ordering::Relaxed)
 }
 
 /// Вызывается из IRQ4 handler (isr_serial)
@@ -104,9 +132,19 @@ fn write_byte_without_framebuffer(b: u8) {
 }
 
 pub(crate) fn write_serial_byte(b: u8) {
+    // Без живого UART не ждём THRE вообще: на части машин порт читается как
+    // 0x00 и неограниченный спин превращается в вечное зависание ядра.
+    if !SERIAL_PRESENT.load(Ordering::Relaxed) {
+        return;
+    }
     unsafe {
+        let mut spins = 0u32;
         while (inb(LINE_STATUS) & TRANSMITTER_EMPTY) == 0 {
             core::hint::spin_loop();
+            spins += 1;
+            if spins >= TX_SPIN_LIMIT {
+                return;
+            }
         }
         outb(COM1, b);
     }

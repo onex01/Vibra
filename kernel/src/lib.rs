@@ -65,6 +65,14 @@ pub fn request_cancel() {
 #[inline]
 fn halt() { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
 
+/// Текущий RSP — VMM проверяет, что стек остаётся отображённым после смены CR3.
+#[inline]
+fn current_stack_pointer() -> u64 {
+    let rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack)) };
+    rsp
+}
+
 // Стресс-тест heap: 10k циклов alloc/drop разного размера.
 fn heap_stress() {
     use alloc::{vec, vec::Vec};
@@ -111,6 +119,47 @@ fn heap_stress() {
     }
 }
 
+/// Регионы, которые обязаны остаться отображёнными после переключения CR3.
+///
+/// Список строится из живых адресов (функция ядра, RSP, GDT/IDT/TSS, HHDM,
+/// framebuffer, куча), а не из констант — так он проверяет реальную раскладку
+/// конкретной машины. Используется при активации VMM и командой `diag vmm`.
+pub fn vmm_region_checks() -> alloc::vec::Vec<(&'static str, u64)> {
+    let hhdm_offset = memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
+    let mut regions: alloc::vec::Vec<(&'static str, u64)> = alloc::vec::Vec::new();
+
+    regions.push(("kernel.text", crate::boot as fn() -> ! as u64));
+    regions.push(("kernel.bss", core::ptr::addr_of!(CANCEL_FLAG) as u64));
+    regions.push(("kernel.stack", current_stack_pointer()));
+    regions.push(("hhdm", hhdm_offset));
+
+    if let Some(fb_resp) = FRAMEBUFFER_REQUEST.response() {
+        if let Some(fb) = fb_resp.framebuffers().first() {
+            let fb_virt = fb.address() as u64;
+            let fb_size = (fb.pitch as u64) * fb.height;
+            if fb_virt != 0 && fb_size != 0 {
+                regions.push(("framebuffer", fb_virt));
+                regions.push(("fb.last", fb_virt + fb_size - 1));
+            }
+        }
+    }
+
+    regions.push(("gdt", gdt::gdt_address()));
+    regions.push(("tss", gdt::tss_address()));
+    let (df_top, nmi_top) = gdt::ist_stack_tops();
+    regions.push(("ist.df", df_top));
+    regions.push(("ist.nmi", nmi_top));
+    regions.push(("idt", interrupts::idt::base_address()));
+
+    let (heap_start, heap_end) = memory::heap::region();
+    if heap_end > heap_start {
+        regions.push(("heap.first", heap_start as u64));
+        regions.push(("heap.last", (heap_end - 1) as u64));
+    }
+
+    regions
+}
+
 /// Публичные типы для shell loop (используются vibra)
 pub struct BootConsole {
     pub console: framebuffer::Console,
@@ -129,6 +178,10 @@ pub fn init() -> BootConsole {
     serial::init();
     framebuffer::init_boot_console();
     println!("[BOOT] Step 1: serial OK");
+    println!(
+        "[BOOT] COM1: {}",
+        if serial::is_present() { "present" } else { "absent — serial output disabled" }
+    );
     println!(
         "Vibra {} \"{}\" booting...",
         version::KERNEL_VERSION,
@@ -149,8 +202,12 @@ pub fn init() -> BootConsole {
         memory::init(mm.entries(), hhdm_offset);
     } else { println!("[FATAL] Memory map failed"); loop { halt(); } }
 
+    // Куча готова — включаем RAM-тень текстовой сетки консоли.
+    framebuffer::after_heap_init();
+
     println!("[BOOT] Step 4: Heap stress");
     heap_stress();
+    boot_log::checkpoint();
 
     println!("[BOOT] Step 5: ACPI");
     crate::acpi::init();
@@ -163,6 +220,7 @@ pub fn init() -> BootConsole {
 
     println!("[BOOT] Step 7: Drivers (PCI+AHCI)");
     drivers::init();
+    boot_log::checkpoint();
 
     println!("[BOOT] Step 7.5: Network");
     if let Some(mac) = crate::drivers::e1000::get_mac() {
@@ -176,6 +234,7 @@ pub fn init() -> BootConsole {
 
     println!("[BOOT] Step 9: Filesystem");
     fs::init_filesystem();
+    boot_log::checkpoint();
     boot_log::init();
 
     use alloc::boxed::Box;
@@ -222,15 +281,23 @@ pub fn init() -> BootConsole {
         None => { println!("[FATAL] Memory map failed for VMM"); loop { halt(); } }
     };
 
+    // GDT и IDT поднимаем ДО смены CR3: если новое адресное пространство
+    // потеряет маппинг стека/фреймбуфера, мы получим внятный PAGE FAULT
+    // с CR2/RIP вместо triple fault (тот самый «тихий» hang на ноутбуках).
+    gdt::init();
+    interrupts::init();
+
+    // Регионы, которые обязаны пережить переключение CR3.
+    let vmm_regions = vmm_region_checks();
+
     match memory::vmm::init(
         memory_map_entries, hhdm_offset, kernel_phys_base, kernel_virt_base, fb_phys, fb_size,
+        &vmm_regions,
     ) {
         Some(_pml4_phys) => println!("[VMM] Initialization complete!"),
         None => { println!("[VMM] FATAL: Failed to initialize VMM!"); loop { halt(); } }
     }
 
-    gdt::init();
-    interrupts::init();
     syscall::init();
     interrupts::enable();
     keyboard::post_init();
@@ -238,6 +305,7 @@ pub fn init() -> BootConsole {
     // Диагностическая печать ожидающих клавиш и счётчика IRQ — помогает отладить
     // ситуацию, когда ввод в shell не доходит. Выводится один раз во время boot.
     keyboard::dump_pending();
+    boot_log::checkpoint();
 
     println!("[DEBUG] Interrupts enabled, continuing boot...");
 

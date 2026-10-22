@@ -61,38 +61,101 @@ pub fn build_kernel_space(
 
     let new_pml4_virt = pmm::alloc_frame_zeroed(hhdm)? as *mut u64;
     let new_pml4_phys = new_pml4_virt as u64 - hhdm;
+
+    // Страховки: PML4 обязан быть выровнен на 4 КиБ и не лежать в первом
+    // мегабайте — иначе CR3 указывает в IVT/BDA, и машина умирает без отчёта.
+    if new_pml4_phys == 0 || new_pml4_phys & 0xFFF != 0 || new_pml4_phys < 0x10_0000 {
+        println!("[VMM] ERROR: bogus PML4 frame {:#x}", new_pml4_phys);
+        return None;
+    }
+
     let src = current_pml4_virt as *const u64;
+    let mut copied = 0usize;
 
     unsafe {
         for i in 0..512usize {
-            core::ptr::write_volatile(new_pml4_virt.add(i), core::ptr::read_volatile(src.add(i)));
+            let entry = core::ptr::read_volatile(src.add(i));
+            if entry & paging::ENTRY_PRESENT != 0 {
+                copied += 1;
+            }
+            core::ptr::write_volatile(new_pml4_virt.add(i), entry);
         }
     }
-    println!("[VMM] Copied Limine PML4 ({:#x})", new_pml4_phys);
+
+    println!(
+        "[VMM] Copied Limine {} ({:#x}), {} present entries",
+        if paging::la57_enabled() { "PML5" } else { "PML4" },
+        new_pml4_phys,
+        copied
+    );
+
+    if copied == 0 {
+        println!("[VMM] ERROR: source root has no present entries — refusing");
+        return None;
+    }
+
+    NEW_PML4.store(new_pml4_phys, Ordering::SeqCst);
     Some(new_pml4_phys)
 }
 
-pub unsafe fn activate(new_pml4_phys: PhysAddr) {
+/// Переключение CR3 — только после того, как новое адресное пространство
+/// подтвердило все критичные маппинги. Иначе `mov cr3` теряет стек/serial/GDT
+/// и машина уходит в triple fault без единого сообщения (реальный hang на
+/// ноутбуках). При провале CR3 не меняется и возвращается `false`.
+pub unsafe fn activate(new_pml4_phys: PhysAddr, regions: &[(&'static str, u64)]) -> bool {
     println!("[VMM] Activating new address space...");
     enable_efer_nxe();
     enable_cr0_wp();
 
+    let (mapped, failed) = paging::validate_space(new_pml4_phys, regions);
+    if failed != 0 || mapped == 0 {
+        println!(
+            "[VMM] FATAL: {} of {} regions unmapped in new space — refusing to switch CR3",
+            failed,
+            mapped + failed
+        );
+        println!("[VMM] Keeping Limine page tables so the boot log stays readable");
+        return false;
+    }
+
+    let old_cr3 = paging::current_root_phys();
+    println!(
+        "[VMM] All {} regions mapped; switching CR3 {:#x} -> {:#x}",
+        mapped, old_cr3, new_pml4_phys
+    );
+
     core::arch::asm!("mov cr3, {0}", in(reg) new_pml4_phys, options(nomem, nostack));
-    println!("[VMM] CR3 switched to {:#x}", new_pml4_phys);
 
     VMM_READY.store(true, Ordering::SeqCst);
+    // Печатаем сразу после switch: этот println! — первая проверка того, что
+    // через новый CR3 доступны и стек, и framebuffer, и serial.
+    println!("[VMM] CR3 switched to {:#x}", new_pml4_phys);
+    true
 }
 
 pub fn new_pml4_phys() -> u64 { NEW_PML4.load(Ordering::Relaxed) }
 pub fn is_ready() -> bool { VMM_READY.load(Ordering::SeqCst) }
+
+/// Виртуальный адрес активной PML4. При включённом LA57 корень — PML5,
+/// и настоящая PML4 для user-адресов берётся из PML5[0].
+fn pml4_table_virt() -> *mut u64 {
+    let hhdm = paging::HHDM_OFFSET.load(Ordering::Relaxed);
+    let cr3_phys = paging::current_root_phys();
+    let mut pml4_phys = cr3_phys;
+    if paging::la57_enabled() {
+        if let Some(entry) = unsafe { paging::read_entry(cr3_phys, 0) } {
+            pml4_phys = entry & paging::ADDRESS_MASK;
+        }
+    }
+    (hhdm + pml4_phys) as *mut u64
+}
 
 /// Маппинг 4KB страницы с USER битом на ВСЕХ уровнях (PML4→PDPT→PD→PT).
 /// writable: true = RW, false = RO
 /// executable: true = NX cleared, false = NX set
 pub fn map_user_pages(virt: u64, phys: u64, writable: bool, executable: bool) -> bool {
     let hhdm = paging::HHDM_OFFSET.load(Ordering::Relaxed);
-    let cr3_phys = unsafe { paging::current_root_phys() };
-    let pml4 = (hhdm + cr3_phys) as *mut u64;
+    let pml4 = pml4_table_virt();
 
     let pml4_idx = ((virt >> 39) & 0x1FF) as usize;
     let pdpt_idx = ((virt >> 30) & 0x1FF) as usize;
@@ -227,8 +290,7 @@ pub fn map_user_pages(virt: u64, phys: u64, writable: bool, executable: bool) ->
 /// Возвращает виртуальный адрес или None.
 pub fn map_user_page_fresh(phys: u64, writable: bool, executable: bool) -> Option<u64> {
     let hhdm = paging::HHDM_OFFSET.load(Ordering::Relaxed);
-    let cr3_phys = unsafe { paging::current_root_phys() };
-    let pml4 = (hhdm + cr3_phys) as *mut u64;
+    let pml4 = pml4_table_virt();
 
     unsafe {
         // Ищем свободный PML4 slot (2..255, пропускаем 0 и 1 — lower half)
@@ -287,9 +349,12 @@ pub fn init(
     kernel_virt: u64,
     framebuffer_phys: u64,
     framebuffer_size: u64,
+    regions: &[(&'static str, u64)],
 ) -> Option<PhysAddr> {
     println!("[VMM] Initializing Virtual Memory Manager...");
     let pml4 = build_kernel_space(memory_map, hhdm, kernel_phys, kernel_virt, framebuffer_phys, framebuffer_size)?;
-    unsafe { activate(pml4); }
+    if !unsafe { activate(pml4, regions) } {
+        return None;
+    }
     Some(pml4)
 }

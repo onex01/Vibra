@@ -20,13 +20,16 @@ pub struct Ext2Superblock {
     pub log_block_size: u32,
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
+    pub rev_level: u32,
+    pub inode_size: u16,
     pub magic: u16,
 }
 
 impl Ext2Superblock {
+    /// Разбор 1024-байтного суперблока (смещения — от его начала).
     fn parse(data: &[u8]) -> Result<Self, FsError> {
         if data.len() < 1024 { return Err(FsError::IoError); }
-        let magic = u16::from_le_bytes([data[1080], data[1081]]);
+        let magic = u16::from_le_bytes([data[56], data[57]]);
         if magic != EXT2_SUPER_MAGIC { return Err(FsError::InvalidPath); }
 
         Ok(Self {
@@ -39,8 +42,21 @@ impl Ext2Superblock {
             log_block_size: u32::from_le_bytes([data[24], data[25], data[26], data[27]]),
             blocks_per_group: u32::from_le_bytes([data[32], data[33], data[34], data[35]]),
             inodes_per_group: u32::from_le_bytes([data[40], data[41], data[42], data[43]]),
+            // s_rev_level (0x4C) и s_inode_size (0x58): у ext2 rev0 размер inode
+            // всегда 128 байт, у rev1 — из суперблока (обычно 128 или 256).
+            rev_level: u32::from_le_bytes([data[76], data[77], data[78], data[79]]),
+            inode_size: u16::from_le_bytes([data[88], data[89]]),
             magic,
         })
+    }
+
+    /// Реальный размер inode в байтах.
+    fn inode_size_bytes(&self) -> usize {
+        if self.rev_level >= 1 && self.inode_size >= 128 {
+            self.inode_size as usize
+        } else {
+            128
+        }
     }
 }
 
@@ -53,8 +69,11 @@ pub struct Ext2Fs {
 
 impl Ext2Fs {
     pub fn new(mut disk: Box<dyn DiskIo>) -> Result<Self, FsError> {
+        // Суперблок ext2 всегда лежит по смещению 1024 байта (сектор 2 при
+        // 512-байтных секторах). Раньше читался сектор 1, из-за чего магия
+        // 0xEF53 искалась на 512 байт раньше и монтирование всегда падало.
         let mut buf = [0u8; 1024];
-        disk.read(1, &mut buf).map_err(|_| FsError::IoError)?;
+        disk.read(2, &mut buf).map_err(|_| FsError::IoError)?;
         let superblock = Ext2Superblock::parse(&buf)?;
         let block_size = 1024 << superblock.log_block_size;
 
@@ -71,26 +90,144 @@ impl Ext2Fs {
         self.disk.lock().read(sector, buf).map_err(|_| FsError::IoError)
     }
 
-    fn read_inode_data(&self, inode_num: u32) -> Result<Vec<u8>, FsError> {
-        let group = ((inode_num - 1) / self.superblock.inodes_per_group) as usize;
-        let index = ((inode_num - 1) % self.superblock.inodes_per_group) as usize;
-        let inode_size = 128usize;
-        let inodes_per_block = self.block_size as usize / inode_size;
+    /// Блок таблицы inode для группы `group`.
+    ///
+    /// Адрес берётся из Group Descriptor (bg_inode_table, смещение 8 в дескрипторе).
+    /// Раньше здесь стояло `first_data_block + 1 + group * blocks_per_group / 32` —
+    /// это не имеет отношения к раскладке ext2 и давало мусор для любой группы > 0.
+    fn inode_table_block(&self, group: u32) -> Result<u32, FsError> {
+        let gdt_block = self.superblock.first_data_block + 1;
+        let desc_size = 32usize;
+        let descs_per_block = (self.block_size as usize / desc_size).max(1);
+        let block_for_group = gdt_block + group / descs_per_block as u32;
+        let index_in_block = (group as usize % descs_per_block) * desc_size;
 
-        // Block containing the inode table for this group
-        let inode_table_block = self.superblock.first_data_block + 1 + (group as u32) * self.superblock.blocks_per_group / 32;
-
-        let mut block_buf = vec![0u8; self.block_size as usize];
-        self.read_block(inode_table_block, &mut block_buf)?;
-
-        let offset = (index % inodes_per_block) * inode_size;
-        Ok(block_buf[offset..offset + inode_size].to_vec())
+        let mut buf = vec![0u8; self.block_size as usize];
+        self.read_block(block_for_group, &mut buf)?;
+        let table = u32::from_le_bytes([
+            buf[index_in_block + 8],
+            buf[index_in_block + 9],
+            buf[index_in_block + 10],
+            buf[index_in_block + 11],
+        ]);
+        if table == 0 { return Err(FsError::IoError); }
+        Ok(table)
     }
 
-    fn read_inode_block(&self, inode_num: u32) -> Result<u32, FsError> {
-        let data = self.read_inode_data(inode_num)?;
-        // First direct block is at offset 40 in inode structure
-        Ok(u32::from_le_bytes([data[40], data[41], data[42], data[43]]))
+    fn read_inode_data(&self, inode_num: u32) -> Result<Vec<u8>, FsError> {
+        if inode_num == 0 { return Err(FsError::NotFound); }
+        let per_group = self.superblock.inodes_per_group.max(1);
+        let group = (inode_num - 1) / per_group;
+        let index = (inode_num - 1) % per_group;
+
+        let inode_size = self.superblock.inode_size_bytes();
+        let inodes_per_block = (self.block_size as usize / inode_size).max(1);
+
+        let table = self.inode_table_block(group)?;
+        let block = table + (index as usize / inodes_per_block) as u32;
+        let offset = (index as usize % inodes_per_block) * inode_size;
+
+        let mut buf = vec![0u8; self.block_size as usize];
+        self.read_block(block, &mut buf)?;
+        Ok(buf[offset..offset + inode_size].to_vec())
+    }
+
+    /// Все блоки файла/каталога по порядку: 12 прямых + single/double indirect.
+    ///
+    /// Нулевой элемент означает «дыру» (sparse-файл): такой блок не читается,
+    /// но позиция в выходном буфере под него сохраняется.
+    fn inode_blocks(&self, inode_num: u32, size: usize) -> Result<Vec<u32>, FsError> {
+        let inode = self.read_inode_data(inode_num)?;
+        let mut blocks: Vec<u32> = Vec::new();
+        let needed = (size + self.block_size as usize - 1) / self.block_size as usize;
+        if needed == 0 { return Ok(blocks); }
+
+        let ptr = |i: usize| -> u32 {
+            let o = 40 + i * 4;
+            u32::from_le_bytes([inode[o], inode[o + 1], inode[o + 2], inode[o + 3]])
+        };
+        let per_block = (self.block_size as usize / 4).max(1);
+        let mut buf = vec![0u8; self.block_size as usize];
+        let read_ptr = |buf: &[u8], i: usize| -> u32 {
+            u32::from_le_bytes([buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]])
+        };
+
+        // 12 прямых ссылок (0 = дыра, но место занимает).
+        for i in 0..12 {
+            if blocks.len() >= needed { return Ok(blocks); }
+            blocks.push(ptr(i));
+        }
+
+        // Одиночная косвенная (i_block[12]).
+        if blocks.len() < needed {
+            let indirect = ptr(12);
+            if indirect == 0 {
+                for _ in 0..per_block {
+                    if blocks.len() >= needed { return Ok(blocks); }
+                    blocks.push(0);
+                }
+            } else {
+                self.read_block(indirect, &mut buf)?;
+                for i in 0..per_block {
+                    if blocks.len() >= needed { return Ok(blocks); }
+                    blocks.push(read_ptr(&buf, i));
+                }
+            }
+        }
+
+        // Двойная косвенная (i_block[13]).
+        if blocks.len() < needed {
+            let dindirect = ptr(13);
+            if dindirect == 0 {
+                for _ in 0..(per_block * per_block) {
+                    if blocks.len() >= needed { return Ok(blocks); }
+                    blocks.push(0);
+                }
+            } else {
+                let mut l1 = vec![0u8; self.block_size as usize];
+                self.read_block(dindirect, &mut l1)?;
+                for i in 0..per_block {
+                    if blocks.len() >= needed { return Ok(blocks); }
+                    let second = read_ptr(&l1, i);
+                    if second == 0 {
+                        for _ in 0..per_block {
+                            if blocks.len() >= needed { return Ok(blocks); }
+                            blocks.push(0);
+                        }
+                        continue;
+                    }
+                    self.read_block(second, &mut buf)?;
+                    for j in 0..per_block {
+                        if blocks.len() >= needed { return Ok(blocks); }
+                        blocks.push(read_ptr(&buf, j));
+                    }
+                }
+            }
+        }
+
+        Ok(blocks)
+    }
+
+    /// Содержимое файла/каталога целиком (без чтения за пределами размера inode).
+    fn read_inode_content(&self, inode_num: u32) -> Result<Vec<u8>, FsError> {
+        let size = self.get_inode_size(inode_num)?;
+        if size == 0 { return Ok(Vec::new()); }
+
+        let blocks = self.inode_blocks(inode_num, size)?;
+        let bs = self.block_size as usize;
+        let mut data = vec![0u8; size];
+        let mut buf = vec![0u8; bs];
+
+        for (i, b) in blocks.iter().enumerate() {
+            let off = i * bs;
+            if off >= size { break; }
+            if *b == 0 { continue; } // дыра — остаётся нулевой
+            self.read_block(*b, &mut buf)?;
+            let take = (size - off).min(bs);
+            data[off..off + take].copy_from_slice(&buf[..take]);
+        }
+
+        Ok(data)
     }
 
     fn get_inode_size(&self, inode_num: u32) -> Result<usize, FsError> {
@@ -106,40 +243,32 @@ impl Ext2Fs {
         Ok((mode & 0x4000) != 0)
     }
 
-    fn read_dir_entries(&self, inode_num: u32) -> Result<Vec<(String, bool)>, FsError> {
-        let root_block = self.read_inode_block(inode_num)?;
-        let size = self.get_inode_size(inode_num)?;
-
-        let mut data = vec![0u8; size];
-        let mut offset = 0;
-        let mut current_block = root_block;
-
-        while offset < size && current_block != 0 {
-            let mut block_buf = vec![0u8; self.block_size as usize];
-            self.read_block(current_block, &mut block_buf)?;
-            let to_copy = (size - offset).min(self.block_size as usize);
-            data[offset..offset + to_copy].copy_from_slice(&block_buf[..to_copy]);
-            offset += to_copy;
-            // For simplicity, just read first block
-            break;
-        }
-
+    /// Записи каталога: (имя, номер inode, это_каталог).
+    /// Читается ВСЁ содержимое каталога, а не только первый блок.
+    fn read_dir_entries(&self, inode_num: u32) -> Result<Vec<(String, u32, bool)>, FsError> {
+        let data = self.read_inode_content(inode_num)?;
         let mut entries = Vec::new();
-        let mut pos = 0;
+        let mut pos = 0usize;
+
         while pos + 8 <= data.len() {
             let inode = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
             let rec_len = u16::from_le_bytes([data[pos+4], data[pos+5]]) as usize;
             let name_len = data[pos+6] as usize;
             let file_type = data[pos+7];
 
-            if inode == 0 || rec_len == 0 { break; }
+            if rec_len < 8 || pos + rec_len > data.len() { break; }
 
-            if name_len > 0 && name_len <= 255 {
-                let name = core::str::from_utf8(&data[pos+8..pos+8+name_len])
-                    .unwrap_or("")
-                    .to_string();
-                let is_dir = file_type == 2;
-                entries.push((name, is_dir));
+            if inode != 0 && name_len > 0 && name_len <= 255 && pos + 8 + name_len <= data.len() {
+                let name = core::str::from_utf8(&data[pos+8..pos+8+name_len]).unwrap_or("");
+                if !name.is_empty() {
+                    // file_type: 1 = regular, 2 = dir; 0 = «неизвестно» (старый ext2).
+                    let is_dir = if file_type == 0 {
+                        self.is_inode_dir(inode).unwrap_or(false)
+                    } else {
+                        file_type == 2
+                    };
+                    entries.push((name.to_string(), inode, is_dir));
+                }
             }
 
             pos += rec_len;
@@ -149,34 +278,9 @@ impl Ext2Fs {
     }
 
     fn find_in_dir(&self, dir_inode: u32, name: &str) -> Result<u32, FsError> {
-        let entries = self.read_dir_entries(dir_inode)?;
-        for (entry_name, _) in &entries {
+        for (entry_name, inode, _) in self.read_dir_entries(dir_inode)? {
             if entry_name.eq_ignore_ascii_case(name) {
-                // Find the inode number for this entry
-                let root_block = self.read_inode_block(dir_inode)?;
-                let size = self.get_inode_size(dir_inode)?;
-                let mut block_buf = vec![0u8; self.block_size as usize];
-                self.read_block(root_block, &mut block_buf)?;
-
-                let mut pos = 0;
-                while pos + 8 <= size.min(block_buf.len()) {
-                    let inode_num = u32::from_le_bytes([
-                        block_buf[pos], block_buf[pos+1],
-                        block_buf[pos+2], block_buf[pos+3],
-                    ]);
-                    let rec_len = u16::from_le_bytes([block_buf[pos+4], block_buf[pos+5]]) as usize;
-                    let name_len = block_buf[pos+6] as usize;
-
-                    if name_len > 0 && name_len <= 255 {
-                        let entry_name = core::str::from_utf8(&block_buf[pos+8..pos+8+name_len])
-                            .unwrap_or("");
-                        if entry_name.eq_ignore_ascii_case(name) {
-                            return Ok(inode_num);
-                        }
-                    }
-                    pos += rec_len;
-                }
-                return Err(FsError::NotFound);
+                return Ok(inode);
             }
         }
         Err(FsError::NotFound)
@@ -234,16 +338,7 @@ impl FileSystem for Ext2Fs {
             return Err(FsError::IsADirectory);
         }
 
-        let size = self.get_inode_size(inode_num)?;
-        let root_block = self.read_inode_block(inode_num)?;
-
-        let mut data = vec![0u8; size];
-        if size > 0 && root_block != 0 {
-            let mut block_buf = vec![0u8; self.block_size as usize];
-            self.read_block(root_block, &mut block_buf)?;
-            let to_copy = size.min(self.block_size as usize);
-            data[..to_copy].copy_from_slice(&block_buf[..to_copy]);
-        }
+        let data = self.read_inode_content(inode_num)?;
 
         Ok(Box::new(Ext2File { data, position: 0 }))
     }
@@ -262,7 +357,7 @@ impl FileSystem for Ext2Fs {
         let entries = self.read_dir_entries(inode_num)?;
         let mut result = Vec::new();
 
-        for (name, is_dir) in &entries {
+        for (name, _inode, is_dir) in &entries {
             if name == "." || name == ".." { continue; }
             let file_type = if *is_dir { FileType::Directory } else { FileType::File };
             let perms = if *is_dir { 0o755 } else { 0o644 };

@@ -62,6 +62,7 @@ const HBA_CAP_NP: u32 = (1u32 << 5) - 1; // Number of Ports (bits 4:0)
 // GHCI bits
 const GHC_HR: u32 = 1;     // HBA Reset
 const GHC_IE: u32 = 1 << 1; // Interrupt Enable
+const GHC_AE: u32 = 1 << 31; // AHCI Enable: без него контроллер работает в IDE-режиме
 
 /// HBA Memory (MMIO region at BAR5)
 static HBA_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -84,66 +85,70 @@ unsafe fn port_write32(port: u32, offset: u64, val: u32) {
     hba_write32(0x100 + (port as u64) * 0x80 + offset, val);
 }
 
-/// Command Header — описывает одну ATA команду
+/// Command Header — описывает одну ATA команду (32 байта, AHCI 1.3 §4.2.2).
+///
+/// ВАЖНО: раньше структура содержала поля FIS (features/lba/device/sector_count)
+/// прямо в заголовке. Из-за этого PRDTL и CTBA попадали не на свои смещения
+/// (2 и 8), контроллер видел PRDTL=0/CTBA=0 и любая команда (IDENTIFY, READ,
+/// WRITE) завершалась таймаутом. Поля FIS живут только в command table.
 #[repr(C)]
 struct CommandHeader {
-    // DW0:.command
-    cfl: u8,      // Command FIS Length (dw count, 0=2dw, 1=3dw, 2=4dw)
-    pm: u8,       // Prefetchable Maximum
-    _reserved1: u8,
-    c: u8,        // Clear (busy after command)
-    // DW0: features
-    features: u8,
-    // DW1
-    lba_low: u8,
-    lba_mid: u8,
-    lba_high: u8,
-    device: u8,
-    // DW2
-    features_exp: u8,
-    lba_low_exp: u8,
-    lba_mid_exp: u8,
-    lba_high_exp: u8,
-    // DW3
-    sector_count: u16,
-    // DW4
-    _reserved2: u16,
-    // DW5-6: PRD Table Physical Address (not used for simple reads)
-    prdtl: u16,   // Physical Region Descriptor Table Length
-    prdbc: u32,   // PRD Byte Count
-    // DW7-8
-    command_table_base: u64,
+    /// DW0, байт 0: CFL[4:0], W[6], P[7].
+    cfl_w: u8,
+    /// DW0, байт 1: A[0], R[1], B[2], C[3], PMP[7:4].
+    flags: u8,
+    /// DW1: Physical Region Descriptor Table Length.
+    prdtl: u16,
+    /// DW2: Physical Region Descriptor Byte Count (заполняет контроллер).
+    prdbc: u32,
+    /// DW3: Command Table Base Address (младшие 32 бита).
+    ctba: u32,
+    /// DW4: Command Table Base Address (старшие 32 бита).
+    ctbau: u32,
+    /// DW5..DW8: reserved.
+    _reserved: [u32; 4],
 }
 
-/// FIS Register H2D — Host to Device FIS
+/// FIS Register H2D — Host to Device FIS (AHCI 1.3 §10.3.3, 20 байт).
+///
+/// Раскладка строго побайтовая: 0 = тип, 1 = C|PMP, 2 = команда, 3 = Feature,
+/// 4..6 = LBA0..2, 7 = Device, 8..10 = LBA3..5, 11 = Feature (high),
+/// 12..13 = Count, 14 = ICC, 15 = Control.
+///
+/// Раньше между `pmport` и `command` был лишний `_reserved0`, из-за чего все
+/// поля уезжали на байт: устройство получало команду 0x00 и отвечало ошибкой
+/// (TFD.ERR=1), а PxCI не сбрасывался — «identify command timeout».
 #[repr(C)]
 struct FisRegH2d {
-    fis_type: u8,     // FIS_TYPE_REG_H2D = 0x27
-    pmport: u8,       // Port multiplier, 0
-    _reserved0: u8,
-    command: u8,      // ATA command
-    features: u8,
-    lba_low: u8,
-    lba_mid: u8,
-    lba_high: u8,
-    device: u8,
-    lba_low_exp: u8,
-    lba_mid_exp: u8,
-    lba_high_exp: u8,
-    features_exp: u8,
-    sector_count_lo: u8,
-    sector_count_hi: u8,
-    _reserved1: u8,
-    control: u8,
-    _reserved2: [u8; 4],
+    fis_type: u8,     // 0: FIS_TYPE_REG_H2D = 0x27
+    c_pmp: u8,        // 1: бит 7 = C (command), биты 3..0 = PM port
+    command: u8,      // 2: ATA command
+    features: u8,     // 3: Feature (low)
+    lba_low: u8,      // 4: LBA0
+    lba_mid: u8,      // 5: LBA1
+    lba_high: u8,     // 6: LBA2
+    device: u8,       // 7: Device
+    lba_low_exp: u8,  // 8: LBA3
+    lba_mid_exp: u8,  // 9: LBA4
+    lba_high_exp: u8, // 10: LBA5
+    features_exp: u8, // 11: Feature (high)
+    sector_count_lo: u8, // 12
+    sector_count_hi: u8, // 13
+    icc: u8,          // 14: Isochronous Command Completion
+    control: u8,      // 15
+    _reserved: [u8; 4], // 16..20
 }
 
 /// PRD Entry — Physical Region Descriptor
+///
+/// DBA (base_addr) + DBAU (base_addr_hi) образуют 64-битный физический адрес.
+/// Раньше старшая половина не заполнялась, поэтому на машинах с >4 ГБ RAM
+/// (или с high-mem буферами) DMA уходил в мусорный адрес.
 #[repr(C)]
 struct PrdEntry {
     base_addr: u32,
+    base_addr_hi: u32,
     _reserved: u32,
-    _reserved2: u32,
     byte_count: u32,  // bit 31 = interrupt on completion
 }
 
@@ -223,8 +228,8 @@ pub fn init() {
             }
         }
 
-        // Enable interrupts
-        hba_write32(HBA_GHC, hba_read32(HBA_GHC) | GHC_IE);
+        // Включаем AHCI-режим и прерывания.
+        hba_write32(HBA_GHC, hba_read32(HBA_GHC) | GHC_AE | GHC_IE);
 
         // Сканируем порты
         let mut ports = AHCI_PORTS.lock();
@@ -236,46 +241,41 @@ pub fn init() {
             let det = ssts & 0x0F; // Device Detection
             let ipm = (ssts >> 8) & 0x0F; // Interface Power Management
 
-            if det == 0x03 && ipm == 0x01 {
-                // Device connected and active
-                let sig = port_read32(i, PORT_SIG);
-
-                // Пропускаем phantom порты (0xffffffff = нет реального устройства)
-                if sig == 0xFFFFFFFF {
-                    println!("[AHCI] Port {}: phantom (det=3 ipm=1 but SIG=0xFFFFFFFF), skip", i);
-                    continue;
-                }
-
-                let sig_str = match sig >> 16 {
-                    0x0000 => "ATAPI",
-                    0xEB14 => "ATAPI",
-                    0x9669 => "SEMB",
-                    0xC33C => "SATA PM",
-                    _ => "ATA/SATA",
-                };
-
-                println!("[AHCI] Port {}: {} ({:#010x})", i, sig_str, sig);
-
-                // Инициализируем порт
-                init_port(i);
-
-                ports.push(AhciPort { num: i, active: true, ssts });
-            } else {
+            if det != 0x03 || ipm != 0x01 {
                 println!("[AHCI] Port {}: no device (DET={}, IPM={})", i, det, ipm);
+                continue;
+            }
+
+            let sig = port_read32(i, PORT_SIG);
+            let sig_str = match sig >> 16 {
+                0x0000 => "ATA",
+                0xEB14 => "ATAPI",
+                0x9669 => "SEMB",
+                0xC33C => "SATA PM",
+                _ => "ATA/SATA",
+            };
+
+            // PxSIG на части контроллеров (в т.ч. ICH9 в QEMU) читается как
+            // 0xFFFFFFFF даже при подключённом диске, поэтому «фантомность»
+            // проверяем не по SIG, а командой IDENTIFY DEVICE.
+            init_port(i);
+
+            match identify_device(i) {
+                Some(info) => {
+                    println!(
+                        "[AHCI] Port {}: {} ({:#010x}), {} секторов",
+                        i, sig_str, sig, info.total_sectors
+                    );
+                    DISK_INFO.lock().push(info);
+                    ports.push(AhciPort { num: i, active: true, ssts });
+                }
+                None => {
+                    println!("[AHCI] Port {}: нет ответа на IDENTIFY (SIG={:#010x}), skip", i, sig);
+                }
             }
         }
 
         println!("[AHCI] {} active ports", ports.len());
-
-        // Определяем тип каждого диска через IDENTIFY DEVICE
-        let mut disk_infos = DISK_INFO.lock();
-        for port in ports.iter() {
-            if port.active {
-                if let Some(info) = identify_device(port.num) {
-                    disk_infos.push(info);
-                }
-            }
-        }
     }
 }
 
@@ -329,6 +329,46 @@ unsafe fn port_stop(port: u32) {
     }
 }
 
+/// Проверить, что команда завершилась без ошибки.
+///
+/// PxIS.DHRS (бит 0) выставляется при ЛЮБОМ завершении команды и ошибкой НЕ
+/// является — раньше именно эта проверка отбрасывала успешный IDENTIFY.
+/// Ошибку показывает PxTFD.ERR (бит 0), а интерфейсные сбои — старшие биты
+/// PxIS (TFE/HBF/IFS/HBDS).
+unsafe fn command_error(port_num: u32) -> Option<u32> {
+    let tfd = port_read32(port_num, PORT_TFD);
+    let is = port_read32(port_num, PORT_IS);
+    port_write32(port_num, PORT_IS, 0xFFFFFFFF);
+    if tfd & 0x01 != 0 || is & 0x7800_0000 != 0 {
+        Some(is)
+    } else {
+        None
+    }
+}
+
+/// Инициализировать Register H2D FIS для команды.
+///
+/// Бит 7 байта 1 (`pmport`) — это C (command) бит. Без него контроллер
+/// трактует FIS как control-запись, устройство молча игнорирует команду и
+/// PxCI никогда не сбрасывается — отсюда «identify command timeout».
+unsafe fn fis_command(fis: &mut FisRegH2d, command: u8) {
+    fis.fis_type = FIS_TYPE_REG_H2D;
+    fis.c_pmp = 0x80; // C = 1, port multiplier = 0
+    fis.command = command;
+}
+
+/// Заполнить Command Header для одной команды с одним PRD.
+///
+/// `write` выставляет бит W в DW0 (0 — чтение из устройства, 1 — запись).
+unsafe fn fill_cmd_header(cmd: &mut CommandHeader, write: bool, ct_phys: u64) {
+    cmd.cfl_w = 5 | if write { 0x40 } else { 0 }; // CFL=5 dwords, W при записи
+    cmd.flags = 0x08;                             // C=1: сбросить PxCI по завершении
+    cmd.prdtl = 1;                                // один PRD
+    cmd.prdbc = 0;                                // заполнит контроллер
+    cmd.ctba = ct_phys as u32;
+    cmd.ctbau = (ct_phys >> 32) as u32;
+}
+
 /// Прочитать сектор с AHCI порта
 pub fn read_sectors(port_num: u32, lba: u64, count: u16, buffer: &mut [u8]) -> bool {
     unsafe {
@@ -357,13 +397,10 @@ pub fn read_sectors(port_num: u32, lba: u64, count: u16, buffer: &mut [u8]) -> b
 
         // Заполняем FIS
         let fis = ct_ptr as *mut FisRegH2d;
-        (*fis).fis_type = FIS_TYPE_REG_H2D;
-        (*fis).command = if buffer.as_ptr() as u64 > hhdm {
-            ATA_CMD_READ_DMA_EXT
-        } else {
-            ATA_CMD_READ_DMA_EXT
-        };
-        (*fis).device = (1 << 6) | ((lba >> 24) & 0x0F) as u8; // LBA mode, high bits
+        fis_command(&mut *fis, ATA_CMD_READ_DMA_EXT);
+        // LBA48: в поле device биты 27..24 адреса НЕ кладутся (они уходят в
+        // lba_low_exp), иначе на дисках >128 ГиБ читается не тот сектор.
+        (*fis).device = 1 << 6; // LBA mode
         (*fis).lba_low = lba as u8;
         (*fis).lba_mid = (lba >> 8) as u8;
         (*fis).lba_high = (lba >> 16) as u8;
@@ -377,14 +414,11 @@ pub fn read_sectors(port_num: u32, lba: u64, count: u16, buffer: &mut [u8]) -> b
         let buf_phys = virt_to_phys(buffer.as_ptr() as u64);
         let prd = (ct_ptr as *mut u8).add(128) as *mut PrdEntry;
         (*prd).base_addr = buf_phys as u32;
+        (*prd).base_addr_hi = (buf_phys >> 32) as u32;
         (*prd).byte_count = (buffer.len() as u32) | (1 << 31); // interrupt on complete
 
         // Command Header
-        cmd.cfl = 5; // FIS is 5 dwords (20 bytes)
-        cmd.c = 1;   // Clear busy
-        cmd.prdtl = 1; // 1 PRD entry
-        cmd.prdbc = 0;
-        cmd.command_table_base = ct_phys;
+        fill_cmd_header(cmd, false, ct_phys);
 
         // Command Issue
         port_write32(port_num, PORT_CI, 1);
@@ -404,10 +438,8 @@ pub fn read_sectors(port_num: u32, lba: u64, count: u16, buffer: &mut [u8]) -> b
         }
 
         // Проверяем ошибки
-        let is = port_read32(port_num, PORT_IS);
-        if is & 1 != 0 {
-            println!("[AHCI] Port {}: error IS={:#x}", port_num, is);
-            port_write32(port_num, PORT_IS, 0xFFFFFFFF);
+        if let Some(is) = command_error(port_num) {
+            println!("[AHCI] Port {}: read error IS={:#x}", port_num, is);
             return false;
         }
 
@@ -423,6 +455,11 @@ pub fn active_port_count() -> usize {
 /// Первый активный порт
 pub fn first_port() -> Option<u32> {
     AHCI_PORTS.lock().iter().find(|p| p.active).map(|p| p.num)
+}
+
+/// Список всех активных портов (для перечисления дисков в blockdev).
+pub fn active_ports() -> Vec<u32> {
+    AHCI_PORTS.lock().iter().filter(|p| p.active).map(|p| p.num).collect()
 }
 
 /// Записать секторы на диск через AHCI
@@ -453,9 +490,8 @@ pub fn write_sectors(port_num: u32, lba: u64, count: u16, buffer: &[u8]) -> bool
 
         // FIS — WRITE DMA EXT
         let fis = ct_ptr as *mut FisRegH2d;
-        (*fis).fis_type = FIS_TYPE_REG_H2D;
-        (*fis).command = ATA_CMD_WRITE_DMA_EXT;
-        (*fis).device = (1 << 6) | ((lba >> 24) & 0x0F) as u8;
+        fis_command(&mut *fis, ATA_CMD_WRITE_DMA_EXT);
+        (*fis).device = 1 << 6; // LBA48, см. комментарий в read_sectors
         (*fis).lba_low = lba as u8;
         (*fis).lba_mid = (lba >> 8) as u8;
         (*fis).lba_high = (lba >> 16) as u8;
@@ -469,14 +505,11 @@ pub fn write_sectors(port_num: u32, lba: u64, count: u16, buffer: &[u8]) -> bool
         let buf_phys = virt_to_phys(buffer.as_ptr() as u64);
         let prd = (ct_ptr as *mut u8).add(128) as *mut PrdEntry;
         (*prd).base_addr = buf_phys as u32;
+        (*prd).base_addr_hi = (buf_phys >> 32) as u32;
         (*prd).byte_count = (buffer.len() as u32) | (1 << 31);
 
         // Command Header
-        cmd.cfl = 5;
-        cmd.c = 1;
-        cmd.prdtl = 1;
-        cmd.prdbc = 0;
-        cmd.command_table_base = ct_phys;
+        fill_cmd_header(cmd, true, ct_phys);
 
         // Command Issue
         port_write32(port_num, PORT_CI, 1);
@@ -490,31 +523,51 @@ pub fn write_sectors(port_num: u32, lba: u64, count: u16, buffer: &[u8]) -> bool
         alloc::alloc::dealloc(ct_ptr, ct_layout);
 
         if timeout == 0 { return false; }
-        let is = port_read32(port_num, PORT_IS);
-        if is & 1 != 0 {
-            port_write32(port_num, PORT_IS, 0xFFFFFFFF);
-            return false;
-        }
+        if command_error(port_num).is_some() { return false; }
         true
     }
 }
 
+/// Максимум секторов на одну AHCI-команду.
+///
+/// PRDT ограничивает один PRD 4 МиБ, но драйвер использует один PRD на команду,
+/// поэтому держим кусок в 128 секторов (64 КиБ) — этого достаточно для скорости
+/// и гарантированно влезает в любые лимиты.
+const AHCI_MAX_SECTORS: usize = 128;
+
 /// Реализация DiskIo для AHCI
+///
+/// ВАЖНО: DiskIo::read принимает буфер произвольной длины (например, целый
+/// кластер FAT32 = 4 КиБ). Раньше здесь всегда запрашивался ровно 1 сектор,
+/// из-за чего все сектора кроме первого оставались нулевыми и каталоги/файлы
+/// читались «наполовину». Теперь запрос режется на куски.
 impl crate::fs::disk::DiskIo for AhciDisk {
     fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
-        if read_sectors(self.port, sector, 1, buf) {
-            Ok(())
-        } else {
-            Err(crate::fs::vfs::FsError::IoError)
+        for (i, chunk) in buf.chunks_mut(AHCI_MAX_SECTORS * 512).enumerate() {
+            let count = (chunk.len() / 512) as u16;
+            if count == 0 || chunk.len() % 512 != 0 {
+                return Err(crate::fs::vfs::FsError::InvalidPath);
+            }
+            let lba = sector + (i * AHCI_MAX_SECTORS) as u64;
+            if !read_sectors(self.port, lba, count, chunk) {
+                return Err(crate::fs::vfs::FsError::IoError);
+            }
         }
+        Ok(())
     }
 
     fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
-        if write_sectors(self.port, sector, 1, buf) {
-            Ok(())
-        } else {
-            Err(crate::fs::vfs::FsError::IoError)
+        for (i, chunk) in buf.chunks(AHCI_MAX_SECTORS * 512).enumerate() {
+            let count = (chunk.len() / 512) as u16;
+            if count == 0 || chunk.len() % 512 != 0 {
+                return Err(crate::fs::vfs::FsError::InvalidPath);
+            }
+            let lba = sector + (i * AHCI_MAX_SECTORS) as u64;
+            if !write_sectors(self.port, lba, count, chunk) {
+                return Err(crate::fs::vfs::FsError::IoError);
+            }
         }
+        Ok(())
     }
 }
 
@@ -525,6 +578,10 @@ pub struct AhciDisk {
 impl AhciDisk {
     pub fn new(port: u32) -> Self {
         Self { port }
+    }
+
+    pub fn port(&self) -> u32 {
+        self.port
     }
 }
 
@@ -584,21 +641,17 @@ pub fn identify_device(port_num: u32) -> Option<DiskInfo> {
 
         // FIS — IDENTIFY DEVICE (ATA_CMD_IDENTIFY = 0xEC)
         let fis = ct_ptr as *mut FisRegH2d;
-        (*fis).fis_type = FIS_TYPE_REG_H2D;
-        (*fis).command = ATA_CMD_IDENTIFY;
+        fis_command(&mut *fis, ATA_CMD_IDENTIFY);
         (*fis).device = 0;
 
         // PRD — указывает на буфер с ответом
         let prd = (ct_ptr as *mut u8).add(128) as *mut PrdEntry;
         (*prd).base_addr = id_buf_phys as u32;
-        (*prd).byte_count = 511; // 512 байт, без прерывания
+        (*prd).base_addr_hi = (id_buf_phys >> 32) as u32;
+        (*prd).byte_count = 512; // 512 байт, без прерывания
 
         // Command Header
-        cmd.cfl = 5;  // FIS 5 dword'ов
-        cmd.c = 1;    // Clear busy
-        cmd.prdtl = 1;
-        cmd.prdbc = 0;
-        cmd.command_table_base = ct_phys;
+        fill_cmd_header(cmd, false, ct_phys);
 
         // Запускаем команду
         port_write32(port_num, PORT_CI, 1);
@@ -609,18 +662,24 @@ pub fn identify_device(port_num: u32) -> Option<DiskInfo> {
             timeout -= 1;
         }
 
-        let is = port_read32(port_num, PORT_IS);
         alloc::alloc::dealloc(ct_ptr, ct_layout);
 
         if timeout == 0 {
-            println!("[AHCI] Port {}: identify command timeout", port_num);
+            // Диагностика: какие биты остались — покажет, дошла ли команда.
+            let cmd_reg = port_read32(port_num, PORT_CMD);
+            let tfd = port_read32(port_num, PORT_TFD);
+            let ci = port_read32(port_num, PORT_CI);
+            let serr = port_read32(port_num, PORT_SERR);
+            println!(
+                "[AHCI] Port {}: identify command timeout (CMD={:#x} TFD={:#x} CI={:#x} SERR={:#x})",
+                port_num, cmd_reg, tfd, ci, serr
+            );
             alloc::alloc::dealloc(id_buf, id_buf_layout);
             return None;
         }
 
-        if is & 1 != 0 {
+        if let Some(is) = command_error(port_num) {
             println!("[AHCI] Port {}: identify error IS={:#x}", port_num, is);
-            port_write32(port_num, PORT_IS, 0xFFFFFFFF);
             alloc::alloc::dealloc(id_buf, id_buf_layout);
             return None;
         }

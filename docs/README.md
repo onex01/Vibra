@@ -22,7 +22,7 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | PMM, heap, paging/VMM | экспериментально, требуется стресс на железе |
 | PS/2, PIC/PIT, GDT/IDT | базовый диагностический путь |
 | PCI/ACPI | инвентаризация и частичная инициализация |
-| AHCI/NVMe, FAT32/Ext2 | прототипы; нет интегрированного block layer/mount path |
+| AHCI/NVMe, FAT32/Ext2/NTFS | AHCI + block layer + MBR/GPT + read-only mount в QEMU |
 | xHCI/HID | только диагностика контроллера, не ввод с USB |
 | e1000/RTL8139, IPv4/ICMP | QEMU-ориентированный прототип, без DHCP/TCP |
 | ARM64 / Orange Pi Zero 3 | не поддерживается |
@@ -33,6 +33,20 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 `vibra/` — legacy-исходники, не входят в текущую workspace-сборку. Каталоги
 `apps/` и GUI-код также считаются legacy-экспериментами и не входят в критерии
 релиза 0.1–0.5.
+
+## Как воспроизвести проверки
+
+| Команда | Что проверяет |
+|---|---|
+| `make build` | сборка ядра и установка его в `build/hdd.img` |
+| `make smoke` | UEFI-загрузка в QEMU, маркеры boot-пути и heartbeat |
+| `make fs-test` | FAT32/ext2/NTFS read-only + MBR-раздел через shell по serial |
+| `BOOT_ITERATIONS=10 python3 scripts/qemu-boot-matrix.py` | повторяемость загрузки |
+| `python3 scripts/check-warning-budget.py` | бюджет предупреждений компилятора |
+
+`make fs-test` (`scripts/qemu-fs-test.sh`) сам создаёт тестовые образы
+(`mkfs.fat`, `mke2fs`, `mkntfs`, `sfdisk`) и прикладывает их к QEMU как
+`sdb`…`sde`; результат пишется в `build/fs-test-status.txt`.
 
 ## Документы
 

@@ -93,24 +93,29 @@ pub struct CpuInfo {
     pub family: u32,
 }
 
-/// CPUID helper — сохраняем/восстанавливаем rbx вручную (LLVM его использует).
-/// Возвращает (eax, ebx, ecx, edx)
+/// CPUID helper.
+///
+/// `cpuid` неявно портит eax/ebx/ecx/edx, поэтому все четыре регистра обязаны
+/// быть объявлены выходами. Старый вариант передавал eax/ecx как `in(...)` и
+/// писал результат через указатель — компилятор считал входные регистры
+/// живыми после asm! и мог сгенерировать неверный код.
+/// Это ровно та последовательность, что использует core::arch::__cpuid.
 unsafe fn cpuid_raw(leaf: u32, sub: u32) -> (u32, u32, u32, u32) {
-    let mut out = [0u32; 4];
+    let eax: u32;
+    let ebx: u32;
+    let ecx: u32;
+    let edx: u32;
     asm!(
-        "push rbx",
+        "mov {0:r}, rbx",
         "cpuid",
-        "mov [{out} + 0], eax",
-        "mov [{out} + 4], ebx",
-        "mov [{out} + 8], ecx",
-        "mov [{out} + 12], edx",
-        "pop rbx",
-        in("eax") leaf,
-        in("ecx") sub,
-        out = in(reg) out.as_mut_ptr(),
-        options(nostack, nomem),
+        "xchg {0:r}, rbx",
+        out(reg) ebx,
+        inout("eax") leaf => eax,
+        inout("ecx") sub => ecx,
+        out("edx") edx,
+        options(nomem, nostack, preserves_flags),
     );
-    (out[0], out[1], out[2], out[3])
+    (eax, ebx, ecx, edx)
 }
 
 /// RDMSR
@@ -278,15 +283,30 @@ pub fn detect() -> CpuInfo {
             }
         }
 
-        // TSC frequency через platform info MSR (0xCE)
-        let platform_info = rdmsr(0xCE);
-        let ratio = (platform_info >> 8) & 0xFF;
-        let bus_freq = (platform_info >> 16) & 0xFF;
-        if ratio > 0 && bus_freq > 0 {
-            info.tsc_freq_mhz = (ratio as u64) * (bus_freq as u64);
-        } else {
-            info.tsc_freq_mhz = 2400;
+        // TSC frequency.
+        // MSR 0xCE (MSR_PLATFORM_INFO) существует ТОЛЬКО у Intel: на AMD чтение
+        // даёт #GP, и команда cpuinfo падала. Сначала пробуем CPUID leaf 0x16
+        // (Base Frequency, есть на Intel с Skylake), затем 0xCE только для Intel.
+        let mut freq_mhz = 0u64;
+
+        if max_leaf >= 0x16 {
+            let (eax, _, _, _) = cpuid_raw(0x16, 0);
+            let base_mhz = eax & 0xFFFF;
+            if base_mhz > 0 {
+                freq_mhz = base_mhz as u64;
+            }
         }
+
+        if freq_mhz == 0 && info.vendor == CpuVendor::Intel && info.features.msr {
+            let platform_info = rdmsr(0xCE);
+            let ratio = (platform_info >> 8) & 0xFF;
+            let bus_freq = (platform_info >> 16) & 0xFF;
+            if ratio > 0 && bus_freq > 0 {
+                freq_mhz = ratio * bus_freq;
+            }
+        }
+
+        info.tsc_freq_mhz = if freq_mhz > 0 { freq_mhz } else { 2400 };
     }
 
     info

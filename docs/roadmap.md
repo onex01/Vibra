@@ -57,17 +57,26 @@
 ## 0.3.0 «Hardware Core» — прерывания и блочный слой
 
 - [ ] Завершить PIC → LAPIC/IOAPIC для BSP; определить политику MSI/MSI-X.
-- [ ] Общий `BlockDevice`: bounds, timeouts, read-only, ошибки и DMA-буферы.
-- [ ] GPT/MBR parser и partition devices.
-- [ ] Один контроллер хранения: AHCI **или** NVMe, только чтение.
-- [ ] Привязать найденные диски к VFS.
+- [x] Общий `BlockDevice`: bounds, timeouts, read-only, ошибки и DMA-буферы.
+  `PartitionDisk` ограничивает окно раздела, AHCI-команды имеют spin-timeout,
+  ошибки проверяются по `PxTFD.ERR`, запись разрешена только через явный API.
+- [x] GPT/MBR parser и partition devices (`fs/partition.rs`, CRC32 для GPT).
+- [x] Один контроллер хранения: AHCI **или** NVMe, только чтение
+  (AHCI: Command Header/FIS приведены к AHCI 1.3, IDENTIFY/READ работают).
+- [x] Привязать найденные диски к VFS: `fs/blockdev.rs` регистрирует `sda`,
+  `sda1`, ... в `DiskManager`, `mount <path> auto <dev>` определяет ФС.
 
 ## 0.4.0 «Peripherals» — ввод и файловая система
 
 - [ ] Полный xHCI lifecycle: reset, DCBAA, command/event rings, enumeration.
 - [ ] USB HID boot keyboard на физической клавиатуре.
-- [ ] FAT32 read-only, затем Ext2 read-only поверх общего block layer.
-- [ ] Автомонтирование явно выбранного read-only boot-раздела.
+- [x] FAT32 read-only, затем Ext2 read-only поверх общего block layer
+  (`mount /mnt fat32 sda1`, `mount /mnt ext sda2`); NTFS read-only добавлен
+  как бонус (`fs/ntfs.rs`: MFT, data runs, $INDEX_ROOT/$INDEX_ALLOCATION).
+  Сквозная проверка — `make fs-test` (`scripts/qemu-fs-test.sh`): FAT32/ext2/NTFS
+  и MBR-раздел монтируются, `ls`/`cat` читают файлы, включая LFN.
+- [x] Автомонтирование явно выбранного read-only boot-раздела
+  (`mount /mnt auto sda1`, FAT32/ext2/NTFS определяются по сигнатурам).
 
 ## 0.5.0 «Hardware Ready» — стабильное ядро
 

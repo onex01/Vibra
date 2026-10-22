@@ -60,13 +60,14 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 }
             };
             
-            let mut disk_mgr = fs::get_disk_manager().lock();
+            let disk_mgr = fs::get_disk_manager().lock();
 
-            if let Some(_disk) = disk_mgr.get_disk(id) {
+            if let Some((name, kind, sectors, fs_type)) = disk_mgr.info(id) {
                 console.print_colored(&format!("Disk {} info:\n", id), COLOR_YELLOW);
-                console.print("  Type: RamDisk (in-memory)\n");
-                console.print("  Sector size: 512 bytes\n");
-                // For now we don't know the full size without downcasting
+                console.print(&format!("  Name: {}\n", name));
+                console.print(&format!("  Type: {}\n", kind));
+                console.print(&format!("  Size: {} sectors ({} MB)\n", sectors, (sectors * 512) / (1024 * 1024)));
+                console.print(&format!("  FS:   {}\n", fs_type));
                 console.print_colored("  Status: Ready\n", COLOR_GREEN);
             } else {
                 console.print_colored(&format!("Disk {} not found\n", id), COLOR_RED);

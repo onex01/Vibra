@@ -111,6 +111,9 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "history", help: "show command history",       func: history::run },
     Command { name: "ping",    help: "ICMP ping to IP address",    func: net::ping },
     Command { name: "ifconfig", help: "show network interface",    func: net::ifconfig },
+    Command { name: "run",     help: "run Vibra Script (.vs) file or -e code", func: run::run },
+    Command { name: "beep",    help: "PC speaker: beep <hz> [ms]",  func: beep::run },
+    Command { name: "kill",    help: "terminate process by PID",    func: kill::run },
 ];
 
 use alloc::vec::Vec;

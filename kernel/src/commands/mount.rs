@@ -5,6 +5,13 @@ use crate::framebuffer::{Console, COLOR_CYAN, COLOR_YELLOW, COLOR_GREEN, COLOR_R
 use crate::fs;
 use crate::fs::FileSystem;
 
+/// Разобрать аргумент-идентификатор диска: `sda1` или `2`.
+fn parse_disk_id(arg: &str) -> Option<usize> {
+    if let Ok(id) = arg.parse::<usize>() { return Some(id); }
+    let mgr = fs::get_disk_manager().lock();
+    mgr.find_by_name(arg)
+}
+
 /// Команда mount - список или монтирование файловых систем
 pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     if args.is_empty() {
@@ -23,15 +30,29 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         
         console.print("\n");
         console.print_colored("Available disk devices:\n", COLOR_YELLOW);
-        let count = fs::get_disk_manager().lock().count();
-        console.print(&format!("  Total disks: {}\n", count));
+        {
+            let mgr = fs::get_disk_manager().lock();
+            if mgr.count() == 0 {
+                console.print_colored("  No block devices found\n", COLOR_RED);
+            } else {
+                console.print("  ID  NAME   TYPE       SIZE       FS\n");
+                for (i, e) in mgr.entries().iter().enumerate() {
+                    console.print(&format!(
+                        "  {:<3} {:<6} {:<10} {:>6} MB  {}\n",
+                        i, e.name, e.kind, e.size_mb(), e.fs_type
+                    ));
+                }
+            }
+        }
         
         console.print("\n");
         console.print_colored("Usage:\n", COLOR_CYAN);
-        console.print("  mount                          - show mounted filesystems\n");
-        console.print("  mount <path> fat32 <disk_id>   - mount FAT32 disk\n");
-        console.print("  mount <path> ext [ro|rw]       - mount EXT2/3/4 disk\n");
-        console.print("  mount <path> ramfs             - mount RAMFS\n");
+        console.print("  mount                                - show mounted filesystems\n");
+        console.print("  mount <path> auto <disk_id|name>     - auto-detect and mount\n");
+        console.print("  mount <path> fat32 <disk_id|name>    - mount FAT32 (read/write)\n");
+        console.print("  mount <path> ext <disk_id|name>      - mount EXT2/3/4 (read-only)\n");
+        console.print("  mount <path> ntfs <disk_id|name>     - mount NTFS (read-only)\n");
+        console.print("  mount <path> ramfs                   - mount RAMFS\n");
     } else {
         console.print_colored("Mounting filesystems...\n", COLOR_YELLOW);
         
@@ -40,40 +61,70 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         
         if args.len() >= 2 {
             let fs_type = args[1];
-            match fs_type {
-                "ramfs" => {
-                    console.print(&format!("  Mounting RAMFS at {}... ", path));
-                    let mut ramfs = fs::RamFs::new();
-                    if ramfs.mount().is_ok() {
-                        if fs::mount_fs(path, Box::new(ramfs), false).is_ok() {
-                            console.print_colored("OK\n", COLOR_GREEN);
-                        } else {
-                            console.print_colored("FAILED (already mounted)\n", COLOR_RED);
-                        }
+
+            // ramfs не требует диска.
+            if fs_type == "ramfs" {
+                console.print(&format!("  Mounting RAMFS at {}... ", path));
+                let mut ramfs = fs::RamFs::new();
+                if ramfs.mount().is_ok() {
+                    if fs::mount_fs(path, Box::new(ramfs), false).is_ok() {
+                        console.print_colored("OK\n", COLOR_GREEN);
                     } else {
-                        console.print_colored("FAILED\n", COLOR_RED);
+                        console.print_colored("FAILED (already mounted)\n", COLOR_RED);
+                    }
+                } else {
+                    console.print_colored("FAILED\n", COLOR_RED);
+                }
+                return CmdResult::Ok;
+            }
+
+            // Остальные типы требуют блочное устройство.
+            let Some(dev) = args.get(2).copied() else {
+                console.print_colored(
+                    &format!("Usage: mount {} {} <disk_id|name>\n", path, fs_type),
+                    COLOR_RED,
+                );
+                return CmdResult::Ok;
+            };
+
+            let Some(disk_id) = parse_disk_id(dev) else {
+                console.print_colored(&format!("Unknown disk: {}\n", dev), COLOR_RED);
+                return CmdResult::Ok;
+            };
+
+            console.print(&format!("  Mounting {} at {} from disk {}... ", fs_type, path, dev));
+
+            let result = match fs_type {
+                "auto" => fs::mount_auto(path, disk_id).map(|s| format!("OK ({})", s)),
+                "fat32" | "vfat" => match fs::get_disk_manager().lock().open(disk_id) {
+                    Some(disk) => fs::mount_fat32(path, disk).map(|_| format!("OK (fat32)")),
+                    None => Err(fs::FsError::NotFound),
+                },
+                "ext" | "ext2" | "ext3" | "ext4" => {
+                    match fs::get_disk_manager().lock().open(disk_id) {
+                        Some(disk) => fs::mount_ext(path, disk, true).map(|_| format!("OK (ext, ro)")),
+                        None => Err(fs::FsError::NotFound),
                     }
                 }
-                "fat32" => {
-                    console.print(&format!("  Mounting FAT32 at {}... ", path));
-                    console.print_colored("NOT YET IMPLEMENTED\n", COLOR_YELLOW);
-                    console.print("  (Need real disk driver for FAT32)\n");
-                }
-                "ext" => {
-                    console.print(&format!("  Mounting EXT at {}... ", path));
-                    console.print_colored("NOT YET IMPLEMENTED\n", COLOR_YELLOW);
-                    console.print("  (Need real disk driver for EXT)\n");
-                }
+                "ntfs" => match fs::get_disk_manager().lock().open(disk_id) {
+                    Some(disk) => fs::mount_ntfs(path, disk).map(|_| format!("OK (ntfs, ro)")),
+                    None => Err(fs::FsError::NotFound),
+                },
                 _ => {
-                    console.print_colored("Unknown filesystem type: ", COLOR_RED);
-                    console.print(fs_type);
-                    console.print("\n");
+                    console.print_colored(&format!("unknown type '{}'\n", fs_type), COLOR_RED);
+                    return CmdResult::Ok;
                 }
+            };
+
+            match result {
+                Ok(msg) => console.print_colored(&format!("{}\n", msg), COLOR_GREEN),
+                Err(e) => console.print_colored(&format!("FAILED: {}\n", e), COLOR_RED),
             }
         } else {
-            console.print_colored("Usage: mount <path> <filesystem_type>\n", COLOR_RED);
+            console.print_colored("Usage: mount <path> <filesystem_type> [disk]\n", COLOR_RED);
         }
     }
     
     CmdResult::Ok
 }
+

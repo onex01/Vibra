@@ -3,7 +3,10 @@ pub mod mount;
 pub mod ramfs;
 pub mod fat32;
 pub mod ext2;
+pub mod ntfs;
 pub mod disk;
+pub mod partition;
+pub mod blockdev;
 pub mod disk_manager;
 pub mod procfs;
 pub mod sysfs;
@@ -13,6 +16,7 @@ pub use vfs::*;
 pub use ramfs::RamFs;
 pub use fat32::Fat32Fs;
 pub use ext2::Ext2Fs;
+pub use ntfs::NtfsFs;
 pub use disk::{DiskIo, RamDisk};
 pub use disk_manager::DiskManager;
 
@@ -110,6 +114,16 @@ pub fn init_filesystem() {
     // Принудительная инициализация Lazy
     Lazy::force(&VFS_MANAGER);
     Lazy::force(&DISK_MANAGER);
+
+    // Блочные устройства: SATA-диски + таблицы разделов (MBR/GPT).
+    // Вызывается после drivers::init(), поэтому AHCI уже проинициализирован.
+    let found = {
+        let mut mgr = DISK_MANAGER.lock();
+        blockdev::probe(&mut mgr)
+    };
+    if found > 0 {
+        crate::println!("[FS] block devices registered: {}", found);
+    }
 }
 
 // ==========================================
@@ -258,11 +272,11 @@ pub fn mount_fs(path: &str, fs: Box<dyn FileSystem>, readonly: bool) -> Result<(
     VFS_MANAGER.mount(path, fs, readonly)
 }
 
-/// Монтировать FAT32 диск
+/// Монтировать FAT32 диск (только чтение — запись на носитель пока запрещена)
 pub fn mount_fat32(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
     let mut fatfs = Fat32Fs::new(disk)?;
     fatfs.mount()?;
-    mount_fs(path, Box::new(fatfs), false)
+    mount_fs(path, Box::new(fatfs), true)
 }
 
 /// Монтировать EXT2/3/4 диск (опционально readonly)
@@ -270,6 +284,60 @@ pub fn mount_ext(path: &str, disk: Box<dyn DiskIo>, readonly: bool) -> Result<()
     let mut extfs = Ext2Fs::new(disk)?;
     extfs.mount()?;
     mount_fs(path, Box::new(extfs), readonly)
+}
+
+/// Монтировать NTFS раздел (только чтение)
+pub fn mount_ntfs(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
+    let mut ntfs = NtfsFs::new(disk)?;
+    ntfs.mount()?;
+    mount_fs(path, Box::new(ntfs), true)
+}
+
+/// Смонтировать раздел/диск из реестра, определив ФС автоматически.
+///
+/// Возвращает имя смонтированной ФС (`"fat32"`, `"ext2"`, `"ntfs"`).
+pub fn mount_auto(path: &str, disk_id: usize) -> Result<&'static str, FsError> {
+    // Тип ФС уже определён при probe, но если запись добавлена вручную
+    // (`test-disk ram`), определяем на месте.
+    let fs_type = {
+        let mgr = get_disk_manager().lock();
+        match mgr.info(disk_id) {
+            Some((_, _, _, t)) => t,
+            None => return Err(FsError::NotFound),
+        }
+    };
+
+    let fs_type = if fs_type == "unknown" {
+        let mut probe_disk = get_disk_manager().lock().open(disk_id).ok_or(FsError::NotFound)?;
+        partition::detect_fs_type(probe_disk.as_mut())
+    } else {
+        fs_type
+    };
+
+    let disk = get_disk_manager().lock().open(disk_id).ok_or(FsError::NotFound)?;
+
+    match fs_type {
+        "fat32" => {
+            let mut fs = Fat32Fs::new(disk)?;
+            fs.mount()?;
+            mount_fs(path, Box::new(fs), false)?;
+            Ok("fat32")
+        }
+        "ext2" => {
+            let mut fs = Ext2Fs::new(disk)?;
+            fs.mount()?;
+            mount_fs(path, Box::new(fs), true)?;
+            Ok("ext2")
+        }
+        "ntfs" => {
+            let mut fs = NtfsFs::new(disk)?;
+            fs.mount()?;
+            mount_fs(path, Box::new(fs), true)?;
+            Ok("ntfs")
+        }
+        "exfat" => Err(FsError::NotSupported),
+        _ => Err(FsError::NotSupported),
+    }
 }
 
 /// Список смонтированных ФС

@@ -67,6 +67,11 @@ impl FreeList {
         self.end.saturating_sub(self.start)
     }
 
+    // (start, end) виртуальных адресов региона.
+    fn region(&self) -> (usize, usize) {
+        (self.start, self.end)
+    }
+
     // Сумма свободных байт — обход списка.
     fn free_bytes(&self) -> usize {
         let mut sum = 0usize;
@@ -257,6 +262,11 @@ impl LockedHeap {
             (total - fl.free_bytes(), total)
         })
     }
+
+    // (start, end) виртуальных адресов региона кучи.
+    pub fn region(&self) -> (usize, usize) {
+        without_interrupts(|| self.0.lock().region())
+    }
 }
 
 unsafe impl GlobalAlloc for LockedHeap {
@@ -324,4 +334,10 @@ pub unsafe fn init(hhdm: u64) {
 /// Статистика кучи: (used, total) в байтах.
 pub fn stats() -> (usize, usize) {
     ALLOCATOR.stats()
+}
+
+/// Регион кучи: (виртуальное начало, виртуальный конец).
+/// VMM проверяет, что этот диапазон отображён в новом адресном пространстве.
+pub fn region() -> (usize, usize) {
+    ALLOCATOR.region()
 }
