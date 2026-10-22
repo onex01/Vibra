@@ -75,13 +75,6 @@ unsafe fn outb(port: u16, value: u8) {
     asm!("out dx, al", in("dx") port, in("al") value, options(nostack, preserves_flags));
 }
 
-#[inline]
-unsafe fn inb(port: u16) -> u8 {
-    let value: u8;
-    asm!("in al, dx", out("al") value, in("dx") port, options(nostack, preserves_flags));
-    value
-}
-
 // Программируем PIT (канал 0) на TIMER_HZ
 unsafe fn init_pit() {
     let divisor = (1_193_182u64 / TIMER_HZ) as u16;
@@ -142,15 +135,10 @@ pub fn ticks() -> u64 {
 // ============ Hardware IRQ handlers (APIC mode) ============
 
 extern "x86-interrupt" fn isr_keyboard(_frame: InterruptStackFrame) {
-    // Проверяем DATA_READY (bit 0) перед чтением port 0x60
-    // Если данных нет — это phantom IRQ, пропускаем
-    let status = unsafe { inb(0x64) }; // PS/2 status register
-    if status & 0x01 != 0 {
-        // Данные есть — читаем scancode
-        let scancode = unsafe { inb(0x60) };
-        println!("[IDT] kbd IRQ: scancode={:#x}", scancode);
-        crate::keyboard::handle_interrupt(scancode);
-    }
+    // Драйвер сам читает status/data и отбрасывает AUX-байты (мышь).
+    // Никакого println! из ISR: spin-локи serial/framebuffer могут быть
+    // заняты основным потоком — печать из прерывания вешает машину.
+    crate::keyboard::handle_interrupt();
     // EOI: PIC или LAPIC — зависит от того, кто управляет IRQ1
     if crate::interrupts::apic::is_active() {
         crate::interrupts::apic::eoi();

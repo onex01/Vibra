@@ -63,7 +63,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build kernel smoke run clean setup install-kernel iso usb uefi-usb run-iso run-bios qemu-usb fs-test
+.PHONY: all build kernel smoke run clean setup install-kernel iso usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test
 
 all: run
 
@@ -87,6 +87,11 @@ smoke:
 # End-to-end проверка FAT32/разделов: второй диск + команды через serial.
 fs-test:
 	@QEMU="$(QEMU)" bash scripts/qemu-fs-test.sh
+
+# Проверка ввода: PS/2 и USB HID клавиатура (QEMU monitor sendkey).
+# KEYBOARD_CASE=ps2|usb|all (по умолчанию all).
+keyboard-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-keyboard-test.sh "$(KEYBOARD_CASE)"
 
 setup:
 	@echo "==> Setting up boot image..."

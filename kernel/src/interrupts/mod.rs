@@ -50,5 +50,8 @@ where
 }
 
 pub fn halt_loop() -> ! {
+    // Маркер на debugcon: сообщение о фатальной ошибке может потеряться, если
+    // serial уже сломан, а порт 0xE9 пишется напрямую.
+    crate::serial::debugcon_println(format_args!("[HALT] halt_loop entered"));
     loop { wait(); }
 }

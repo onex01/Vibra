@@ -114,6 +114,15 @@ static SCHED_READY: AtomicBool = AtomicBool::new(false);
 /// Возвращает old_rsp (если контекст не меняется) или new_rsp.
 #[no_mangle]
 pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
+    // EOI обязателен ДО любой попытки взять SCHEDULER: если лок занят и мы
+    // вернёмся раньше, PIC не получит EOI и таймер замолчит навсегда
+    // (shell навсегда останется в hlt, heartbeat исчезает).
+    if crate::interrupts::apic::is_active() {
+        crate::interrupts::apic::eoi();
+    } else {
+        unsafe { crate::interrupts::pic::eoi(0); }
+    }
+
     let mut guard = match SCHEDULER.try_lock() {
         Some(g) => g,
         None => return ctx_ptr,
@@ -126,12 +135,10 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
     sched.tick_count += 1;
     crate::interrupts::idt::TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-    // EOI: PIC или LAPIC — зависит от того, кто управляет IRQ0
-    // Если APIC полностью активен → LAPIC EOI, иначе → PIC EOI
-    if crate::interrupts::apic::is_active() {
-        crate::interrupts::apic::eoi();
-    } else {
-        unsafe { crate::interrupts::pic::eoi(0); }
+    // Диагностика: тик-маркер идёт напрямую на debugcon, поэтому виден даже
+    // если shell перестал получать управление.
+    if sched.tick_count % 500 == 0 {
+        crate::serial::debugcon_println(format_args!("[TICK] {}", sched.tick_count));
     }
 
     // Пробуждаем спящие
@@ -433,6 +440,12 @@ pub fn current_task_id() -> Option<u32> {
 }
 
 fn idle_task_entry() {
+    // Idle-задача обязана выполняться с включёнными прерываниями: иначе
+    // первый же `hlt` с IF=0 останавливает таймер навсегда (heartbeat
+    // прекращается, shell больше никогда не получает управления).
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack));
+    }
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
     }

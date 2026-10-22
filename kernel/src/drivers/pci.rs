@@ -63,9 +63,111 @@ unsafe fn pci_read_u16(bus: u8, dev: u8, func: u8, offset: u8) -> u16 {
     ((val >> ((offset & 2) * 8)) & 0xFFFF) as u16
 }
 
+unsafe fn pci_write_u16(bus: u8, dev: u8, func: u8, offset: u8, value: u16) {
+    let aligned = offset & 0xFC;
+    let shift = (offset & 2) * 8;
+    let old = pci_read_u32(bus, dev, func, aligned);
+    let mask = !(0xFFFFu32 << shift);
+    pci_write_u32(bus, dev, func, aligned, (old & mask) | ((value as u32) << shift));
+}
+
 unsafe fn pci_read_u8(bus: u8, dev: u8, func: u8, offset: u8) -> u8 {
     let val = pci_read_u32(bus, dev, func, offset & 0xFC);
     ((val >> ((offset & 3) * 8)) & 0xFF) as u8
+}
+
+/// Приводит memory BAR0 в низкое MMIO-окно.
+///
+/// OVMF размещает 64-битный BAR xHCI на `0x8000000000` (512 ГБ), а HHDM
+/// покрывает только физическую память — обращение по такому адресу даёт
+/// page fault. Поэтому BAR выше 4 ГБ переносим в свободное окно сразу за
+/// самым высоким уже назначенным BAR.
+unsafe fn assign_bar0_if_needed(device: &mut PciDevice, next_mmio: &mut u64) {
+    // Только обычные устройства: у PCI-мостов (header type 1) offset 0x10 —
+    // это Base/Limit, а не BAR, и писать туда нельзя.
+    if device.header_type & 0x7F != 0 {
+        return;
+    }
+
+    let low = device.bar0;
+    if low == 0xFFFF_FFFF || low & 1 != 0 {
+        return; // устройства нет или это I/O BAR
+    }
+
+    let is_64 = low & 0x6 == 0x4;
+    let high = if is_64 { device.bar1 } else { 0 };
+    let address = ((high as u64) << 32) | (low as u64 & 0xFFFF_FFF0);
+
+    // Уже в низком MMIO-окне — не трогаем.
+    if address != 0 && address < 0xFEC0_0000 {
+        return;
+    }
+
+    let bus = device.bus;
+    let dev = device.dev;
+    let func = device.func;
+
+    // На время изменения BAR выключаем memory decoding.
+    let command = pci_read_u16(bus, dev, func, 0x04);
+    pci_write_u16(bus, dev, func, 0x04, command & !0x0002);
+
+    // Размер: пишем все единицы (для 64-битного BAR — в оба dword).
+    pci_write_u32(bus, dev, func, 0x10, 0xFFFF_FFFF);
+    if is_64 {
+        pci_write_u32(bus, dev, func, 0x14, 0xFFFF_FFFF);
+    }
+    let mask_low = pci_read_u32(bus, dev, func, 0x10);
+    let mask_high = if is_64 {
+        pci_read_u32(bus, dev, func, 0x14)
+    } else {
+        0
+    };
+
+    // Возвращаем исходные значения.
+    pci_write_u32(bus, dev, func, 0x10, low);
+    if is_64 {
+        pci_write_u32(bus, dev, func, 0x14, high);
+    }
+
+    let mask = ((mask_high as u64) << 32) | (mask_low as u64 & 0xFFFF_FFF0);
+    if mask == 0 || mask == u64::MAX {
+        pci_write_u16(bus, dev, func, 0x04, command);
+        return;
+    }
+    let size = (!mask).wrapping_add(1);
+    if size == 0 || size > (64 << 20) || !size.is_power_of_two() {
+        pci_write_u16(bus, dev, func, 0x04, command);
+        return;
+    }
+
+    let base = (*next_mmio + size - 1) & !(size - 1);
+    if base >= 0xFEC0_0000 || base + size > 0xFEC0_0000 {
+        pci_write_u16(bus, dev, func, 0x04, command);
+        return;
+    }
+
+    pci_write_u32(bus, dev, func, 0x10, base as u32);
+    if is_64 {
+        pci_write_u32(bus, dev, func, 0x14, (base >> 32) as u32);
+    }
+    *next_mmio = base + size;
+
+    // Memory Space + Bus Master
+    pci_write_u16(bus, dev, func, 0x04, command | 0x0002 | 0x0004);
+
+    device.bar0 = base as u32 | (low & 0xF);
+    device.bar1 = (base >> 32) as u32;
+    device.bar_phys[0] = base;
+    device.bar_phys[1] = 0;
+
+    println!(
+        "[PCI] BAR0 {:#x} -> {:#x} ({} KiB) for {:04x}:{:04x}",
+        address,
+        base,
+        size / 1024,
+        device.vendor_id,
+        device.device_id
+    );
 }
 
 /// PCI Device Descriptor
@@ -133,9 +235,14 @@ impl PciDevice {
         }
     }
 
-    /// BAR (Base Address Register) — физический адрес устройства
+    /// BAR (Base Address Register) — физический адрес устройства.
+    /// Для 64-битных memory BAR используем уже собранный `bar_phys`.
     pub fn bar0_phys(&self) -> u64 {
-        self.bar0 as u64 & 0xFFFFFFF0
+        if self.bar_phys[0] != 0 {
+            self.bar_phys[0]
+        } else {
+            self.bar0 as u64 & 0xFFFF_FFF0
+        }
     }
 
     pub fn is_io_bar(&self, bar_num: usize) -> bool {
@@ -148,7 +255,7 @@ impl PciDevice {
             5 => self.bar5,
             _ => return false,
         };
-        bar & 1 == 0 // bit 0 = 0 → memory, bit 0 = 1 → I/O
+        bar & 1 != 0 // bit 0 = 1 → I/O, bit 0 = 0 → memory
     }
 
     /// Прочитать физический адрес BAR через конфигурационное пространство PCI.
@@ -289,6 +396,23 @@ pub fn init() {
                 break;
             }
         }
+    }
+
+    // Второй проход: memory BAR'ы, которые прошивка оставила нулевыми.
+    // Без этого xHCI на OVMF вообще не виден (`BAR0 is zero`).
+    // Свободный адрес берём сразу за самым высоким уже назначенным BAR,
+    // чтобы остаться в том же (заведомо отображённом) MMIO-окне.
+    let mut next_mmio = 0x8000_0000u64;
+    for device in devices.iter() {
+        for bar in device.bar_phys {
+            if bar >= next_mmio && bar < 0xFEC0_0000 {
+                next_mmio = bar;
+            }
+        }
+    }
+    next_mmio = (next_mmio + 0x100000) & !0xFFFFF;
+    for device in devices.iter_mut() {
+        unsafe { assign_bar0_if_needed(device, &mut next_mmio) };
     }
 
     println!("[PCI] Found {} devices on {} bus(es)", count, buses_scanned);

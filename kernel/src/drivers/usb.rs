@@ -146,55 +146,26 @@ pub fn init() {
             let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
             let mmio_virt = hhdm + bar0_phys;
 
-            // Читаем Capability Registers и пробуем минимальный reset xHCI
-            unsafe {
-                let cap_length = core::ptr::read_volatile(mmio_virt as *const u8) as u64;
-                let hci_version = core::ptr::read_volatile((mmio_virt + 0x02) as *const u16);
+            // Capability registers: версия и число портов (HCSPARAMS1 bits 24-31).
+            let (hci_version, port_count) = unsafe {
+                let cap0 = core::ptr::read_volatile(mmio_virt as *const u32);
+                let cap_length = (cap0 & 0xFF) as u64;
+                let hci_version = (cap0 >> 16) as u16;
                 let hcsparams1 = core::ptr::read_volatile((mmio_virt + 0x04) as *const u32);
-                let port_count = (hcsparams1 & 0xFF) as u8;
+                let port_count = ((hcsparams1 >> 24) & 0xFF) as u8;
 
-                let version_major = (hci_version >> 8) as u8;
-                let version_minor = (hci_version & 0xFF) as u8;
-
-                println!("[USB] [{:02X}:{:02X}.{}] {:04X}:{:04X} xHCI v{}.{} ({} ports, CAPLEN={})",
+                println!(
+                    "[USB] [{:02X}:{:02X}.{}] {:04X}:{:04X} xHCI v{}.{} ({} ports, CAPLEN={})",
                     pci_dev.bus, pci_dev.dev, pci_dev.func,
                     pci_dev.vendor_id, pci_dev.device_id,
-                    version_major, version_minor,
-                    port_count, cap_length);
+                    hci_version >> 8, hci_version & 0xFF,
+                    port_count, cap_length
+                );
+                (hci_version, port_count)
+            };
 
-                // Операционные регистры начинаются по смещению cap_length
-                let op_base = mmio_virt + cap_length as u64;
-
-                // USBCMD offset 0x00 (u32). HCRST = bit 1.
-                let usbcmd_ptr = op_base as *mut u32;
-                let usbsts_ptr = (op_base + 0x04) as *mut u32;
-
-                // Попробуем сбросить контроллер (HCRST)
-                let mut cmd = core::ptr::read_volatile(usbcmd_ptr);
-                core::ptr::write_volatile(usbcmd_ptr, cmd | 0x02);
-                // Ждём до 10000 итераций
-                let mut waited = 0;
-                while (core::ptr::read_volatile(usbcmd_ptr) & 0x02) != 0 {
-                    waited += 1;
-                    if waited > 10000 {
-                        println!("[USB] xHCI reset timeout (waited {})", waited);
-                        break;
-                    }
-                }
-
-                let final_cmd = core::ptr::read_volatile(usbcmd_ptr);
-                let sts = core::ptr::read_volatile(usbsts_ptr);
-                println!("[USB] xHCI reset complete: USBCMD={:#x} USBSTS={:#x}", final_cmd, sts);
-                // Попробуем прочитать PORTSC регистры (на offset 0x400 от op_base)
-                let portsc_base = op_base + 0x400;
-                for p in 0..port_count {
-                    let port_off = portsc_base + (p as u64) * 0x10;
-                    let portsc = core::ptr::read_volatile(port_off as *const u32);
-                    // bit 0 = Current Connect Status (CCS)
-                    let ccs = portsc & 0x1 != 0;
-                    println!("[USB] port {}: PORTSC={:#x} connected={}", p+1, portsc, ccs);
-                }
-
+            // Полный lifecycle: BIOS handoff, reset, DCBAA, rings, enumeration.
+            if crate::drivers::usb::xhci::init_controller(bar0_phys, mmio_virt) {
                 controllers.push(UsbController {
                     vendor: pci_dev.vendor_id,
                     device: pci_dev.device_id,
@@ -202,18 +173,6 @@ pub fn init() {
                     port_count,
                     version: hci_version,
                 });
-                // Initialize xHCI admin queues for this controller
-                crate::drivers::usb::xhci::init_controller(bar0_phys, mmio_virt);
-                // Allocate and set up Event Ring / ERST structures (logging only for now)
-                crate::drivers::usb::xhci::init_event_ring(bar0_phys, mmio_virt);
-                // Quick poll of Event Ring memory for diagnostics
-                crate::drivers::usb::xhci::poll_event_ring();
-                // Quick poll of admin completion queue for debug (one-shot)
-                crate::drivers::usb::xhci::poll_admin_acq();
-                // Submit a dummy TRB into ASQ (local write only) for debug
-                crate::drivers::usb::xhci::submit_dummy_command();
-                // Try writing a proper Enable Slot TRB (still local, no doorbell)
-                crate::drivers::usb::xhci::submit_enable_slot();
             }
         } else {
             println!("[USB] [{:02X}:{:02X}.{}] I/O BAR, skipping (memory BAR required)",
@@ -223,7 +182,6 @@ pub fn init() {
 
     println!("[USB] {} controller(s) initialized", controllers.len());
 
-    // Инициализация подсистемы HID (минимальная) — регистрируем тестовую строку
-    // и готовим пространство для дальнейшей реализации HID.
+    // HID: отчёты приходят из xhci::poll_keyboard().
     crate::drivers::usb::hid::init();
 }

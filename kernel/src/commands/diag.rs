@@ -9,6 +9,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  paging-test - test page table builder\n");
         console.print("  vmm        - verify active address space mappings\n");
         console.print("  wxtest     - verify .rodata mapping is read-only\n");
+        console.print("  keyboard   - PS/2 controller state and IRQ counters\n");
             console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
         console.print("  panic-test - test fatal error screen (halts VM)\n");
         return CmdResult::Ok;
@@ -20,6 +21,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "paging-test" => diag_paging_test(console),
         "vmm" => diag_vmm(console),
         "wxtest" => diag_wxtest(console),
+        "keyboard" => diag_keyboard(console),
         "fault-test" => diag_fault_test(console),
         "panic-test" => panic!("diagnostic panic screen test"),
         _ => {
@@ -265,4 +267,44 @@ fn diag_fault_test(console: &mut Console) {
 extern "C" {
     static __rodata_start: u8;
     fn _start();
+}
+
+/// Состояние PS/2-контроллера: помогает понять, почему на ноутбуке нет ввода.
+fn diag_keyboard(console: &mut Console) {
+    let st = crate::keyboard::status();
+    console.print_colored("[KEYBOARD TEST]\n", crate::framebuffer::COLOR_YELLOW);
+    console.print("  controller: ");
+    console.print(if st.present { "present\n" } else { "absent (no i8042)\n" });
+    if st.present {
+        console.print("  config byte: ");
+        console.print(&alloc::format!("{:#04x}\n", st.config));
+        console.print("  scan code set: ");
+        console.print_num(if st.scan_set2 { 2 } else { 1 });
+        console.print("\n");
+    }
+    console.print("  IRQ1 count: ");
+    console.print_num(st.irq_count as usize);
+    console.print("\n  modifiers: ");
+    console.print(if st.shift { "shift " } else { "" });
+    console.print(if st.ctrl { "ctrl " } else { "" });
+    console.print(if st.alt { "alt" } else { "" });
+    console.print("\n  queued PS/2 bytes: ");
+    console.print_num(st.queued);
+    console.print("\n  queued USB HID keys: ");
+    console.print_num(st.hid_queued);
+    console.print("\n  dropped scancodes: ");
+    console.print_num(st.dropped as usize);
+    console.print("\n");
+
+    let usb = crate::drivers::usb::xhci::keyboard_status();
+    console.print("  xHCI: ");
+    console.print(&usb);
+    console.print("\n");
+
+    if st.present && st.irq_count == 0 {
+        console.print_colored(
+            "  hint: polling fallback is active; IRQ1 is not being delivered\n",
+            crate::framebuffer::COLOR_YELLOW,
+        );
+    }
 }

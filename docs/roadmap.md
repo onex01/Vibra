@@ -34,6 +34,9 @@
   защищён от IRQ4, PIT fallback приведён к 100 Hz. Ручной QEMU+xHCI прогон жил
   75 секунд, дошёл до shell и записал 12 heartbeat. Heartbeat выведен на QEMU
   debugcon, COM1 оставлен для shell; после 14 heartbeat `diag pmm` прошёл по COM.
+  Дополнительно: `tick_and_switch` шлёт EOI **до** попытки взять `SCHEDULER` —
+  иначе занятый лок приводил к потере EOI, таймер замолкал навсегда, а shell
+  навсегда оставался в `hlt`. Добавлены маркеры `[TICK]`/`[HALT]` на debugcon.
 - [x] QEMU+xHCI heartbeat smoke и panic/page-fault checks добавлены в CI;
   первый CI run ожидается.
 - [x] Warning budgets enforced in CI: debug ≤107, no-default ≤110.
@@ -68,8 +71,19 @@
 
 ## 0.4.0 «Peripherals» — ввод и файловая система
 
-- [ ] Полный xHCI lifecycle: reset, DCBAA, command/event rings, enumeration.
-- [ ] USB HID boot keyboard на физической клавиатуре.
+- [x] Полный xHCI lifecycle: BIOS handoff, reset, DCBAA + scratchpad,
+  command/event rings (ERST), port reset, Enable Slot, Address Device,
+  GET_DESCRIPTOR, SET_CONFIGURATION, Configure Endpoint и interrupt IN.
+  Проверено в QEMU (`make keyboard-test`: `[xHCI] HID keyboard ready`,
+  HID-отчёты доходят до драйвера).
+- [x] USB HID boot keyboard: 8-байтовые отчёты разбираются в
+  `drivers/usb/hid.rs` и инжектятся в общий keyboard-слой. Физическая
+  клавиатура ещё не проверена — нужен boot с USB-носителя на ноутбуке.
+- [x] PS/2-клавиатура на реальном железе: ACK/self-test 8042, включение
+  scanning (0xF4) и порта (0xAE), декодирование Scan Code Set 2 при
+  отсутствии трансляции, polling fallback через порт 0x64 (работает без
+  IRQ1), отсутствие `println!` из ISR (дедлок на spin-локах). Проверено
+  в QEMU: `make keyboard-test` → `KEYBOARD_CASE=ps2`.
 - [x] FAT32 read-only, затем Ext2 read-only поверх общего block layer
   (`mount /mnt fat32 sda1`, `mount /mnt ext sda2`); NTFS read-only добавлен
   как бонус (`fs/ntfs.rs`: MFT, data runs, $INDEX_ROOT/$INDEX_ALLOCATION).

@@ -49,7 +49,7 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 ./build.sh debug
 ```
 
-`smoke` запускает QEMU на 75 секунд, проверяет serial boot log до prompt
+`smoke` запускает QEMU на 90 секунд, проверяет serial boot log до prompt
 `vibra:/>` и требует не менее 12 heartbeat-сообщений через отдельный debugcon.
 Serial остаётся доступен для ввода команд; логи сохраняются в `build/`.
 

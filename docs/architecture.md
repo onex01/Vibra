@@ -19,14 +19,30 @@ Vibra Kernel 0.2.0-rc.1 — экспериментальное модульно�
 диски и NIC должны быть отделены от boot-critical пути и получить тайм-ауты,
 DMA-контракты и обработку ошибок.
 
+### Ввод на реальном ноутбуке
+
+Встроенная клавиатура ноутбука почти всегда подключена к i8042 (EC), а не к USB.
+`keyboard.rs` поэтому не полагается на IRQ1:
+
+- `init()` выполняет self-test 8042, включает порт (0xAE) и scanning (0xF4),
+  проверяет, что контроллер принял translation в Scan Code Set 1;
+- при отказе translation драйвер декодирует Scan Code Set 2;
+- `poll_key()` дополнительно опрашивает порт 0x64 (polling fallback), поэтому
+  ввод работает, даже если IRQ1 не доставляется (ACPI/EC, IOAPIC вместо PIC);
+- ISR не вызывает `println!`: serial/framebuffer используют spin-локи, и печать
+  из прерывания вешает машину, если лок уже взят основным кодом.
+
+`diag keyboard` печатает состояние контроллера, scan set, счётчик IRQ1, очереди
+PS/2 и USB HID и число HID-отчётов.
+
 ## Подсистемы
 
 | Блок | Роль | Статус |
 |---|---|---|
 | `memory` | PMM, heap, page tables, VMM | экспериментальный |
 | `interrupts`, `gdt` | IDT, PIC, APIC-задел, TSS | PIC baseline; миграция не завершена |
-| `drivers/pci`, `acpi` | обнаружение x86-оборудования | частично реализовано |
-| `drivers/usb` | xHCI probe | не выполняет USB enumeration/HID |
+| `drivers/pci`, `acpi` | обнаружение x86-оборудования | PCI + ACPI; BAR выше 4 ГБ переносятся в низкое MMIO-окно |
+| `drivers/usb` | xHCI lifecycle + HID boot keyboard | enumeration и HID-отчёты работают в QEMU |
 | `fs` | RamFS, VFS, block layer, FAT32/Ext2/NTFS (ro) | block layer + разделы + mount работают в QEMU |
 | `net` | Ethernet/ARP/IPv4/ICMP | QEMU-ориентированный, без DHCP/TCP |
 
@@ -42,4 +58,6 @@ DMA-контракты и обработку ошибок.
   и не ставит NX-биты в PTE — W^X деградирует, но boot продолжается.
 
 Следующие архитектурные шаги — PIC → LAPIC/IOAPIC и политика MSI/MSI-X, затем
-полный xHCI lifecycle и USB HID keyboard. См. [roadmap.md](roadmap.md).
+DMA-контракт для блочных драйверов и DHCP/ICMP. USB HID keyboard и xHCI
+lifecycle реализованы (см. [usb_progress.md](usb_progress.md)), но ещё не
+подтверждены на физической машине. См. [roadmap.md](roadmap.md).

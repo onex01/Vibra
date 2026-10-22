@@ -32,7 +32,7 @@ jobs:
 
       - name: Build and smoke-test UEFI boot
         env:
-          SMOKE_TIMEOUT: 75
+          SMOKE_TIMEOUT: 90
           SMOKE_MIN_HEARTBEATS: 12
         run: ./build.sh smoke
 

@@ -2,12 +2,23 @@
 
 use alloc::vec::Vec;
 
+/// Interrupt Source Override (MADT type 2): legacy IRQ → GSI.
+#[derive(Debug, Clone, Copy)]
+pub struct IsoEntry {
+    pub source: u8,
+    pub gsi: u32,
+    /// MPS INTI flags: bits 0-1 polarity (0=bus, 1=active high, 3=active low),
+    /// bits 2-3 trigger mode (0=bus, 1=edge, 3=level).
+    pub flags: u16,
+}
+
 /// Результат парсинга MADT.
 pub struct MadtInfo {
     pub lapic_addr: u32,
     pub io_apic_addr: Option<u32>,
     pub io_apic_id: Option<u8>,
-    pub iso: Vec<(u8, u32)>,
+    pub io_apic_gsi_base: u32,
+    pub iso: Vec<IsoEntry>,
 }
 
 /// Читает unaligned u32 через copy (safe для невыровненных адресов)
@@ -51,6 +62,7 @@ pub fn parse(madt_phys: usize) -> Option<MadtInfo> {
         lapic_addr,
         io_apic_addr: None,
         io_apic_id: None,
+        io_apic_gsi_base: 0,
         iso: Vec::new(),
     };
 
@@ -71,16 +83,24 @@ pub fn parse(madt_phys: usize) -> Option<MadtInfo> {
                 // IO APIC: id(u8@2), reserved(u8@3), addr(u32@4), gsi_base(u32@8)
                 let ioapic_id = unsafe { core::ptr::read_volatile((ptr + 2) as *const u8) };
                 let ioapic_addr = unsafe { read_u32(ptr + 4) };
+                let gsi_base = unsafe { read_u32(ptr + 8) };
                 info.io_apic_addr = Some(ioapic_addr);
                 info.io_apic_id = Some(ioapic_id);
+                info.io_apic_gsi_base = gsi_base;
             }
             2 => {
-                // Interrupt Source Override: bus(u8@2), source(u8@3), gsi(u32@4)
+                // Interrupt Source Override: bus(u8@2), source(u8@3),
+                // gsi(u32@4), flags(u16@8)
                 let bus = unsafe { core::ptr::read_volatile((ptr + 2) as *const u8) };
                 let source = unsafe { core::ptr::read_volatile((ptr + 3) as *const u8) };
                 let gsi = unsafe { read_u32(ptr + 4) };
+                let flags = if record_len >= 10 {
+                    unsafe { core::ptr::read_unaligned((ptr + 8) as *const u16) }
+                } else {
+                    0
+                };
                 if bus == 0 {
-                    info.iso.push((source, gsi));
+                    info.iso.push(IsoEntry { source, gsi, flags });
                 }
             }
             5 => {

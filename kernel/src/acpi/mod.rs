@@ -18,10 +18,12 @@ pub struct AcpiInfo {
     pub lapic_addr: Option<u32>,
     pub io_apic_addr: Option<u32>,
     pub io_apic_id: Option<u8>,
-    pub iso: Vec<(u8, u32)>,
+    pub iso: Vec<madt::IsoEntry>,
     pub mcfg_base: Option<u64>,
     pub hpet_base: Option<u64>,
     pub hpet_comparator_count: Option<u8>,
+    /// FADT IA-PC Boot Architecture Flags (offset 109). Bit 1 = 8042 present.
+    pub boot_arch_flags: Option<u16>,
 }
 
 pub static ACPI_INFO: Mutex<Option<AcpiInfo>> = Mutex::new(None);
@@ -29,6 +31,18 @@ pub static ACPI_INFO: Mutex<Option<AcpiInfo>> = Mutex::new(None);
 /// Получить текущий AcpiInfo (блокировка).
 pub fn get() -> spin::MutexGuard<'static, Option<AcpiInfo>> {
     ACPI_INFO.lock()
+}
+
+/// Есть ли на машине i8042 (PS/2) контроллер по данным FADT.
+///
+/// Если ACPI/FADT недоступны — возвращаем `true`: лучше попробовать
+/// проинициализировать контроллер, чем молча остаться без клавиатуры.
+pub fn has_8042() -> bool {
+    let info = ACPI_INFO.lock();
+    match info.as_ref().and_then(|i| i.boot_arch_flags) {
+        Some(flags) => flags & 0x0002 != 0,
+        None => true,
+    }
 }
 
 /// Инициализация ACPI: RSDP → XSDT → MADT/MCFG/HPET.
@@ -79,6 +93,7 @@ pub fn init() {
         mcfg_base: None,
         hpet_base: None,
         hpet_comparator_count: None,
+        boot_arch_flags: None,
     };
 
     for &table_phys in &tables {
@@ -101,6 +116,20 @@ pub fn init() {
                         info.io_apic_addr,
                         info.io_apic_id,
                         info.iso.len()
+                    );
+                }
+            }
+            b"FACP" => {
+                // IA-PC Boot Architecture Flags: offset 109, bit 1 = 8042.
+                if header.length as usize >= 111 {
+                    let flags = unsafe {
+                        core::ptr::read_unaligned((table_virt + 109) as *const u16)
+                    };
+                    info.boot_arch_flags = Some(flags);
+                    crate::println!(
+                        "[ACPI] FADT boot architecture flags: {:#06x} (8042: {})",
+                        flags,
+                        if flags & 0x0002 != 0 { "yes" } else { "no" }
                     );
                 }
             }

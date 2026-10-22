@@ -1,517 +1,1044 @@
+// xHCI — рабочий lifecycle для BSP: BIOS handoff, reset, DCBAA, command ring,
+// event ring (ERST), перечисление портов и USB HID boot keyboard.
+//
+// Драйвер намеренно polling-based: во время boot прерывания ещё выключены,
+// а на реальном железе MSI/MSI-X для xHCI требует отдельной инфраструктуры.
+// `poll_keyboard()` вызывается из `keyboard::poll_key()` и добирает отчёты.
+//
+// Все ожидания ограничены по числу итераций: неотвечающий контроллер не должен
+// вешать boot (это уже случалось с EHCI/BIOS handoff на ноутбуках).
+
+use crate::memory::dma::DmaBuffer;
 use crate::println;
+use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
-use core::sync::atomic::{Ordering, AtomicBool};
 
-// Маленькая инфраструктура xHCI: выделение Admin Submission/Completion queues
-// и запись AQA/ASQ/ACQ регистров. Это подготовительный этап для отправки
-// команд (Enable Slot и т.д.).
+const TRB_SIZE: usize = 16;
+const RING_TRBS: usize = 256;
 
-pub struct XhciController {
-    pub vendor: u16,
-    pub device: u16,
-    pub bar_phys: u64,
-    pub mmio_base_virt: u64,
-    pub op_base_virt: u64,
-    pub asq_phys: usize,
-    pub acq_phys: usize,
-    pub asq_virt: usize,
-    pub acq_virt: usize,
-    pub event_ring_phys: Option<usize>,
-    pub event_ring_virt: Option<usize>,
-    pub erst_phys: Option<usize>,
-    pub erst_virt: Option<usize>,
-    pub cap_rt_off: Option<u32>,
-    pub asq_idx: usize,
-    pub asq_cycle: u8,
-    pub asq_size: usize,
+// TRB types (xHCI 1.1, table 6-91)
+const TRB_NORMAL: u32 = 1;
+const TRB_SETUP_STAGE: u32 = 2;
+const TRB_DATA_STAGE: u32 = 3;
+const TRB_STATUS_STAGE: u32 = 4;
+const TRB_LINK: u32 = 6;
+const TRB_ENABLE_SLOT: u32 = 9;
+const TRB_ADDRESS_DEVICE: u32 = 11;
+const TRB_CONFIGURE_ENDPOINT: u32 = 12;
+const TRB_TRANSFER_EVENT: u32 = 32;
+const TRB_COMMAND_COMPLETION: u32 = 33;
+const TRB_PORT_STATUS_CHANGE: u32 = 34;
+
+const CC_SUCCESS: u32 = 1;
+const CC_SHORT_PACKET: u32 = 13;
+
+// Operational registers
+const USBCMD: u64 = 0x00;
+const USBSTS: u64 = 0x04;
+const CRCR: u64 = 0x18;
+const DCBAAP: u64 = 0x30;
+const CONFIG: u64 = 0x38;
+
+const USBCMD_RS: u32 = 1 << 0;
+const USBCMD_HCRST: u32 = 1 << 1;
+const USBSTS_HCH: u32 = 1 << 0;
+const USBSTS_CNR: u32 = 1 << 11;
+
+// Interrupter 0 (runtime)
+const IR0_ERSTSZ: u64 = 0x28;
+const IR0_ERSTBA: u64 = 0x30;
+const IR0_ERDP: u64 = 0x38;
+
+// PORTSC
+const PORTSC_CCS: u32 = 1 << 0;
+const PORTSC_PED: u32 = 1 << 1;
+const PORTSC_PR: u32 = 1 << 4;
+const PORTSC_PP: u32 = 1 << 9;
+const PORTSC_SPEED_SHIFT: u32 = 10;
+const PORTSC_PRC: u32 = 1 << 21;
+const PORTSC_WPR: u32 = 1 << 31;
+/// Write-1-to-clear bits (CSC..CEC).
+const PORTSC_RW1C: u32 = 0x7F << 17;
+
+const SPEED_FULL: u32 = 1;
+const SPEED_LOW: u32 = 2;
+const SPEED_HIGH: u32 = 3;
+
+fn speed_name(speed: u32) -> &'static str {
+    match speed {
+        SPEED_FULL => "full",
+        SPEED_LOW => "low",
+        SPEED_HIGH => "high",
+        4 => "super",
+        _ => "unknown",
+    }
 }
 
-fn hhdm() -> u64 {
-    crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed)
+#[inline]
+unsafe fn rd32(addr: u64) -> u32 {
+    core::ptr::read_volatile(addr as *const u32)
 }
 
-fn alloc_contiguous_page() -> Option<usize> {
-    // Allocate a single 4K frame contiguous (phys address)
-    crate::memory::pmm::alloc_contiguous(1)
+#[inline]
+unsafe fn wr32(addr: u64, value: u32) {
+    core::ptr::write_volatile(addr as *mut u32, value);
 }
 
-/// Zeroed физический фрейм (возвращает phys). Нужен для DCBAA/CRCR: контроллер
-/// читает их сам, поэтому виртуальный адрес не годится.
-fn alloc_zeroed_frame() -> Option<u64> {
-    let phys = alloc_contiguous_page()? as u64;
-    let virt = hhdm() + phys;
-    unsafe {
-        let words = virt as *mut u64;
-        for i in 0..(crate::memory::pmm::FRAME_SIZE / 8) {
-            core::ptr::write_volatile(words.add(i), 0);
+#[inline]
+unsafe fn wr64(addr: u64, value: u64) {
+    wr32(addr, value as u32);
+    wr32(addr + 4, (value >> 32) as u32);
+}
+
+/// Выделяет zeroed DMA-буфер и «забывает» его: буферы живут до перезагрузки,
+/// а хранить `DmaBuffer` в статике нельзя (NonNull не Send).
+fn alloc_dma(size: usize) -> Option<(u64, u64)> {
+    let buffer = DmaBuffer::allocate(size)?;
+    let phys = buffer.physical_address() as u64;
+    let virt = buffer.as_ptr() as u64;
+    core::mem::forget(buffer);
+    Some((phys, virt))
+}
+
+/// Небольшая задержка без таймера (USB init идёт до timer::init).
+fn delay(spins: u32) {
+    for _ in 0..spins {
+        core::hint::spin_loop();
+    }
+}
+
+/// Кольцо TRB (command / event / endpoint).
+struct Ring {
+    phys: u64,
+    virt: u64,
+    /// Индекс следующего TRB для записи (producer) или чтения (consumer).
+    index: usize,
+    /// Producer/consumer Cycle State.
+    cycle: bool,
+}
+
+impl Ring {
+    fn new() -> Option<Ring> {
+        let (phys, virt) = alloc_dma(RING_TRBS * TRB_SIZE)?;
+        Some(Ring { phys, virt, index: 0, cycle: true })
+    }
+
+    unsafe fn write_trb(&self, index: usize, param: u64, status: u32, control: u32) {
+        let base = (self.virt as *mut u32).add(index * 4);
+        core::ptr::write_volatile(base, param as u32);
+        core::ptr::write_volatile(base.add(1), (param >> 32) as u32);
+        core::ptr::write_volatile(base.add(2), status);
+        core::ptr::write_volatile(base.add(3), control);
+    }
+
+    unsafe fn read_trb(&self, index: usize) -> (u64, u32, u32) {
+        let base = (self.virt as *const u32).add(index * 4);
+        let lo = core::ptr::read_volatile(base) as u64;
+        let hi = core::ptr::read_volatile(base.add(1)) as u64;
+        let status = core::ptr::read_volatile(base.add(2));
+        let control = core::ptr::read_volatile(base.add(3));
+        ((hi << 32) | lo, status, control)
+    }
+
+    /// Инициализация Link TRB на последнем слоте (замыкает кольцо).
+    unsafe fn init_link(&mut self) {
+        self.write_trb(
+            RING_TRBS - 1,
+            self.phys,
+            0,
+            (TRB_LINK << 10) | (1 << 1) | self.cycle as u32, // TC=1
+        );
+    }
+
+    /// Записывает TRB с текущим cycle bit и сдвигает producer.
+    unsafe fn push(&mut self, param: u64, status: u32, control: u32) {
+        self.write_trb(self.index, param, status, control | self.cycle as u32);
+        self.index += 1;
+        if self.index >= RING_TRBS - 1 {
+            // Link TRB завершает сегмент и должен нести ТЕКУЩИЙ cycle state:
+            // контроллер проверит его тем же CCS, с которым читал сегмент,
+            // и только потом переключит свой Cycle State.
+            let link = (self.virt as *mut u32).add((RING_TRBS - 1) * 4 + 3);
+            let link_control = core::ptr::read_volatile(link);
+            core::ptr::write_volatile(link, (link_control & !1) | self.cycle as u32);
+            self.index = 0;
+            self.cycle = !self.cycle;
         }
     }
-    Some(phys)
 }
 
-/// Ждёт, пока `mask` в MMIO-регистре станет нулём. Ограничение по итерациям
-/// обязательно: без него неотвечающий контроллер вешает boot навсегда.
-unsafe fn wait_bits_clear(reg: *const u32, mask: u32, limit: u32) -> bool {
-    let mut spins = 0u32;
-    while (core::ptr::read_volatile(reg) & mask) != 0 {
-        core::hint::spin_loop();
-        spins += 1;
-        if spins >= limit {
+#[derive(Clone, Copy)]
+struct Event {
+    param: u64,
+    status: u32,
+    control: u32,
+}
+
+impl Event {
+    fn trb_type(&self) -> u32 {
+        (self.control >> 10) & 0x3F
+    }
+    fn completion_code(&self) -> u32 {
+        (self.status >> 24) & 0xFF
+    }
+    fn slot(&self) -> u8 {
+        ((self.control >> 24) & 0xFF) as u8
+    }
+    fn endpoint(&self) -> u8 {
+        ((self.control >> 16) & 0x1F) as u8
+    }
+}
+
+struct HidKeyboard {
+    slot: u8,
+    /// Device Context Index (EP1 IN = 3).
+    dci: u8,
+    ring: Ring,
+    report_phys: u64,
+    report_virt: u64,
+    max_packet: u16,
+    pending: bool,
+    reports: u32,
+}
+
+struct Controller {
+    op: u64,
+    rt: u64,
+    db: u64,
+    max_ports: u8,
+    dcbaa_virt: u64,
+    cmd: Ring,
+    ev: Ring,
+    keys: Vec<HidKeyboard>,
+    /// Сколько страниц scratchpad зарезервировано (нужно для Address Device).
+    scratchpad_pages: usize,
+    /// Перечисление портов отложено до первого опроса клавиатуры.
+    enumerated: bool,
+}
+
+impl Controller {
+    fn port_reg(&self, port: u8) -> u64 {
+        self.op + 0x400 + (port as u64 - 1) * 0x10
+    }
+
+    unsafe fn doorbell(&self, slot: u8, target: u32) {
+        wr32(self.db + (slot as u64) * 4, target);
+    }
+
+    /// Запись PORTSC: PED (RW1CS) нельзя выставлять в 1 — это отключит порт.
+    unsafe fn port_write(&self, port: u8, value: u32) {
+        wr32(self.port_reg(port), value & !PORTSC_PED);
+    }
+
+    unsafe fn port_clear_changes(&self, port: u8) {
+        let value = rd32(self.port_reg(port));
+        self.port_write(port, value & !PORTSC_PR);
+    }
+
+    /// Читает следующее событие из event ring.
+    unsafe fn next_event(&mut self) -> Option<Event> {
+        let (param, status, control) = self.ev.read_trb(self.ev.index);
+        if (control & 1) != self.ev.cycle as u32 {
+            return None;
+        }
+        self.ev.index += 1;
+        if self.ev.index >= RING_TRBS {
+            self.ev.index = 0;
+            self.ev.cycle = !self.ev.cycle;
+        }
+        // ERDP: dequeue pointer + EHB=0
+        let erdp = self.ev.phys + (self.ev.index as u64) * TRB_SIZE as u64;
+        wr64(self.rt + IR0_ERDP, erdp);
+        Some(Event { param, status, control })
+    }
+
+    /// Отправляет команду в command ring и ждёт Command Completion Event.
+    unsafe fn command(&mut self, param: u64, trb_type: u32, slot: u8) -> Option<Event> {
+        self.cmd.push(param, 0, (trb_type << 10) | ((slot as u32) << 24));
+        self.doorbell(0, 0);
+
+        for _ in 0..2_000_000 {
+            if let Some(event) = self.next_event() {
+                match event.trb_type() {
+                    TRB_COMMAND_COMPLETION => {
+                        if slot == 0 || event.slot() == slot {
+                            return Some(event);
+                        }
+                    }
+                    TRB_PORT_STATUS_CHANGE => {
+                        // Во время boot порты могут рапортовать об изменениях.
+                        // Читаем и очищаем, чтобы событие не копилось.
+                        let port = ((event.param >> 24) & 0xFF) as u8;
+                        if port >= 1 && port <= self.max_ports {
+                            self.port_clear_changes(port);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Ждёт Transfer Event для указанного slot/DCI.
+    unsafe fn wait_transfer(&mut self, slot: u8, dci: u8, limit: u32) -> Option<u32> {
+        for _ in 0..limit {
+            if let Some(event) = self.next_event() {
+                if event.trb_type() == TRB_TRANSFER_EVENT
+                    && event.slot() == slot
+                    && event.endpoint() == dci
+                {
+                    return Some(event.completion_code());
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Control transfer на EP0. `data` — (буфер, физический адрес буфера).
+/// Возвращает длину переданных данных при успехе.
+unsafe fn control_transfer(
+    ctrl: &mut Controller,
+    slot: u8,
+    ring: *mut Ring,
+    bm: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    data: Option<(&mut [u8], u64)>,
+) -> Option<usize> {
+    let ring = &mut *ring;
+    let len = data.as_ref().map(|(buffer, _)| buffer.len()).unwrap_or(0);
+    let dir_in = bm & 0x80 != 0;
+
+    let setup = (bm as u64)
+        | ((request as u64) << 8)
+        | ((value as u64) << 16)
+        | ((index as u64) << 32)
+        | ((len as u64) << 48);
+    // IDT (bit 6) обязателен для Setup Stage.
+    ring.push(setup, 8, (TRB_SETUP_STAGE << 10) | (1 << 6));
+
+    if let Some((_, phys)) = data.as_ref() {
+        if len > 0 {
+            let control = (TRB_DATA_STAGE << 10) | if dir_in { 1 << 16 } else { 0 };
+            ring.push(*phys, len as u32, control);
+        }
+    }
+
+    // Status stage идёт в противоположном направлении к data stage.
+    let status_dir = if len == 0 || !dir_in { 1 << 16 } else { 0 };
+    ring.push(0, 0, (TRB_STATUS_STAGE << 10) | (1 << 5) | status_dir);
+
+    ctrl.doorbell(slot, 1);
+    let code = ctrl.wait_transfer(slot, 1, 4_000_000)?;
+    if code != CC_SUCCESS && code != CC_SHORT_PACKET {
+        return None;
+    }
+    Some(len)
+}
+
+unsafe fn get_descriptor(
+    ctrl: &mut Controller,
+    slot: u8,
+    ring: *mut Ring,
+    desc_type: u8,
+    desc_index: u8,
+    buf: &mut [u8],
+    phys: u64,
+) -> Option<usize> {
+    control_transfer(
+        ctrl,
+        slot,
+        ring,
+        0x80,
+        6, // GET_DESCRIPTOR
+        ((desc_type as u16) << 8) | desc_index as u16,
+        0,
+        Some((buf, phys)),
+    )
+    .filter(|received| *received >= 8)
+}
+
+#[derive(Clone, Copy)]
+struct EndpointInfo {
+    address: u8,
+    max_packet: u16,
+    interval: u8,
+}
+
+/// Ищет HID-интерфейс клавиатуры и его interrupt IN endpoint.
+fn find_hid_keyboard(config: &[u8]) -> Option<(u8, EndpointInfo)> {
+    let mut offset = 0usize;
+    let mut current: Option<(u8, bool)> = None;
+
+    while offset + 2 <= config.len() {
+        let len = config[offset] as usize;
+        let dtype = config[offset + 1];
+        if len < 2 || offset + len > config.len() {
+            break;
+        }
+
+        match dtype {
+            4 if len >= 9 => {
+                let number = config[offset + 2];
+                let class = config[offset + 5];
+                let subclass = config[offset + 6];
+                let protocol = config[offset + 7];
+                // class 3 = HID; boot interface (subclass 1) или protocol 1 = keyboard.
+                let is_keyboard = class == 3
+                    && (subclass == 1 || protocol == 1)
+                    && protocol <= 1;
+                current = Some((number, is_keyboard));
+            }
+            5 if len >= 7 => {
+                if let Some((number, is_keyboard)) = current {
+                    let address = config[offset + 2];
+                    let attributes = config[offset + 3];
+                    // bit 7 = IN, bits 0-1 = 3 (interrupt)
+                    if is_keyboard && address & 0x80 != 0 && attributes & 0x03 == 3 {
+                        let max_packet = u16::from_le_bytes([config[offset + 4], config[offset + 5]])
+                            & 0x07FF;
+                        return Some((
+                            number,
+                            EndpointInfo {
+                                address,
+                                max_packet,
+                                interval: config[offset + 6],
+                            },
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        offset += len;
+    }
+    None
+}
+
+/// Заполняет input context для Address Device (slot + EP0).
+unsafe fn fill_address_context(
+    in_virt: u64,
+    speed: u32,
+    port: u8,
+    max_packet: u16,
+    ep0_phys: u64,
+) {
+    // Input Control Context: add slot (bit 0) + EP0 (bit 1)
+    wr32(in_virt + 0x04, 0x3);
+
+    // Slot Context (0x20)
+    wr32(in_virt + 0x20, (speed << 20) | (1 << 27));
+    wr32(in_virt + 0x24, (port as u32) << 16);
+
+    // EP0 Context (0x40)
+    let ep0 = in_virt + 0x40;
+    wr32(ep0 + 0x00, 0);
+    wr32(ep0 + 0x04, (3 << 1) | (4 << 3) | ((max_packet as u32) << 16));
+    wr32(ep0 + 0x08, (ep0_phys as u32) | 1);
+    wr32(ep0 + 0x0C, (ep0_phys >> 32) as u32);
+    wr32(ep0 + 0x10, 8);
+}
+
+/// Configure Endpoint для interrupt IN клавиатуры.
+unsafe fn configure_keyboard_endpoint(
+    ctrl: &mut Controller,
+    slot: u8,
+    speed: u32,
+    port: u8,
+    dci: u8,
+    max_packet: u16,
+    interval: u8,
+    ring_phys: u64,
+) -> bool {
+    let Some((in_phys, in_virt)) = alloc_dma(4096) else {
+        return false;
+    };
+
+    wr32(in_virt + 0x04, (1 << 0) | (1 << dci));
+
+    // Slot Context: context entries = DCI
+    wr32(in_virt + 0x20, (speed << 20) | ((dci as u32) << 27));
+    wr32(in_virt + 0x24, (port as u32) << 16);
+
+    let ep = in_virt + 0x20 + (dci as u64) * 0x20;
+    wr32(ep + 0x00, (interval as u32) << 16);
+    wr32(ep + 0x04, (3 << 1) | (7 << 3) | ((max_packet as u32) << 16)); // Interrupt IN
+    wr32(ep + 0x08, (ring_phys as u32) | 1);
+    wr32(ep + 0x0C, (ring_phys >> 32) as u32);
+    wr32(ep + 0x10, 8);
+
+    match ctrl.command(in_phys, TRB_CONFIGURE_ENDPOINT, slot) {
+        Some(event) => event.completion_code() == CC_SUCCESS,
+        None => false,
+    }
+}
+
+impl Controller {
+    /// Сброс порта. Возвращает скорость (PORTSC bits 10-13).
+    unsafe fn reset_port(&mut self, port: u8) -> Option<u32> {
+        let reg = self.port_reg(port);
+        let portsc = rd32(reg);
+        if portsc & PORTSC_CCS == 0 {
+            return None;
+        }
+
+        if portsc & PORTSC_PP == 0 {
+            self.port_write(port, (portsc & !PORTSC_RW1C) | PORTSC_PP);
+            delay(20_000);
+        }
+
+        // USB2-порт сбрасывается PR, USB3 — WPR. Пробуем оба: контроллер
+        // игнорирует неподдерживаемый бит, а таймаут ограничен.
+        for attempt in 0..2 {
+            let reset_bit = if attempt == 0 { PORTSC_PR } else { PORTSC_WPR };
+            let portsc = rd32(reg);
+            self.port_write(
+                port,
+                (portsc & !(PORTSC_RW1C | PORTSC_PR | PORTSC_WPR)) | reset_bit,
+            );
+
+            let mut completed = false;
+            for _ in 0..2_000_000 {
+                let value = rd32(reg);
+                if value & PORTSC_PRC != 0 || (value & PORTSC_PR == 0 && value & PORTSC_PED != 0) {
+                    completed = true;
+                    break;
+                }
+                delay(50);
+            }
+
+            if completed {
+                self.port_clear_changes(port);
+                let value = rd32(reg);
+                if value & PORTSC_PED != 0 {
+                    return Some((value >> PORTSC_SPEED_SHIFT) & 0xF);
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// Evaluate Context: обновляет EP0 Max Packet Size после чтения
+/// bMaxPacketSize0 из первых 8 байт device descriptor.
+unsafe fn evaluate_ep0(
+    ctrl: &mut Controller,
+    slot: u8,
+    speed: u32,
+    port: u8,
+    max_packet: u16,
+    ep0_phys: u64,
+) -> bool {
+    let Some((in_phys, in_virt)) = alloc_dma(4096) else {
+        return false;
+    };
+
+    wr32(in_virt + 0x04, 0x3); // slot + EP0
+    wr32(in_virt + 0x20, (speed << 20) | (1 << 27));
+    wr32(in_virt + 0x24, (port as u32) << 16);
+
+    let ep0 = in_virt + 0x40;
+    wr32(ep0 + 0x04, (3 << 1) | (4 << 3) | ((max_packet as u32) << 16));
+    wr32(ep0 + 0x08, (ep0_phys as u32) | 1);
+    wr32(ep0 + 0x0C, (ep0_phys >> 32) as u32);
+    wr32(ep0 + 0x10, 8);
+
+    match ctrl.command(in_phys, 13, slot) {
+        Some(event) => event.completion_code() == CC_SUCCESS,
+        None => false,
+    }
+}
+
+/// Перечисляет устройство на порту. Клавиатуры складываются в `ctrl.keys`.
+unsafe fn enumerate_device(ctrl: &mut Controller, port: u8, speed: u32) {
+    let Some(event) = ctrl.command(0, TRB_ENABLE_SLOT, 0) else {
+        println!("[xHCI] port {}: Enable Slot timeout", port);
+        return;
+    };
+    if event.completion_code() != CC_SUCCESS {
+        println!("[xHCI] port {}: Enable Slot failed (cc={})", port, event.completion_code());
+        return;
+    }
+    let slot = event.slot();
+    if slot == 0 {
+        return;
+    }
+
+    let Some((dev_phys, _)) = alloc_dma(4096) else { return };
+    let Some((in_phys, in_virt)) = alloc_dma(4096) else { return };
+    let Some(mut ep0) = Ring::new() else { return };
+    ep0.init_link();
+    let ep0_ring = &mut ep0 as *mut Ring;
+
+    // DCBAA[slot] → device context
+    wr64(ctrl.dcbaa_virt + (slot as u64) * 8, dev_phys);
+
+    // Начальный EP0 max packet: 64 только для HS/Super, иначе 8 (USB 2.0:
+    // FS-устройства по умолчанию используют 8-байтовые пакеты).
+    let max_packet: u16 = if speed == SPEED_HIGH || speed == 4 { 64 } else { 8 };
+    fill_address_context(in_virt, speed, port, max_packet, ep0.phys);
+
+    let Some(event) = ctrl.command(in_phys, TRB_ADDRESS_DEVICE, slot) else {
+        println!("[xHCI] slot {}: Address Device timeout", slot);
+        return;
+    };
+    if event.completion_code() != CC_SUCCESS {
+        println!("[xHCI] slot {}: Address Device failed (cc={})", slot, event.completion_code());
+        return;
+    }
+
+    let Some((buf_phys, buf_virt)) = alloc_dma(512) else { return };
+    let buf = core::slice::from_raw_parts_mut(buf_virt as *mut u8, 512);
+
+    // Первые 8 байт device descriptor: bMaxPacketSize0 лежит в offset 7.
+    if get_descriptor(ctrl, slot, ep0_ring, 1, 0, &mut buf[..8], buf_phys).is_none() {
+        println!("[xHCI] slot {}: GET_DESCRIPTOR(device, 8) failed", slot);
+        return;
+    }
+    let device_max_packet = buf[7] as u16;
+    if device_max_packet != max_packet && (8..=64).contains(&device_max_packet) {
+        // Evaluate Context применяет новый размер в контроллере; локальную
+        // переменную обновлять не нужно — дальше она не используется.
+        if !evaluate_ep0(ctrl, slot, speed, port, device_max_packet, ep0.phys) {
+            println!(
+                "[xHCI] slot {}: Evaluate Context failed, keeping EP0 mps={}",
+                slot, max_packet
+            );
+        }
+    }
+
+    // Device descriptor (18 bytes)
+    if get_descriptor(ctrl, slot, ep0_ring, 1, 0, &mut buf[..18], buf_phys).is_none() {
+        println!("[xHCI] slot {}: GET_DESCRIPTOR(device) failed", slot);
+        return;
+    }
+    let vendor = u16::from_le_bytes([buf[8], buf[9]]);
+    let product = u16::from_le_bytes([buf[10], buf[11]]);
+    let num_configs = buf[17];
+
+    if num_configs == 0 {
+        return;
+    }
+
+    // Configuration descriptor: сначала 9 байт, затем целиком.
+    if get_descriptor(ctrl, slot, ep0_ring, 2, 0, &mut buf[..9], buf_phys).is_none() {
+        println!("[xHCI] slot {}: GET_DESCRIPTOR(config header) failed", slot);
+        return;
+    }
+    let total = u16::from_le_bytes([buf[2], buf[3]]) as usize;
+    if total < 9 || total > 512 {
+        return;
+    }
+    if get_descriptor(ctrl, slot, ep0_ring, 2, 0, &mut buf[..total], buf_phys).is_none() {
+        println!("[xHCI] slot {}: GET_DESCRIPTOR(config) failed", slot);
+        return;
+    }
+
+    let config_value = buf[5];
+    let Some((interface, endpoint)) = find_hid_keyboard(&buf[..total]) else {
+        println!(
+            "[xHCI] slot {}: device {:04x}:{:04x} is not a boot keyboard",
+            slot, vendor, product
+        );
+        return;
+    };
+
+    // SET_CONFIGURATION
+    if control_transfer(ctrl, slot, ep0_ring, 0x00, 9, config_value as u16, 0, None).is_none() {
+        println!("[xHCI] slot {}: SET_CONFIGURATION failed", slot);
+        return;
+    }
+
+    // HID boot protocol + idle rate 0 (report only on change)
+    let _ = control_transfer(ctrl, slot, ep0_ring, 0x21, 0x0B, 0, interface as u16, None);
+    let _ = control_transfer(ctrl, slot, ep0_ring, 0x21, 0x0A, 0, interface as u16, None);
+
+    let Some(mut ring) = Ring::new() else { return };
+    ring.init_link();
+    // Буфер с запасом: wMaxPacketSize может быть больше 8 байт.
+    let report_len: u16 = if endpoint.max_packet == 0 {
+        8
+    } else {
+        endpoint.max_packet.min(64)
+    };
+    let Some((report_phys, report_virt)) = alloc_dma(64) else { return };
+
+    // DCI: EP number * 2 + 1 (IN)
+    let dci = ((endpoint.address & 0x0F) << 1) | 1;
+    if !configure_keyboard_endpoint(
+        ctrl,
+        slot,
+        speed,
+        port,
+        dci,
+        endpoint.max_packet,
+        endpoint.interval,
+        ring.phys,
+    ) {
+        println!("[xHCI] slot {}: Configure Endpoint failed", slot);
+        return;
+    }
+
+    // Первый interrupt IN transfer.
+    ring.push(report_phys, report_len as u32, (TRB_NORMAL << 10) | (1 << 5));
+    ctrl.doorbell(slot, dci as u32);
+
+    ctrl.keys.push(HidKeyboard {
+        slot,
+        dci,
+        ring,
+        report_phys,
+        report_virt,
+        max_packet: report_len,
+        pending: true,
+        reports: 0,
+    });
+
+    println!(
+        "[xHCI] HID keyboard ready: slot {} port {} {:04x}:{:04x} ep=0x{:02x} mps={} interval={}",
+        slot, port, vendor, product, endpoint.address, endpoint.max_packet, endpoint.interval
+    );
+}
+
+static XHCI: Mutex<Vec<Controller>> = Mutex::new(Vec::new());
+
+/// Опрашивает event ring всех контроллеров и разбирает HID-отчёты.
+/// Вызывается из `keyboard::poll_key()`.
+pub fn poll_keyboard() {
+    let mut controllers = match XHCI.try_lock() {
+        Some(guard) => guard,
+        None => return,
+    };
+
+    for ctrl in controllers.iter_mut() {
+        // Ленивое перечисление: boot не ждёт USB, а первый опрос клавиатуры
+        // (уже после shell) донастраивает устройства.
+        if !ctrl.enumerated {
+            ctrl.enumerated = true;
+            unsafe { enumerate_ports(ctrl) };
+        }
+
+        let db = ctrl.db;
+        let mut budget = 0;
+        loop {
+            let Some(event) = (unsafe { ctrl.next_event() }) else { break };
+            budget += 1;
+            if budget > 64 {
+                break;
+            }
+
+            match event.trb_type() {
+                TRB_TRANSFER_EVENT => {
+                    let slot = event.slot();
+                    let dci = event.endpoint();
+                    let code = event.completion_code();
+
+                    let Some(keyboard) = ctrl
+                        .keys
+                        .iter_mut()
+                        .find(|k| k.slot == slot && k.dci == dci)
+                    else {
+                        continue;
+                    };
+                    if !keyboard.pending {
+                        continue;
+                    }
+
+                    if code == CC_SUCCESS || code == CC_SHORT_PACKET {
+                        let report = unsafe {
+                            core::slice::from_raw_parts(keyboard.report_virt as *const u8, 8)
+                        };
+                        crate::drivers::usb::hid::handle_boot_report(report);
+                        keyboard.reports = keyboard.reports.wrapping_add(1);
+                    }
+
+                    // Переотправляем TRB, иначе endpoint остановится после отчёта.
+                    unsafe {
+                        keyboard.ring.push(
+                            keyboard.report_phys,
+                            keyboard.max_packet as u32,
+                            (TRB_NORMAL << 10) | (1 << 5),
+                        );
+                        wr32(db + (keyboard.slot as u64) * 4, keyboard.dci as u32);
+                    }
+                }
+                TRB_PORT_STATUS_CHANGE => {
+                    let port = ((event.param >> 24) & 0xFF) as u8;
+                    if port >= 1 && port <= ctrl.max_ports {
+                        unsafe { ctrl.port_clear_changes(port) };
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Краткий статус для `diag keyboard`.
+pub fn keyboard_status() -> String {
+    let controllers = XHCI.lock();
+    if controllers.is_empty() {
+        return String::from("no xHCI controller");
+    }
+
+    let mut text = String::new();
+    for (index, ctrl) in controllers.iter().enumerate() {
+        if index > 0 {
+            text.push_str("; ");
+        }
+        text.push_str(&alloc::format!(
+            "ctrl{} {} keyboard(s)",
+            index,
+            ctrl.keys.len()
+        ));
+        for keyboard in &ctrl.keys {
+            text.push_str(&alloc::format!(
+                " [slot {} dci {} reports {}]",
+                keyboard.slot, keyboard.dci, keyboard.reports
+            ));
+        }
+    }
+    text
+}
+
+/// BIOS → OS handoff для USB Legacy Support (extended capability ID 1).
+unsafe fn bios_handoff(mmio: u64, hccparams1: u32) {
+    let mut offset = (((hccparams1 >> 16) & 0xFFFF) as u64) * 4;
+    let mut guard = 0;
+
+    while offset != 0 && guard < 32 {
+        let capability = rd32(mmio + offset);
+        let id = capability & 0xFF;
+        let next = (((capability >> 8) & 0xFF) as u64) * 4;
+
+        if id == 1 {
+            let legsup = mmio + offset;
+            let mut value = rd32(legsup);
+            if value & (1 << 16) != 0 {
+                // BIOS владеет контроллером — забираем ownership.
+                value |= 1 << 24;
+                wr32(legsup, value);
+                for _ in 0..2_000_000 {
+                    value = rd32(legsup);
+                    if value & (1 << 16) == 0 {
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+                // Отключаем SMI, иначе прошивка продолжит вмешиваться.
+                wr32(legsup + 4, 0);
+            }
+            println!(
+                "[xHCI] legacy handoff: bios_owned={} os_owned={}",
+                (value >> 16) & 1,
+                (value >> 24) & 1
+            );
+            return;
+        }
+
+        if next == 0 {
+            break;
+        }
+        offset += next;
+        guard += 1;
+    }
+}
+
+/// Полная инициализация контроллера и перечисление портов.
+pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
+    unsafe {
+        let cap0 = rd32(mmio_virt);
+        let cap_len = (cap0 & 0xFF) as u64;
+        let hci_version = (cap0 >> 16) as u16;
+
+        if (hci_version >> 8) != 1 {
+            println!(
+                "[xHCI] {:#x}: interface version {}.{} is not xHCI 1.x",
+                bar_phys,
+                hci_version >> 8,
+                hci_version & 0xFF
+            );
             return false;
         }
-    }
-    true
-}
 
-unsafe fn write_u64(addr: u64, value: u64) {
-    core::ptr::write_volatile(addr as *mut u32, value as u32);
-    core::ptr::write_volatile((addr + 4) as *mut u32, (value >> 32) as u32);
-}
+        let hcsparams1 = rd32(mmio_virt + 0x04);
+        let hcsparams2 = rd32(mmio_virt + 0x08);
+        let hccparams1 = rd32(mmio_virt + 0x10);
+        let dboff = rd32(mmio_virt + 0x14) as u64;
+        let rtsoff = rd32(mmio_virt + 0x18) as u64;
 
-pub fn init_controller(bar_phys: u64, mmio_virt: u64) {
-    println!("[xHCI] init_controller: bar_phys={:#x} mmio_virt={:#x}", bar_phys, mmio_virt);
+        let max_slots = (hcsparams1 & 0xFF) as u8;
+        let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
+        if max_slots == 0 || max_ports == 0 {
+            println!("[xHCI] {:#x}: invalid topology (slots={}, ports={})", bar_phys, max_slots, max_ports);
+            return false;
+        }
 
-    unsafe {
-        // === Capability registers ===
-        // 0x00 CAPLENGTH(u8) + HCIVERSION(u16), 0x04 HCSPARAMS1,
-        // 0x10 HCCPARAMS1, 0x14 DBOFF, 0x18 RTSOFF.
-        let cap_len = core::ptr::read_volatile(mmio_virt as *const u8) as u64;
-        let hci_version = core::ptr::read_volatile((mmio_virt + 0x02) as *const u16);
-        let hcsparams1 = core::ptr::read_volatile((mmio_virt + 0x04) as *const u32);
-        let dboff = core::ptr::read_volatile((mmio_virt + 0x14) as *const u32);
-        let rtsoff = core::ptr::read_volatile((mmio_virt + 0x18) as *const u32);
-
-        let max_slots = hcsparams1 & 0xFF;
-        let max_ports = (hcsparams1 >> 24) & 0xFF;
-        let op_base = mmio_virt + cap_len;
+        let op = mmio_virt + cap_len;
+        let rt = mmio_virt + rtsoff;
+        let db = mmio_virt + dboff;
 
         println!(
-            "[xHCI] v{}.{} CAPLEN={} slots={} ports={} DBOFF={:#x} RTSOFF={:#x}",
+            "[xHCI] {:#x}: v{}.{} slots={} ports={} DBOFF={:#x} RTSOFF={:#x}",
+            bar_phys,
             hci_version >> 8,
             hci_version & 0xFF,
-            cap_len,
             max_slots,
             max_ports,
             dboff,
             rtsoff
         );
 
-        // === Operational registers ===
-        // USBCMD 0x00, USBSTS 0x04, CRCR 0x18 (64), DCBAAP 0x30 (64), CONFIG 0x38.
-        let usbcmd = op_base as *mut u32;
-        let usbsts = (op_base + 0x04) as *const u32;
+        bios_handoff(mmio_virt, hccparams1);
 
-        // 1. Контроллер должен быть остановлен (USBSTS.HCH, bit 0).
-        if !wait_bits_clear(usbsts, 1 << 0, 100_000) {
-            println!("[xHCI] controller is not halted, skipping init");
-            return;
-        }
-
-        // 2. Reset (USBCMD.HCRST, bit 1): бит самоочищается, затем ждём CNR (bit 11).
-        let cmd = core::ptr::read_volatile(usbcmd);
-        core::ptr::write_volatile(usbcmd, cmd | (1 << 1));
-        if !wait_bits_clear(usbcmd, 1 << 1, 1_000_000) {
-            println!("[xHCI] reset timeout (HCRST stuck)");
-            return;
-        }
-        if !wait_bits_clear(usbsts, 1 << 11, 1_000_000) {
-            println!("[xHCI] reset timeout (Controller Not Ready stuck)");
-            return;
-        }
-
-        // 3. Device Context Base Address Array (DCBAAP, 0x30).
-        let Some(dcbaa_phys) = alloc_zeroed_frame() else {
-            println!("[xHCI] no memory for DCBAA");
-            return;
-        };
-        write_u64(op_base + 0x30, dcbaa_phys);
-
-        // 4. Command Ring (CRCR, 0x18) — cycle state = 1.
-        let Some(cr_phys) = alloc_zeroed_frame() else {
-            println!("[xHCI] no memory for command ring");
-            return;
-        };
-        write_u64(op_base + 0x18, cr_phys | 1);
-
-        // 5. CONFIG.MaxSlotsEn (биты 7:0) — иначе Enable Slot не работает.
-        core::ptr::write_volatile((op_base + 0x38) as *mut u32, max_slots & 0xFF);
-
-        // 6. Run (USBCMD.RS, bit 0) и дождаться снятия HCHalted.
-        let cmd = core::ptr::read_volatile(usbcmd);
-        core::ptr::write_volatile(usbcmd, cmd | 1);
-        if !wait_bits_clear(usbsts, 1 << 0, 1_000_000) {
-            println!("[xHCI] controller did not leave HCHalted — USB unusable");
-            return;
-        }
-
-        println!(
-            "[xHCI] running: DCBAAP={:#x} CRCR={:#x} CONFIG={:#x}",
-            dcbaa_phys,
-            cr_phys | 1,
-            core::ptr::read_volatile((op_base + 0x38) as *const u32)
-        );
-
-        register_controller(
-            bar_phys,
-            mmio_virt,
-            op_base,
-            cr_phys as usize,
-            0,
-            (hhdm() + cr_phys) as usize,
-            0,
-            Some(rtsoff),
-        );
-    }
-}
-
-static XHCI_CONTROLLERS: Mutex<Vec<XhciController>> = Mutex::new(Vec::new());
-static RUNTIME_WRITES_ENABLED: AtomicBool = AtomicBool::new(false);
-
-/// Enable or disable actual MMIO writes to runtime/registers (ERST/ERDP/doorbell).
-/// Default is disabled; set to true only after verifying runtime base via diagnostics.
-pub fn set_runtime_writes_enabled(v: bool) {
-    RUNTIME_WRITES_ENABLED.store(v, Ordering::Relaxed);
-    println!("[xHCI] set_runtime_writes_enabled = {}", v);
-}
-
-/// Add controller metadata to global list for later polling/processing.
-fn register_controller(bar_phys: u64, mmio_base_virt: u64, op_base_virt: u64, asq_phys: usize, acq_phys: usize, asq_virt: usize, acq_virt: usize, cap_rt_off: Option<u32>) {
-    let c = XhciController {
-        vendor: 0,
-        device: 0,
-        bar_phys,
-        mmio_base_virt,
-        op_base_virt,
-        asq_phys,
-        acq_phys,
-        asq_virt,
-        acq_virt,
-        event_ring_phys: None,
-        event_ring_virt: None,
-        erst_phys: None,
-        erst_virt: None,
-        cap_rt_off,
-        asq_idx: 0,
-        asq_cycle: 1,
-        asq_size: 8,
-    };
-    XHCI_CONTROLLERS.lock().push(c);
-}
-
-/// Diagnostic: for each registered controller, log a few 32-bit words from the
-/// candidate runtime register base computed from the stored RTSOFF value.
-pub fn log_runtime_regs() {
-    let list = XHCI_CONTROLLERS.lock();
-    for c in list.iter() {
-        if let Some(rt) = c.cap_rt_off {
-            // RTSOFF отсчитывается от НАЧАЛА MMIO-бара, а не от operational base.
-            let rt_base = c.mmio_base_virt + (rt as u64);
-            println!("[xHCI] controller {:#x} runtime candidate={:#x}", c.bar_phys, rt_base);
-            unsafe {
-                for i in 0..8 {
-                    let p = (rt_base + (i * 4) as u64) as *const u32;
-                    let v = core::ptr::read_volatile(p);
-                    println!("[xHCI] runtime[{:#x}] = {:#x}", i*4, v);
+        // 1. Останавливаем контроллер, если он запущен.
+        if rd32(op + USBSTS) & USBSTS_HCH == 0 {
+            wr32(op + USBCMD, rd32(op + USBCMD) & !USBCMD_RS);
+            for _ in 0..2_000_000 {
+                if rd32(op + USBSTS) & USBSTS_HCH != 0 {
+                    break;
                 }
+                core::hint::spin_loop();
             }
-        } else {
-            println!("[xHCI] controller {:#x} has no RTSOFF recorded", c.bar_phys);
         }
-    }
-}
 
-/// Простейшая проверка: считать первые 16 байт ACQ для всех контроллеров
-/// и залогировать их как u64/u64. Это даст понимание, пишет ли контроллер
-/// Command Completion TRB в выделенный буфер.
-pub fn poll_admin_acq() {
-    let list = XHCI_CONTROLLERS.lock();
-    for c in list.iter() {
-        if c.acq_virt == 0 {
-            // Event ring ещё не настроен — читать нечего.
-            continue;
-        }
-        println!("[xHCI] poll_admin_acq: controller bar={:#x} acq_phys={:#x} acq_virt={:#x}", c.bar_phys, c.acq_phys, c.acq_virt);
-        unsafe {
-            let p0 = c.acq_virt as *const u64;
-            let p1 = (c.acq_virt + 8) as *const u64;
-            let v0 = core::ptr::read_volatile(p0);
-            let v1 = core::ptr::read_volatile(p1);
-            println!("[xHCI] ACQ TRB0: {:#x} {:#x}", v0, v1);
-        }
-    }
-}
-
-/// Записать тестовую TRB в ASQ для первого контроллера (локально, без doorbell)
-pub fn submit_dummy_command() {
-    let mut list = XHCI_CONTROLLERS.lock();
-    if list.is_empty() {
-        println!("[xHCI] submit_dummy_command: no controllers registered");
-        return;
-    }
-    // Возьмём первый контроллер
-    let c = &mut list[0];
-    println!("[xHCI] submit_dummy_command: writing TRB to ASQ virt={:#x}", c.asq_virt);
-    unsafe {
-        let p0 = c.asq_virt as *mut u64;
-        let p1 = (c.asq_virt + 8) as *mut u64;
-        core::ptr::write_volatile(p0, 0xdead_beef_dead_beefu64);
-        core::ptr::write_volatile(p1, 0x1122_3344_5566_7788u64);
-    }
-    println!("[xHCI] dummy TRB written to ASQ");
-}
-
-/// Сформировать и записать Enable Slot TRB в ASQ (без вызова doorbell).
-pub fn submit_enable_slot() {
-    let mut list = XHCI_CONTROLLERS.lock();
-    if list.is_empty() {
-        println!("[xHCI] submit_enable_slot: no controllers registered");
-        return;
-    }
-    let c = &mut list[0];
-    println!("[xHCI] submit_enable_slot: enqueueing Enable Slot TRB to ASQ virt={:#x}", c.asq_virt);
-    // Build TRB
-    let param: u64 = 0;
-    // TRB type 0x0C = Enable Slot Command
-    let trb_type: u64 = 0x0C;
-    let mut ctl: u64 = (trb_type << 10) & 0xffff_ffff_ffffu64;
-    // set cycle bit according to current asq_cycle
-    if c.asq_cycle & 1 == 1 {
-        ctl |= 1u64;
-    }
-
-    // Enqueue into ASQ ring (simple, no wrap protection beyond modulo)
-    let idx = c.asq_idx % c.asq_size;
-    let off = c.asq_virt + idx * 16;
-    unsafe {
-        let p0 = off as *mut u64;
-        let p1 = (off + 8) as *mut u64;
-        core::ptr::write_volatile(p0, param);
-        core::ptr::write_volatile(p1, ctl);
-    }
-    println!("[xHCI] ENQ ASQ idx={} off={:#x} param={:#x} ctl={:#x}", idx, off, param, ctl);
-
-    // Advance producer index and flip cycle if wrapped
-    c.asq_idx = c.asq_idx.wrapping_add(1);
-    if c.asq_idx % c.asq_size == 0 {
-        c.asq_cycle ^= 1;
-    }
-
-    // Compute doorbell candidate and log. Actual write is gated by RUNTIME_WRITES_ENABLED.
-    let doorbell_candidate = c.op_base_virt + 0x1000; // conservative candidate
-    let doorbell_val: u32 = 0; // admin ring uses DB = 0
-    println!("[xHCI] doorbell candidate={:#x} val={:#x}", doorbell_candidate, doorbell_val);
-    if RUNTIME_WRITES_ENABLED.load(Ordering::Relaxed) {
-        println!("[xHCI] RUNTIME_WRITES_ENABLED: writing doorbell...");
-        unsafe { core::ptr::write_volatile(doorbell_candidate as *mut u32, doorbell_val); }
-    } else {
-        println!("[xHCI] RUNTIME_WRITES_ENABLED disabled: skipping doorbell write");
-    }
-}
-
-/// Выделить Event Ring и структуру ERST (Event Ring Segment Table).
-/// Пока что только выделение памяти и логирование адресов — запись
-/// регистров RT (runtime) будет в следующих итерациях.
-pub fn init_event_ring(bar_phys: u64, mmio_virt: u64) {
-    println!("[xHCI] init_event_ring: allocating event ring memory");
-    // Allocate one page for event ring buffer and one for ERST
-    let mut ev_phys_opt: Option<usize> = None;
-    let mut erst_phys_opt: Option<usize> = None;
-    if let Some(ev_phys) = crate::memory::pmm::alloc_contiguous(1) {
-        let h = crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
-        let ev_virt = h as usize + ev_phys;
-        println!("[xHCI] Event ring phys={:#x} virt={:#x}", ev_phys, ev_virt);
-        ev_phys_opt = Some(ev_phys);
-    } else {
-        println!("[xHCI] Failed to allocate event ring page");
-    }
-
-    if let Some(erst_phys) = crate::memory::pmm::alloc_contiguous(1) {
-        let h = crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
-        let erst_virt = h as usize + erst_phys;
-        println!("[xHCI] ERST table phys={:#x} virt={:#x}", erst_phys, erst_virt);
-        erst_phys_opt = Some(erst_phys);
-    } else {
-        println!("[xHCI] Failed to allocate ERST page");
-    }
-
-    // Store allocated event ring / erst into the controller entry if present
-    if ev_phys_opt.is_some() || erst_phys_opt.is_some() {
-        let mut list = XHCI_CONTROLLERS.lock();
-        for c in list.iter_mut() {
-            if c.bar_phys == bar_phys {
-                if let Some(evp) = ev_phys_opt {
-                    let h = crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
-                    c.event_ring_phys = Some(evp);
-                    c.event_ring_virt = Some(h as usize + evp);
-                }
-                if let Some(ep) = erst_phys_opt {
-                    let h = crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
-                    c.erst_phys = Some(ep);
-                    c.erst_virt = Some(h as usize + ep);
-                }
-                println!("[xHCI] controller updated with event_ring/erst");
+        // 2. Reset
+        wr32(op + USBCMD, rd32(op + USBCMD) | USBCMD_HCRST);
+        let mut reset_ok = false;
+        for _ in 0..4_000_000 {
+            if rd32(op + USBCMD) & USBCMD_HCRST == 0 {
+                reset_ok = true;
                 break;
             }
+            core::hint::spin_loop();
         }
-    }
-}
+        if !reset_ok {
+            println!("[xHCI] {:#x}: reset timeout (HCRST stuck)", bar_phys);
+            return false;
+        }
+        for _ in 0..4_000_000 {
+            if rd32(op + USBSTS) & USBSTS_CNR == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
 
-/// Простейший парсер Event Ring: прочитать несколько TRB из выделенного
-/// event ring буфера и залогировать их как u64 пары для диагностики.
-pub fn poll_event_ring() {
-    let list = XHCI_CONTROLLERS.lock();
-    for c in list.iter() {
-        if let Some(ev_virt) = c.event_ring_virt {
-            println!("[xHCI] poll_event_ring: controller bar={:#x} event_ring_virt={:#x}", c.bar_phys, ev_virt);
-            unsafe {
-                // прочитаем первые 4 TRB (каждый TRB 16 байт)
-                for i in 0..4 {
-                    let off = ev_virt + i * 16;
-                    let p0 = off as *const u64;
-                    let p1 = (off + 8) as *const u64;
-                    let v0 = core::ptr::read_volatile(p0);
-                    let v1 = core::ptr::read_volatile(p1);
-                    // Попытка распарсить TRB: параметры и контрольные биты
-                    let trb_param = v0;
-                    let trb_ctl = v1;
-                    let trb_type = ((trb_ctl >> 10) & 0x3F) as u8;
-                    let completion_code = ((trb_ctl >> 24) & 0xFF) as u8;
-                    let cycle = (trb_ctl & 1) as u8;
-                    println!("[xHCI] ER TRB{}: param={:#018x} ctl={:#018x} type={} cc={} cycle={}",
-                        i, trb_param, trb_ctl, trb_type, completion_code, cycle);
+        // 3. DCBAA + scratchpad buffers (нужны для Address Device на реальном
+        //    железе, QEMU обычно обходится без них).
+        let Some((dcbaa_phys, dcbaa_virt)) = alloc_dma(4096) else {
+            println!("[xHCI] {:#x}: no memory for DCBAA", bar_phys);
+            return false;
+        };
+        wr64(op + DCBAAP, dcbaa_phys);
 
-                    // Detect Command Completion Event (type 0x21) and handle it
-                    if trb_type == 0x21 {
-                        println!("[xHCI] Command Completion Event detected (cc={})", completion_code);
-                        // Call handler (non-panicking) to process completion
-                        handle_command_completion(c.bar_phys, trb_param, trb_ctl);
+        let scratchpad_count =
+            (((hcsparams2 >> 21) & 0x1F) | (((hcsparams2 >> 27) & 0x1F) << 5)) as usize;
+        if scratchpad_count > 0 {
+            if let Some((array_phys, array_virt)) = alloc_dma(scratchpad_count * 8) {
+                let mut allocated = 0;
+                for index in 0..scratchpad_count {
+                    match alloc_dma(4096) {
+                        Some((phys, _)) => {
+                            wr64(array_virt + (index as u64) * 8, phys);
+                            allocated += 1;
+                        }
+                        None => break,
                     }
                 }
-            }
-        } else {
-            println!("[xHCI] poll_event_ring: controller bar={:#x} no event_ring allocated", c.bar_phys);
-        }
-    }
-}
-
-/// Handle a Command Completion Event TRB. For now only logs and handles Enable Slot success.
-fn handle_command_completion(bar_phys: u64, trb_param: u64, trb_ctl: u64) {
-    let completion_code = ((trb_ctl >> 24) & 0xFF) as u8;
-    // For Command Completion, the TRB parameter usually contains the slot ID for Enable Slot.
-    // We'll attempt to extract a plausible Slot ID from bits 24..31 of parameter or from ctl.
-    let slot_id = ((trb_param >> 24) & 0xFF) as u8;
-    println!("[xHCI] handle_command_completion: controller={:#x} slot_id={} cc={}", bar_phys, slot_id, completion_code);
-
-    if completion_code == 0 {
-        // success — check whether this is an Enable Slot completion (slot_id != 0)
-        if slot_id != 0 {
-            println!("[xHCI] Enable Slot succeeded for slot {} on controller {:#x}", slot_id, bar_phys);
-            on_enable_slot_success(bar_phys, slot_id);
-        } else {
-            println!("[xHCI] Command completed successfully but slot_id==0 — unknown command");
-        }
-    } else {
-        println!("[xHCI] Command Completion reported error code {}", completion_code);
-    }
-}
-
-/// Placeholder invoked when Enable Slot completes successfully. Will perform next steps:
-/// allocate Device Context Base Address Array (DCBAA) and submit Address Device command.
-fn on_enable_slot_success(_bar_phys: u64, slot_id: u8) {
-    println!("[xHCI] on_enable_slot_success: slot={} (placeholder) — will implement DCBAA + Address Device next", slot_id);
-    // TODO: allocate DCBAA, prepare device context, issue Address Device command via ASQ
-}
-
-/// Prepare (diagnostic) writes for runtime ERST/ERDP and doorbell addresses.
-/// This function currently does not perform MMIO writes — it only computes and
-/// logs the addresses/values we would write. After validating runtime base
-/// from serial logs we can enable actual writes.
-pub fn prepare_runtime_erst_and_doorbell() {
-    let list = XHCI_CONTROLLERS.lock();
-    for c in list.iter() {
-        if let Some(rt) = c.cap_rt_off {
-            let runtime_base = (c.op_base_virt as u64).wrapping_sub(0) + (rt as u64);
-            println!("[xHCI] prepare_runtime: controller {:#x} runtime_base={:#x}", c.bar_phys, runtime_base);
-
-            // Planned ERSTSZ (number of segments - 1). We allocated one page for ERST,
-            // and will use a single segment for the event ring. ERSTSZ = segments - 1 => 0
-            let erstsz: u32 = 0;
-
-            // ERSTBA: physical base of the ERST table (we stored erst_phys)
-            if let Some(erst_phys) = c.erst_phys {
-                let erst_lo = erst_phys as u32;
-                let erst_hi = (erst_phys as u64 >> 32) as u32;
-                println!("[xHCI] would write ERSTSZ={:#x} to runtime+ERSTSZ", erstsz);
-                println!("[xHCI] would write ERSTBA_LO={:#x} ERSTBA_HI={:#x}", erst_lo, erst_hi);
-            } else {
-                println!("[xHCI] no ERST phys allocated for controller {:#x}", c.bar_phys);
-            }
-
-            // ERDP: Event Ring Dequeue Pointer (we'll point to start of event ring virt)
-            if let Some(ev_phys) = c.event_ring_phys {
-                let ev_virt = c.event_ring_virt.unwrap_or(0);
-                println!("[xHCI] would set ERDP to event_ring_virt={:#x}", ev_virt);
-            } else {
-                println!("[xHCI] no event ring allocated for controller {:#x}", c.bar_phys);
-            }
-
-            // Doorbell: compute candidate address for doorbell registers.
-            // Doorbell array generally follows capability+operational regions; we compute a candidate
-            // using op_base + 0x1000 as a conservative guess and log it for diagnostics.
-            let doorbell_candidate = c.op_base_virt + 0x1000;
-            println!("[xHCI] doorbell candidate @ {:#x}", doorbell_candidate);
-        } else {
-            println!("[xHCI] controller {:#x} has no cap_rt_off; cannot prepare runtime writes", c.bar_phys);
-        }
-    }
-}
-
-/// Perform actual MMIO writes to runtime registers: ERSTSZ, ERSTBA (lo/hi), and ERDP.
-/// Writes are gated by `RUNTIME_WRITES_ENABLED`. Logs actions either way.
-pub fn write_runtime_erst() {
-    const ERSTSZ_OFF: u64 = 0x18; // chosen candidate offsets relative to runtime base
-    const ERSTBA_LO_OFF: u64 = 0x20;
-    const ERSTBA_HI_OFF: u64 = 0x24;
-    const ERDP_OFF: u64 = 0x28;
-
-    let list = XHCI_CONTROLLERS.lock();
-    for c in list.iter() {
-        if let Some(rt) = c.cap_rt_off {
-            let runtime_base = c.mmio_base_virt + (rt as u64);
-            println!("[xHCI] write_runtime_erst: controller {:#x} runtime_base={:#x}", c.bar_phys, runtime_base);
-
-            if c.erst_phys.is_none() || c.event_ring_phys.is_none() {
-                println!("[xHCI] controller {:#x} missing ERST or event ring; skip", c.bar_phys);
-                continue;
-            }
-
-            let erst_phys = c.erst_phys.unwrap() as u64;
-            let ev_ring_phys = c.event_ring_phys.unwrap() as u64;
-
-            // ERSTSZ = segments - 1 => 0 for 1 segment
-            let erstsz: u32 = 0;
-            println!("[xHCI] would write ERSTSZ={:#x} ERSTBA={:#x} ERDP={:#x}", erstsz, erst_phys, ev_ring_phys);
-
-            if RUNTIME_WRITES_ENABLED.load(Ordering::Relaxed) {
-                unsafe {
-                    let erstsz_ptr = (runtime_base + ERSTSZ_OFF) as *mut u32;
-                    core::ptr::write_volatile(erstsz_ptr, erstsz);
-
-                    let erstba_lo_ptr = (runtime_base + ERSTBA_LO_OFF) as *mut u32;
-                    let erstba_hi_ptr = (runtime_base + ERSTBA_HI_OFF) as *mut u32;
-                    core::ptr::write_volatile(erstba_lo_ptr, erst_phys as u32);
-                    core::ptr::write_volatile(erstba_hi_ptr, (erst_phys >> 32) as u32);
-
-                    let erdp_ptr = (runtime_base + ERDP_OFF) as *mut u64;
-                    core::ptr::write_volatile(erdp_ptr, ev_ring_phys);
+                if allocated == scratchpad_count {
+                    wr64(dcbaa_virt, array_phys);
+                    println!("[xHCI] scratchpad: {} page(s)", scratchpad_count);
+                } else {
+                    println!(
+                        "[xHCI] scratchpad: only {}/{} page(s) allocated",
+                        allocated, scratchpad_count
+                    );
                 }
-                println!("[xHCI] runtime ERST/ERDP written for controller {:#x}", c.bar_phys);
-            } else {
-                println!("[xHCI] RUNTIME_WRITES_ENABLED disabled; not writing ERST/ERDP for {:#x}", c.bar_phys);
             }
-        } else {
-            println!("[xHCI] controller {:#x} has no RTSOFF; skip runtime write", c.bar_phys);
+        }
+
+        // 4. Command ring
+        let Some(mut cmd) = Ring::new() else { return false };
+        cmd.init_link();
+        wr64(op + CRCR, cmd.phys | 1);
+
+        // 5. Event ring + ERST
+        let Some(ev) = Ring::new() else { return false };
+        let Some((erst_phys, erst_virt)) = alloc_dma(4096) else { return false };
+        wr64(erst_virt, ev.phys);
+        wr32(erst_virt + 8, RING_TRBS as u32);
+        wr32(erst_virt + 12, 0);
+        wr32(rt + IR0_ERSTSZ, 1);
+        wr64(rt + IR0_ERSTBA, erst_phys);
+        wr64(rt + IR0_ERDP, ev.phys);
+
+        // 6. CONFIG + Run
+        wr32(op + CONFIG, max_slots as u32);
+        wr32(op + USBSTS, rd32(op + USBSTS)); // clear pending status bits
+        wr32(op + USBCMD, rd32(op + USBCMD) | USBCMD_RS);
+        let mut running = false;
+        for _ in 0..4_000_000 {
+            if rd32(op + USBSTS) & USBSTS_HCH == 0 {
+                running = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if !running {
+            println!("[xHCI] {:#x}: controller did not start", bar_phys);
+            return false;
+        }
+
+        let controller = Controller {
+            op,
+            rt,
+            db,
+            max_ports,
+            dcbaa_virt,
+            cmd,
+            ev,
+            keys: Vec::new(),
+            scratchpad_pages: scratchpad_count,
+            enumerated: false,
+        };
+
+        // Перечисление портов отложено до первого опроса клавиатуры:
+        // на реальном железе оно занимает секунды и не должно задерживать boot.
+        println!(
+            "[xHCI] {:#x}: running, enumeration deferred (scratchpad {} page(s))",
+            bar_phys, controller.scratchpad_pages
+        );
+        XHCI.lock().push(controller);
+        true
+    }
+}
+
+/// Перечисляет подключённые порты и настраивает найденные HID-клавиатуры.
+unsafe fn enumerate_ports(ctrl: &mut Controller) {
+    for port in 1..=ctrl.max_ports {
+        let portsc = rd32(ctrl.port_reg(port));
+        if portsc & PORTSC_CCS == 0 {
+            continue;
+        }
+        ctrl.port_clear_changes(port);
+        match ctrl.reset_port(port) {
+            Some(speed) => {
+                println!(
+                    "[xHCI] port {}: connected (speed {} = {})",
+                    port,
+                    speed,
+                    speed_name(speed)
+                );
+                enumerate_device(ctrl, port, speed);
+            }
+            None => println!("[xHCI] port {}: reset failed", port),
         }
     }
 }
+

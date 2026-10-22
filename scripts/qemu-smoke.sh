@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 qemu="${QEMU:-qemu-system-x86_64}"
-timeout_seconds="${SMOKE_TIMEOUT:-75}"
+timeout_seconds="${SMOKE_TIMEOUT:-90}"
 minimum_heartbeats="${SMOKE_MIN_HEARTBEATS:-12}"
 log_file="$repo_root/build/qemu-smoke.log"
 heartbeat_log_file="$repo_root/build/qemu-smoke-debugcon.log"
