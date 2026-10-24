@@ -745,6 +745,12 @@ impl Console {
     pub fn update_cursor_blink(&mut self) {
         const BLINK_MS: u64 = 500;
         let now = crate::timer::uptime_ms();
+        // Первый вызов: рисуем курсор сразу, не ждём полсекунды.
+        if self.last_blink_ms == 0 && now > 0 {
+            self.last_blink_ms = now;
+            self.draw_cursor();
+            return;
+        }
         if now.saturating_sub(self.last_blink_ms) >= BLINK_MS {
             self.last_blink_ms = now;
             self.cursor_blink_state = !self.cursor_blink_state;

@@ -74,9 +74,10 @@ pub struct RawRtc {
 }
 
 impl RawRtc {
-    /// Значение регистра века, если прошивка его заполняет (иначе 0).
-    pub fn century_value(&self) -> Option<u16> {
-        let c = bcd_to_bin(self.century);
+    /// Значение регистра века (19..=21), если прошивка его заполняет.
+    /// `bcd` — режим кодирования из Status Register B.
+    pub fn century_value(&self, bcd: bool) -> Option<u16> {
+        let c = if bcd { bcd_to_bin(self.century) } else { self.century };
         if (19..=21).contains(&c) { Some(c as u16) } else { None }
     }
 }
@@ -200,7 +201,7 @@ pub fn decode(raw: &RawRtc) -> Option<RtcTime> {
     let month = dec(raw.month);
     let year2 = dec(raw.year);
 
-    let century = raw.century_value().unwrap_or_else(|| {
+    let century = raw.century_value(bcd).unwrap_or_else(|| {
         // Эвристика: 70..99 → 19xx, 00..69 → 20xx.
         if year2 >= 70 { 19 } else { 20 }
     });
