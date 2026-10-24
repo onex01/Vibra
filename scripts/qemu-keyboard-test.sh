@@ -10,6 +10,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 log_dir="$repo_root/build"
 image="$log_dir/hdd.img"
 timeout_seconds="${KEYBOARD_TEST_TIMEOUT:-90}"
+ready_timeout="${BOOT_READY_TIMEOUT:-60}"
 
 if [[ ! -f "$image" ]]; then
     echo "missing $image; run 'make build' first" >&2
@@ -54,7 +55,7 @@ run_case() {
 
     {
         # Ждём приглашение shell в serial-логе (boot занимает ~10-30 c).
-        for _ in $(seq 1 60); do
+        for _ in $(seq 1 "$ready_timeout"); do
             if grep -q 'vibra:/>' "$serial_log" 2>/dev/null; then
                 break
             fi

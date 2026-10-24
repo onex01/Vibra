@@ -7,3 +7,5 @@ wget-*
 .zcode
 __pycache__/
 *.pyc
+# Локальные cargo/rustup home (CI и изолированные сборки)
+.ci/

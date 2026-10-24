@@ -4,22 +4,72 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      boot_iterations:
+        description: "Сколько последовательных QEMU-загрузок выполнить (matrix)"
+        default: "10"
+        required: false
+
+# Долгие QEMU-прогоны: отменяем устаревшие сборки того же ref.
+concurrency:
+  group: kernel-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   qemu-smoke:
+    name: QEMU smoke (UEFI, nightly)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Собственные cargo/rustup home: не зависим от предустановленного Rust
+      # в образе раннера, не требуем sudo и не конфликтуем с чужим rustup.
+      CARGO_HOME: ${{ github.workspace }}/.ci/cargo
+      RUSTUP_HOME: ${{ github.workspace }}/.ci/rustup
+      # На GitHub-раннерах нет /dev/kvm, QEMU работает через TCG и медленнее,
+      # поэтому все таймауты тестов задаются с запасом.
+      SMOKE_TIMEOUT: 180
+      SMOKE_MIN_HEARTBEATS: 12
+      CLOCK_TEST_TIMEOUT: 180
+      FS_TEST_TIMEOUT: 300
+      KEYBOARD_TEST_TIMEOUT: 240
+      BOOT_READY_TIMEOUT: 120
+      MARKER_TIMEOUT: 60
+      BOOT_TIMEOUT: 90
+      ISO_SMOKE_TIMEOUT: 180
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install host dependencies
+      - name: Install host packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y make qemu-system-x86 mtools dosfstools wget tar xorriso fdisk
+          sudo apt-get install -y --no-install-recommends \
+            make qemu-system-x86 seabios mtools dosfstools wget tar xz-utils \
+            xorriso fdisk ntfs-3g gcc python3
 
-      - name: Install Rust nightly target
+      - name: Install Rust toolchain (rustup)
         run: |
-          rustup toolchain install nightly --profile minimal
+          set -euo pipefail
+          # Пакеты rustup/rust/cargo из apt или dnf не дают рабочего `rustup`:
+          # ставим официальный установщик в CARGO_HOME/RUSTUP_HOME этого job'а.
+          if [[ ! -x "$CARGO_HOME/bin/rustup" ]]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          fi
+          # `source $HOME/.cargo/env` действует только внутри одного шага,
+          # поэтому PATH для следующих шагов отдаём через $GITHUB_PATH.
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          # rust-src обязателен: ядро собирается с -Z build-std=core,alloc,compiler_builtins.
+          rustup toolchain install nightly --profile minimal --component rust-src
           rustup target add x86_64-unknown-none --toolchain nightly
+          rustup toolchain list
+          rustup component list --toolchain nightly --installed | grep -qx rust-src
+          rustup target list --toolchain nightly --installed | grep -qx x86_64-unknown-none
+          cargo +nightly -V
 
       - name: Check build environment
         run: ./build.sh doctor
@@ -31,26 +81,53 @@ jobs:
         run: python3 scripts/check-warning-budget.py
 
       - name: Build and smoke-test UEFI boot
-        env:
-          SMOKE_TIMEOUT: 90
-          SMOKE_MIN_HEARTBEATS: 12
         run: ./build.sh smoke
 
-      - name: Build GPT/ESP UEFI test image
+      - name: Test clock, RTC and ramfs layout
+        run: ./build.sh clock-test
+
+      - name: Test PS/2 and USB HID keyboard
+        run: ./build.sh keyboard-test
+
+      - name: Test filesystem drivers
+        run: ./build.sh fs-test
+
+      - name: Build hybrid BIOS/UEFI ISO
+        run: ./build.sh iso
+
+      - name: Boot ISO in UEFI and BIOS modes
+        run: make iso-smoke
+
+      - name: Build GPT/ESP UEFI USB image
         run: ./build.sh uefi-usb
 
-      - name: Test panic screen and report
+      # Образ для реального носителя: GPT + FAT32 ESP, загрузка через OVMF.
+      - name: Boot GPT/ESP image in QEMU/OVMF
         env:
           BOOT_SOURCE_IMAGE: build/vibra-uefi.img
+          BOOT_ITERATIONS: 1
+        run: python3 scripts/qemu-boot-matrix.py
+
+      # mcopy не умеет писать в ISO (в начале образа нет FAT), поэтому
+      # panic/fault-тесты выполняются на build/hdd.img.
+      - name: Test panic screen and report
         run: bash scripts/qemu-exception-smoke.sh panic-test
 
       - name: Test page fault report
-        env:
-          BOOT_SOURCE_IMAGE: build/vibra-uefi.img
         run: bash scripts/qemu-exception-smoke.sh fault-test
 
       - name: Run sequential QEMU boot matrix
+        # 10 загрузок по умолчанию; 100 можно запросить через workflow_dispatch.
         env:
-          BOOT_ITERATIONS: 100
-          BOOT_SOURCE_IMAGE: build/vibra-uefi.img
+          BOOT_ITERATIONS: ${{ github.event.inputs.boot_iterations || '10' }}
         run: python3 scripts/qemu-boot-matrix.py
+
+      - name: Upload QEMU logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-logs
+          path: |
+            build/*.log
+            build/fs-test-status.txt
+          if-no-files-found: ignore

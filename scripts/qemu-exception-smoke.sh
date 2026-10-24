@@ -43,18 +43,21 @@ trap 'rm -f "$disk_image"' EXIT
 mcopy -o -i "$disk_image" "$kernel" ::/kernel.elf
 
 python3 - "$qemu" "$disk_image" "$firmware" "$command" "${markers[@]}" <<'PY'
+import os
 import socket
 import subprocess
 import sys
 import time
 
 qemu, disk, firmware, command, *markers = sys.argv[1:]
+ready_timeout = float(os.environ.get("BOOT_READY_TIMEOUT", "45"))
+marker_timeout = float(os.environ.get("MARKER_TIMEOUT", "15"))
 
 listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listener.bind(("127.0.0.1", 0))
 listener.listen(1)
-listener.settimeout(45)
+listener.settimeout(ready_timeout)
 port = listener.getsockname()[1]
 
 qemu_args = [
@@ -93,11 +96,11 @@ try:
             captured.extend(chunk)
         return predicate()
 
-    if not receive_until(lambda: b"vibra:/>" in captured, 45):
+    if not receive_until(lambda: b"vibra:/>" in captured, ready_timeout):
         raise RuntimeError("guest shell did not become ready")
 
     connection.sendall(command.encode("ascii") + b"\r")
-    if not receive_until(lambda: all(marker.encode() in captured for marker in markers), 15):
+    if not receive_until(lambda: all(marker.encode() in captured for marker in markers), marker_timeout):
         text = captured.decode("ascii", "replace")
         missing = [marker for marker in markers if marker.encode() not in captured]
         raise RuntimeError(f"missing markers {missing!r}:\n" + text[-5000:])

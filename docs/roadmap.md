@@ -39,10 +39,17 @@
   навсегда оставался в `hlt`. Добавлены маркеры `[TICK]`/`[HALT]` на debugcon.
 - [x] QEMU+xHCI heartbeat smoke и panic/page-fault checks добавлены в CI;
   первый CI run ожидается.
+- [x] CI сам ставит тулчейн: официальный rustup (пакеты из apt/dnf не дают
+  рабочего `rustup`), `nightly --component rust-src`, target
+  `x86_64-unknown-none`; PATH передаётся через `$GITHUB_PATH`.
 - [x] Warning budgets enforced in CI: debug ≤107, no-default ≤110.
 - [ ] QEMU UEFI smoke-test в CI; workflow добавлен, ожидает первого CI-прогона.
+- [ ] Загрузка ISO (`make iso-smoke`) в UEFI и BIOS в CI; цель добавлена,
+  ожидает первого CI-прогона.
 - [ ] 100 последовательных QEMU boots: matrix runner и CI job добавлены; локально
-  подтверждён 1 boot, полный цикл прерывался до checkpoint.
+  подтверждены 2 последовательных boot на `build/hdd.img` и 1 boot GPT/ESP-образа
+  (`BOOT_TIMEOUT=90`). В CI по умолчанию 10 итераций (TCG без KVM), 100 задаются
+  через `workflow_dispatch` → `boot_iterations`.
 - [x] GPT/FAT32 ESP UEFI test image target (`./build.sh uefi-usb`); `sfdisk`
   verification и OVMF boot прошли.
 - [x] Проверяемые PMM/heap stress-тесты: boot heap stress и `diag pmm` прошли

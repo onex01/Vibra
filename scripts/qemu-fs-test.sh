@@ -13,6 +13,7 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 qemu="${QEMU:-qemu-system-x86_64}"
 timeout_seconds="${FS_TEST_TIMEOUT:-120}"
+ready_timeout="${BOOT_READY_TIMEOUT:-30}"
 log_file="$repo_root/build/qemu-fs-test.log"
 report="$repo_root/build/fs-test-status.txt"
 
@@ -113,7 +114,12 @@ qemu_pid=$!
 
 {
     exec 3> "$serial_in"
-    sleep 12
+    # Ждём prompt в serial-логе вместо фиксированной паузы: на медленных
+    # TCG-раннерах (CI без KVM) загрузка занимает заметно больше 12 секунд.
+    for _ in $(seq 1 "$ready_timeout"); do
+        grep -Fq 'vibra:/>' "$log_file" 2>/dev/null && break
+        sleep 1
+    done
     printf 'mount /mnt fat32 sdb\r'        >&3; sleep 2
     printf 'ls /mnt\r'                     >&3; sleep 2
     printf 'cat /mnt/hello.txt\r'          >&3; sleep 2

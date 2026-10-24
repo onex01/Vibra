@@ -3,7 +3,8 @@ TARGET := x86_64-unknown-none
 BUILD_DIR := build
 LIMINE_DIR := limine-bin
 
-QEMU := /usr/bin/qemu-system-x86_64
+# QEMU можно переопределить из окружения (например, qemu-system-x86_64 из PATH в CI).
+QEMU ?= /usr/bin/qemu-system-x86_64
 
 # QEMU environment wrapper: clear env to avoid snap/core20 libs,
 # but preserve display-related vars when run in a GUI session.
@@ -63,7 +64,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build kernel smoke run clean setup install-kernel iso usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test
+.PHONY: all build kernel smoke run clean setup install-kernel iso iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test
 
 all: run
 
@@ -96,6 +97,10 @@ keyboard-test: build
 # Проверка часов: RTC/date, uptime, diag timer, /proc/uptime и чистота рамфс.
 clock-test: build
 	@QEMU="$(QEMU)" bash scripts/qemu-clock-test.sh
+
+# Проверка загрузки собранного ISO: UEFI (OVMF) и BIOS (SeaBIOS) через El Torito.
+iso-smoke: iso
+	@QEMU="$(QEMU)" bash scripts/qemu-iso-smoke.sh
 
 setup:
 	@echo "==> Setting up boot image..."

@@ -14,6 +14,7 @@ log_dir="$repo_root/build"
 image="$log_dir/hdd.img"
 serial_log="$log_dir/qemu-clock.log"
 timeout_seconds="${CLOCK_TEST_TIMEOUT:-90}"
+ready_timeout="${BOOT_READY_TIMEOUT:-60}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
 if [[ ! -f "$image" ]]; then
@@ -49,7 +50,7 @@ send_text() {
 rm -f "$serial_log"
 
 {
-    for _ in $(seq 1 60); do
+    for _ in $(seq 1 "$ready_timeout"); do
         if grep -q 'vibra:/>' "$serial_log" 2>/dev/null; then
             break
         fi

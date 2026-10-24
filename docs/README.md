@@ -23,7 +23,7 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | PS/2, PIC/PIT, GDT/IDT | базовый диагностический путь |
 | PCI/ACPI | инвентаризация и частичная инициализация |
 | AHCI/NVMe, FAT32/Ext2/NTFS | AHCI + block layer + MBR/GPT + read-only mount в QEMU |
-| xHCI/HID | только диагностика контроллера, не ввод с USB |
+| xHCI/HID | enumeration и HID boot keyboard в QEMU; на реальном железе не подтверждено |
 | e1000/RTL8139, IPv4/ICMP | QEMU-ориентированный прототип, без DHCP/TCP |
 | ARM64 / Orange Pi Zero 3 | не поддерживается |
 
@@ -40,13 +40,32 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 |---|---|
 | `make build` | сборка ядра и установка его в `build/hdd.img` |
 | `make smoke` | UEFI-загрузка в QEMU, маркеры boot-пути и heartbeat |
+| `make clock-test` | `date`/`uptime`/`diag timer`, `/proc/uptime` и состав рамфс |
 | `make fs-test` | FAT32/ext2/NTFS read-only + MBR-раздел через shell по serial |
+| `make keyboard-test` | ввод PS/2 и USB HID клавиатуры через monitor `sendkey` |
+| `make iso-smoke` | загрузка гибридного ISO в UEFI (OVMF) и BIOS (SeaBIOS) |
 | `BOOT_ITERATIONS=10 python3 scripts/qemu-boot-matrix.py` | повторяемость загрузки |
 | `python3 scripts/check-warning-budget.py` | бюджет предупреждений компилятора |
 
 `make fs-test` (`scripts/qemu-fs-test.sh`) сам создаёт тестовые образы
 (`mkfs.fat`, `mke2fs`, `mkntfs`, `sfdisk`) и прикладывает их к QEMU как
 `sdb`…`sde`; результат пишется в `build/fs-test-status.txt`.
+
+## CI
+
+`.github/workflows/kernel.yml` запускается на `push`, `pull_request` и вручную.
+Тулчейн ставится официальным rustup (`nightly`, компонент `rust-src`, target
+`x86_64-unknown-none`) в локальные `CARGO_HOME`/`RUSTUP_HOME`, а PATH для
+последующих шагов передаётся через `$GITHUB_PATH` — `source $HOME/.cargo/env`
+между шагами не действует. Пакеты `rustup`/`rust`/`cargo` из apt или dnf для
+сборки не подходят.
+
+В CI выполняются `doctor`, `setup`, бюджеты предупреждений, `smoke`,
+`clock-test`, `keyboard-test`, `fs-test`, сборка ISO и его загрузка в UEFI/BIOS,
+сборка GPT/ESP-образа и его загрузка в QEMU/OVMF, panic/page-fault отчёты и
+матрица последовательных загрузок (10 по умолчанию, `workflow_dispatch` →
+`boot_iterations`). Логи QEMU выкладываются артефактом `qemu-logs` даже при
+падении.
 
 ## Документы
 
