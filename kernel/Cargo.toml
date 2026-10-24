@@ -10,6 +10,10 @@ spin = "0.9.8"
 [features]
 default = ["serial-debug"]
 serial-debug = []
+# Включает raw-запись boot-лога в LBA 2/3 первого SATA-порта.
+# ОПАСНО на реальном железе: на внутреннем SSD это GPT partition entries.
+# Только для тестового носителя.
+boot-log-to-disk = []
 
 [lib]
 name = "vibra_kernel"

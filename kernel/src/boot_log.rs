@@ -9,12 +9,15 @@
 // На реальном железе: открыть USB-флешку, прочитать sector 2 в hex-редакторе.
 
 use crate::println;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "boot-log-to-disk")]
+use core::sync::atomic::AtomicBool;
 
 const LOG_SIZE: usize = 32 * 1024; // 32 KB буфер
 
 static mut LOG_BUF: [u8; LOG_SIZE] = [0; LOG_SIZE];
 static LOG_POS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "boot-log-to-disk")]
 static LOG_WRITTEN: AtomicBool = AtomicBool::new(false);
 
 /// Записать байт в лог-буфер
@@ -34,15 +37,15 @@ pub fn get_log() -> &'static [u8] {
 
 /// Записать текущее состояние лога на диск (checkpoint).
 ///
-/// Вызывается на ключевых шагах загрузки, чтобы при зависании/панике на
-/// реальном железе на носителе остался хотя бы хвост лога. Пишем два сектора
-/// в зарезервированной области FAT32:
-///   * LBA 2 — первые 512 байт (начало загрузки);
-///   * LBA 3 — последние 512 байт (то, что случилось непосредственно перед
-///     падением).
+/// ВАЖНО: по умолчанию запись на физический диск **выключена**. Раньше здесь
+/// писались секторы LBA 2 и LBA 3 «на первый SATA-порт» с расчётом на
+/// FAT32-флешку, где это зарезервированная область. На ноутбуке первый
+/// AHCI-порт — это внутренний SSD, и LBA 2 попадает в GPT partition entries:
+/// загрузка с USB-образа портила таблицу разделов.
 ///
-/// LBA 2..3 входят в reserved sectors (обычно 32), поэтому данные ФС не
-/// затрагиваются. Если SATA-диска нет — молча выходим.
+/// Включается только явной сборкой с feature `boot-log-to-disk` и только на
+/// тестовом носителе.
+#[cfg(feature = "boot-log-to-disk")]
 pub fn checkpoint() {
     let log = get_log();
     if log.is_empty() { return; }
@@ -65,9 +68,15 @@ pub fn checkpoint() {
     let _ = crate::drivers::ahci::write_sectors(port, 3, 1, &tail);
 }
 
-/// Raw запись лога на диск (через AHCI) — работает ДО init_filesystem().
-/// Записывает в сектор 2 (LBA=2) на первом SATA порту.
-/// Сектор 2 — первый свободный sector после boot sector (LBA 0) и FSInfo (LBA 1).
+/// No-op: raw-запись на диск выключена (см. комментарий выше).
+#[cfg(not(feature = "boot-log-to-disk"))]
+pub fn checkpoint() {}
+
+/// Raw-запись лога на диск (до init_filesystem).
+///
+/// Выключена по умолчанию — см. `checkpoint()`. Лог доступен в `/boot.log`,
+/// `/var/log/boot.log` и в serial/debugcon.
+#[cfg(feature = "boot-log-to-disk")]
 pub fn flush_raw() {
     if LOG_WRITTEN.load(Ordering::Relaxed) { return; }
 
@@ -89,6 +98,9 @@ pub fn flush_raw() {
         LOG_WRITTEN.store(true, Ordering::Relaxed);
     }
 }
+
+#[cfg(not(feature = "boot-log-to-disk"))]
+pub fn flush_raw() {}
 
 /// Сохранить лог в файл (после init_filesystem)
 pub fn flush_to_file(path: &str) {
@@ -117,7 +129,7 @@ pub fn init() {
 
     let len = LOG_POS.load(Ordering::Relaxed);
     println!("[LOG] Boot log saved ({} bytes)", len);
-    println!("[LOG] /boot.log + /var/log/boot.log + sector 2 on SATA disk");
+    println!("[LOG] /boot.log + /var/log/boot.log (raw disk writes disabled)");
 
     // Дополнительно: выводим лог в serial (для отладки на компьютере с serial)
     if len > 0 {

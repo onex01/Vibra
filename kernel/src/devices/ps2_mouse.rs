@@ -63,8 +63,8 @@ unsafe fn wait_output_full() -> bool {
     timeout > 0
 }
 
-/// Инициализация PS/2 мыши
-pub fn init() {
+/// Инициализация PS/2 мыши. Возвращает false, если мышь не ответила ACK.
+pub fn init() -> bool {
     unsafe {
         // 1. Включаем второй порт PS/2 (команда 0xA8)
         wait_input_empty();
@@ -93,7 +93,8 @@ pub fn init() {
         let _ = wait_output_full();
         let ack = inb(0x60);
         if ack != 0xFA {
-            crate::println!("[MOUSE] WARNING: expected ACK (0xFA), got {:#x}", ack);
+            crate::println!("[MOUSE] No PS/2 mouse (expected ACK 0xFA, got {:#x})", ack);
+            return false;
         }
 
         // 5. Размаскируем IRQ12 на PIC2 (IRQ4 на ведомом PIC)
@@ -102,6 +103,7 @@ pub fn init() {
         outb(0xA1, mask);
 
         crate::println!("[MOUSE] PS/2 mouse initialized (IRQ12 enabled)");
+        true
     }
 }
 

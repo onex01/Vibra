@@ -1,5 +1,4 @@
 pub mod gop;
-pub mod pcivga;
 
 use alloc::vec::Vec;
 use spin::Mutex;

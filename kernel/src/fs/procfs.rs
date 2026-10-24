@@ -26,19 +26,49 @@ impl FileSystem for ProcFs {
         let mut data: Vec<u8> = Vec::new();
         match path {
             "version" => data.extend_from_slice(
-                alloc::format!("Vibra Kernel {} ({})\n", crate::version::KERNEL_VERSION, crate::version::KERNEL_CODENAME).as_bytes(),
+                alloc::format!(
+                    "Vibra Kernel {} ({})\n",
+                    crate::version::KERNEL_VERSION,
+                    crate::version::KERNEL_CODENAME
+                )
+                .as_bytes(),
             ),
-            "meminfo" => data.extend_from_slice(b"MemTotal: 256 MB\nMemFree: 198 MB\n"),
-            "cpuinfo" => data.extend_from_slice(b"processor: 0\nmodel name: QEMU Virtual CPU\ncpu MHz: 2400\n"),
+            "meminfo" => {
+                // Реальная статистика PMM вместо захардкоженных «256 MB».
+                let (used_frames, total_frames) = crate::memory::pmm::stats();
+                let frame = crate::memory::pmm::FRAME_SIZE;
+                let total_kb = total_frames * frame / 1024;
+                let free_kb = (total_frames.saturating_sub(used_frames)) * frame / 1024;
+                let (heap_used, heap_total) = crate::memory::heap::stats();
+                data.extend_from_slice(
+                    alloc::format!(
+                        "MemTotal: {} kB\nMemFree: {} kB\nHeapUsed: {} B\nHeapTotal: {} B\n",
+                        total_kb, free_kb, heap_used, heap_total
+                    )
+                    .as_bytes(),
+                );
+            }
+            "cpuinfo" => {
+                let info = crate::cpu_info::detect();
+                data.extend_from_slice(
+                    alloc::format!(
+                        "processor: 0\nvendor_id: {}\nmodel name: {}\ncores: {}\ncpu MHz: {}\n",
+                        crate::cpu_info::vendor_str(&info),
+                        crate::cpu_info::brand_str(&info),
+                        info.cores,
+                        crate::cpu_info::freq_str(&info)
+                    )
+                    .as_bytes(),
+                );
+            }
             "uptime" => {
-                let ticks = crate::interrupts::idt::ticks();
-                let secs = ticks / 100;
-                let mins = secs / 60;
-                let hours = mins / 60;
-                let s = alloc::format!("{}h {}m {}s\n", hours, mins % 60, secs % 60);
+                let ms = crate::timer::uptime_ms();
+                let s = alloc::format!("{}.{:02} 0.00\n", ms / 1000, (ms % 1000) / 10);
                 data.extend_from_slice(s.as_bytes());
             }
-            "modules" => data.extend_from_slice(b"vibra_core\nramfs\n"),
+            "modules" => {
+                data.extend_from_slice(b"# monolithic kernel: no loadable modules\n");
+            }
             _ => return Err(FsError::NotFound),
         }
         Ok(Box::new(ProcFile { data, pos: 0 }))

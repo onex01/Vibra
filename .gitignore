@@ -5,3 +5,5 @@ OVMF.fd
 wget-*
 .mimocode
 .zcode
+__pycache__/
+*.pyc

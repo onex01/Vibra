@@ -1,11 +1,8 @@
-// Virtual Devices — виртуальные устройства для тестирования и эмуляции.
-//
-// VirtIO Block — базовый блочный драйвер для QEMU VirtIO
-// VirtIO Net — заглушка для сетевого устройства
-// PC Speaker — эмуляция динамика через PIT
+// Virtual Devices — реально обнаруженные устройства ввода и вспомогательные
+// устройства (PC speaker). Раньше здесь регистрировались фиктивные
+// "virtio-block-0"/"virtio-net-0" независимо от наличия оборудования.
 
 pub mod virtio_block;
-pub mod virtio_net;
 pub mod pc_speaker;
 pub mod ps2_mouse;
 
@@ -68,17 +65,16 @@ pub fn count() -> usize {
     DEVICES.lock().len()
 }
 
-/// Инициализация подсистемы виртуальных устройств
+/// Инициализация подсистемы устройств.
 pub fn init() {
-    crate::println!("[DEVICES] Virtual device subsystem initialized");
+    crate::println!("[DEVICES] Input device subsystem initialized");
 
-    // Регистрируем базовые виртуальные устройства
-    register_device("virtio-block-0", VirtDeviceType::Block);
-    register_device("virtio-net-0", VirtDeviceType::Network);
-    register_device("pc-speaker", VirtDeviceType::Console);
-    register_device("ps2-keyboard", VirtDeviceType::Input);
-    register_device("ps2-mouse", VirtDeviceType::Input);
+    // Регистрируем только то, что реально ответило на probe.
+    if crate::keyboard::status().present {
+        register_device("ps2-keyboard", VirtDeviceType::Input);
+    }
 
-    // Инициализируем PS/2 мышь
-    ps2_mouse::init();
+    if ps2_mouse::init() {
+        register_device("ps2-mouse", VirtDeviceType::Input);
+    }
 }

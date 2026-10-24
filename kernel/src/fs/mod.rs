@@ -47,41 +47,32 @@ pub fn init_filesystem() {
     let mut ramfs = LEGACY_RAMFS.lock();
     ramfs.mount().ok();
 
-    // Временная структура каталогов для отладки ядра.
+    // Канонический набор каталогов. Раньше здесь был «отладочный» набор
+    // (/os, /os/kernel, /os/boot, /lib, /apps/*), который дублировал данные
+    // команд version/uname/mount и никем не читался.
     let dirs = [
-        "/os", "/os/kernel", "/os/boot", "/os/services",
-        "/dev", "/cfg", "/lib",
-        "/apps", "/apps/bin", "/apps/data",
-        "/home", "/home/root",
-        "/var", "/var/log", "/var/cache",
-        "/tmp", "/mnt",
-        "/proc", "/sys", "/sys/kernel",
+        "/dev", "/proc", "/sys", "/tmp", "/mnt", "/cfg",
+        "/var", "/var/log",
+        "/home", "/home/root", "/home/user",
     ];
     for dir in &dirs {
         ramfs.mkdir(dir).ok();
     }
 
-    // Системные файлы
-    let files: [(&str, &[u8]); 6] = [
+    // /cfg — единственное место конфигурации (hostname читает его напрямую).
+    let files: [(&str, &[u8]); 2] = [
         ("/cfg/hostname", b"vibra"),
-        ("/cfg/passwd", b"root:x:0:0:root:/home/root:/bin/sh\n"),
-        ("/cfg/fstab", b"# device  mount  type  options  dump  pass\n/         ramfs  rw    0        0     0\n/dev      devtmpfs rw 0        0     0\n/proc     procfs  ro   0        0     0\n/sys      sysfs   ro   0        0     0\n"),
-        ("/os/kernel/name", b"Vibra\n"),
-        ("/os/boot/loader", b"Limine (UEFI)\n"),
-        ("/os/boot/config", b"timeout: 0\ngraphics: yes\n"),
+        (
+            "/cfg/passwd",
+            b"root:x:0:0:root:/home/root:/bin/sh\nuser:x:1000:1000:user:/home/user:/bin/sh\n",
+        ),
     ];
 
     for (path, data) in &files {
         let _ = ramfs.remove(path);
-        if let Ok(_) = ramfs.create(path) {
+        if ramfs.create(path).is_ok() {
             let _ = ramfs.write_data(path, data);
         }
-    }
-
-    let version = alloc::format!("{}\n", crate::version::KERNEL_VERSION);
-    let _ = ramfs.remove("/os/kernel/version");
-    if ramfs.create("/os/kernel/version").is_ok() {
-        let _ = ramfs.write_data("/os/kernel/version", version.as_bytes());
     }
 
     // Инициализируем виртуальные ФС и монтируем в VFS
@@ -108,6 +99,10 @@ pub fn init_filesystem() {
         Err(e) => crate::println!("[FS] devtmpfs mount failed: {:?}", e),
     }
 
+    // /cfg/fstab собирается из реальной таблицы монтирования: статический
+    // текст дублировал `mount` и мог разойтись с фактическим состоянием.
+    write_fstab(&mut ramfs);
+
     // / — root ramfs
     // (уже смонтирован через LEGACY_RAMFS)
 
@@ -123,6 +118,21 @@ pub fn init_filesystem() {
     };
     if found > 0 {
         crate::println!("[FS] block devices registered: {}", found);
+    }
+}
+
+/// Пересобрать `/cfg/fstab` из текущей таблицы монтирования.
+fn write_fstab(ramfs: &mut ramfs::RamFs) {
+    let mut body = String::from("# mountpoint  filesystem\n");
+    // Корень — RamFS, смонтированный напрямую (в таблице VFS его нет).
+    body.push_str("/  ramfs  rw\n");
+    for entry in list_mounts() {
+        body.push_str(&entry);
+        body.push('\n');
+    }
+    let _ = ramfs.remove("/cfg/fstab");
+    if ramfs.create("/cfg/fstab").is_ok() {
+        let _ = ramfs.write_data("/cfg/fstab", body.as_bytes());
     }
 }
 
