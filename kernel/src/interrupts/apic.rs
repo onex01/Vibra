@@ -13,7 +13,7 @@
 // Следующий шаг: постепенная миграция IRQ0→APIC, IRQ1→IO APIC.
 
 use crate::println;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub static APIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -27,8 +27,6 @@ const LAPIC_TPR: u64 = 0x080;
 const LAPIC_EOI: u64 = 0x0B0;
 const LAPIC_SVR: u64 = 0x0F0;
 const LAPIC_LVT_TIMER: u64 = 0x320;
-const LAPIC_LVT_LINT0: u64 = 0x350;
-const LAPIC_LVT_LINT1: u64 = 0x360;
 const LAPIC_TIMER_INIT: u64 = 0x380;
 const LAPIC_TIMER_CURRENT: u64 = 0x390;
 const LAPIC_TIMER_DIV: u64 = 0x3E0;
@@ -38,6 +36,9 @@ const LAPIC_PHYS: u64 = 0xFEE0_0000;
 const IOAPIC_PHYS: u64 = 0xFEC0_0000;
 const IOAPIC_VER_REG: u64 = 0x01;
 const IOAPIC_REDIRECTION: u64 = 0x10;
+
+/// Реальный базовый адрес LAPIC (MADT может отличаться от 0xFEE00000).
+static LAPIC_BASE_PHYS: AtomicU64 = AtomicU64::new(LAPIC_PHYS);
 
 const IA32_APIC_BASE: u32 = 0x1B;
 
@@ -68,7 +69,7 @@ fn hhdm_virt(phys: u64) -> u64 {
 }
 
 unsafe fn lapic_read(reg: u64) -> u32 {
-    let addr = hhdm_virt(LAPIC_PHYS) + reg;
+    let addr = hhdm_virt(LAPIC_BASE_PHYS.load(Ordering::Relaxed)) + reg;
     let val: u32;
     core::arch::asm!(
         "mov rax, [rdi]",
@@ -80,7 +81,7 @@ unsafe fn lapic_read(reg: u64) -> u32 {
 }
 
 unsafe fn lapic_write(reg: u64, val: u32) {
-    let addr = hhdm_virt(LAPIC_PHYS) + reg;
+    let addr = hhdm_virt(LAPIC_BASE_PHYS.load(Ordering::Relaxed)) + reg;
     core::arch::asm!(
         "mov [rdi], eax",
         in("rdi") addr,
@@ -114,11 +115,9 @@ unsafe fn wrmsr(msr: u32, val: u64) {
 // ===== Detect =====
 
 pub fn has_apic() -> bool {
-    unsafe {
-        let mut edx: u32;
-        core::arch::asm!("cpuid", in("eax") 1u32, lateout("edx") edx, options(nomem));
-        edx & (1 << 9) != 0
-    }
+    // __cpuid корректно описывает клобберы eax/ebx/ecx/edx; ручной asm
+    // "cpuid" без lateout("ebx"/"ecx") ломал значение ebx у вызывающего кода.
+    unsafe { core::arch::x86_64::__cpuid(1).edx & (1 << 9) != 0 }
 }
 
 // ===== EOI =====
@@ -136,8 +135,11 @@ unsafe fn init_lapic() {
 
     lapic_write(LAPIC_SVR, 0x1FF);
     lapic_write(LAPIC_TPR, 0);
-    lapic_write(LAPIC_LVT_LINT0, 0x00000100);
-    lapic_write(LAPIC_LVT_LINT1, 0x00000100);
+
+    // LINT0/LINT1 НЕ трогаем. На части чипсетов выход 8259 (INTR) заведён
+    // на LINT0 в режиме ExtINT, и маска LINT0 отрезала бы вообще все
+    // PIC-прерывания (IRQ1 клавиатуры в том числе). Прошивка уже настроила
+    // эти линии; LAPIC timer от них не зависит.
 
     println!("[APIC] LAPIC initialized (SVR=0x1FF, TPR=0)");
 }
@@ -224,6 +226,11 @@ unsafe fn init_ioapic() {
 
 // ===== Full init =====
 
+/// Legacy-путь миграции PIC → LAPIC (сейчас НЕ вызывается из boot).
+///
+/// ВНИМАНИЕ: если вызвать его вместе с `timer::post_init()`, получатся два
+/// источника тиков (PIC IRQ0 и LAPIC vector 48), и `TICKS` будет идти вдвое
+/// быстрее. Рабочий fallback для «мёртвого» IRQ0 — `start_periodic_timer()`.
 pub fn init() {
     if !has_apic() {
         println!("[APIC] No APIC detected, using PIC only");
@@ -249,6 +256,70 @@ pub fn init() {
     println!("[APIC] PIC remains primary (IRQ0 timer + IRQ1 keyboard)");
     println!("[APIC] LAPIC timer calibrated and started (vector 48, ~100Hz)");
     println!("[APIC] Ready for IRQ migration when stable");
+}
+
+/// Запустить LAPIC timer с периодом `hz` Гц на векторе 48.
+///
+/// Используется как fallback, когда PIC IRQ0 не доставляется (на части
+/// ноутбуков 8259 не подключён, и таймер виден только через IOAPIC).
+/// Калибровка идёт по монотонным часам ядра, а не по PIT channel 2:
+/// PIT-канал 2 на некоторых чипсетах занят SMM/EC, и калибровка «плывёт».
+///
+/// EOI для этого вектора шлёт `isr_timer_apic` в idt.rs. `APIC_ACTIVE`
+/// остаётся false: IRQ1 клавиатуры по-прежнему приходит через PIC и требует
+/// PIC EOI.
+pub fn start_periodic_timer(hz: u32) -> bool {
+    if hz == 0 || !has_apic() {
+        return false;
+    }
+    if let Some(base) = crate::acpi::get().as_ref().and_then(|a| a.lapic_addr) {
+        if base != 0 {
+            LAPIC_BASE_PHYS.store(base as u64, Ordering::SeqCst);
+        }
+    }
+
+    unsafe {
+        init_lapic();
+
+        // Если MMIO не отвечает, все регистры читаются как 0xFFFFFFFF.
+        if lapic_read(LAPIC_SVR) == 0xFFFF_FFFF {
+            println!("[APIC] LAPIC MMIO not responding; fallback unavailable");
+            return false;
+        }
+
+        // Калибровка: one-shot с максимальным значением, окно 10 мс.
+        lapic_write(LAPIC_TIMER_DIV, 0x03); // divide by 16
+        lapic_write(LAPIC_LVT_TIMER, 1 << 16); // masked, one-shot
+        lapic_write(LAPIC_TIMER_INIT, 0xFFFF_FFFF);
+
+        let t0 = crate::timer::uptime_us();
+        while crate::timer::uptime_us().wrapping_sub(t0) < 10_000 {
+            core::hint::spin_loop();
+        }
+
+        let remaining = lapic_read(LAPIC_TIMER_CURRENT);
+        let elapsed = 0xFFFF_FFFFu32.wrapping_sub(remaining);
+        if elapsed < 1_000 {
+            println!("[APIC] LAPIC timer calibration failed (elapsed={})", elapsed);
+            return false;
+        }
+
+        // elapsed — тиков за 10 мс; для периода 1/hz секунды:
+        //   init = elapsed * 100 / hz
+        let init = ((elapsed as u64 * 100) / hz as u64).clamp(1, u32::MAX as u64) as u32;
+        lapic_write(LAPIC_TIMER_DIV, 0x03);
+        lapic_write(LAPIC_LVT_TIMER, VEC_LAPIC_TIMER as u32 | (1 << 12)); // periodic
+        lapic_write(LAPIC_TIMER_INIT, init);
+        println!(
+            "[APIC] LAPIC timer: {} Hz, vector {}, init={} (calibrated by {} clock)",
+            hz,
+            VEC_LAPIC_TIMER,
+            init,
+            crate::timer::current_source().name()
+        );
+    }
+
+    true
 }
 
 pub const fn timer_vector() -> u8 {

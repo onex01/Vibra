@@ -21,21 +21,31 @@ pub fn parse(hpet_phys: usize) -> Option<(u64, u8)> {
     }
 
     // Тело HPET таблицы: сразу после SDT заголовка (36 байт)
-    // Компактная раскладка: revision(1) + comp_count(1) + oem_attr(1) + pci_vendor(2) + HpetAddress(12) + seq(1) + min_tick(2) + prot(1)
+    //   36: Hardware Rev ID (u8)
+    //   37: Comparator Count (bits 0-4) | Counter Size 64-bit (bit 5)
+    //   38: PCI Vendor ID (u16)
+    //   40: Address Space ID / bit width / bit offset / reserved
+    //   44: Address (u64, generic address structure)
+    //   52: HPET sequence number, 53: minimum tick, 55: page protection
     let body = hpet_virt + 36;
 
-    // comparator_count — offset 1 от начала тела
-    let comparator_count = unsafe { core::ptr::read_volatile((body + 1) as *const u8) };
+    let flags = unsafe { core::ptr::read_volatile((body + 1) as *const u8) };
+    let comparator_count = flags & 0x1F; // bits 0-4, не весь байт
+    let counter_64bit = flags & 0x20 != 0;
 
-    // HpetAddress начинается на offset 4: space_id(1) + bit_width(1) + bit_offset(1) + reserved(1) + address(8)
-    // address — u64 на offset 4+4=8 от начала body. Может быть unaligned!
+    // HpetAddress начинается на offset 8 от начала body (36 + 8 = 44).
     let mut addr_buf = [0u8; 8];
     unsafe {
         core::ptr::copy_nonoverlapping((body + 8) as *const u8, addr_buf.as_mut_ptr(), 8);
     }
     let address = u64::from_le_bytes(addr_buf);
 
-    crate::println!("[ACPI] HPET: base={:#x}, comparators={}", address, comparator_count);
+    crate::println!(
+        "[ACPI] HPET: base={:#x}, comparators={}, counter={}-bit",
+        address,
+        comparator_count,
+        if counter_64bit { 64 } else { 32 }
+    );
 
     Some((address, comparator_count))
 }

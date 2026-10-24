@@ -78,8 +78,7 @@ pub fn resolve(target_ip: [u8; 4], src_mac: [u8; 6], src_ip: [u8; 4]) -> Option<
     *ARP_RESOLVED_MAC.lock() = None;
 
     let timeout_ms = 3000u64;
-    let start = crate::timer::current_ticks();
-    let tps = crate::timer::ticks_per_second();
+    let start = crate::timer::uptime_ms();
 
     loop {
         // Проверяем, получен ли ответ
@@ -88,10 +87,8 @@ pub fn resolve(target_ip: [u8; 4], src_mac: [u8; 6], src_ip: [u8; 4]) -> Option<
             return Some(mac);
         }
 
-        // Таймаут
-        let elapsed = crate::timer::current_ticks();
-        let elapsed_ms = if tps > 0 { (elapsed - start) * 1000 / tps } else { elapsed - start };
-        if elapsed_ms >= timeout_ms {
+        // Таймаут (монотонные часы, не зависят от IRQ-тиков)
+        if crate::timer::uptime_ms().wrapping_sub(start) >= timeout_ms {
             break;
         }
 

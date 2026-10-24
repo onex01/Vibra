@@ -52,6 +52,8 @@ fi
 for marker in \
     "[BOOT] Step 1: serial OK" \
     "[BOOT] Step 9: Filesystem" \
+    "[TIMER] Clock source:" \
+    "[TIMER] RTC (BIOS):" \
     "[VMM] Initialization complete!" \
     "vibra:/>"; do
     if ! grep -Fq "$marker" "$log_file"; then

@@ -63,7 +63,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build kernel smoke run clean setup install-kernel iso usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test
+.PHONY: all build kernel smoke run clean setup install-kernel iso usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test
 
 all: run
 
@@ -92,6 +92,10 @@ fs-test:
 # KEYBOARD_CASE=ps2|usb|all (по умолчанию all).
 keyboard-test: build
 	@QEMU="$(QEMU)" bash scripts/qemu-keyboard-test.sh "$(KEYBOARD_CASE)"
+
+# Проверка часов: RTC/date, uptime, diag timer, /proc/uptime и чистота рамфс.
+clock-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-clock-test.sh
 
 setup:
 	@echo "==> Setting up boot image..."

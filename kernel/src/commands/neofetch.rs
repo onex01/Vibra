@@ -26,8 +26,8 @@ const LOGO: [&str; 8] = [
 // Информационные строки (по одной на каждую строку логотипа).
 // Спец-символы: {C} = цвет C, {} = сброс на VIBRA_FG.
 fn info_lines() -> alloc::vec::Vec<String> {
-    let ticks = crate::interrupts::idt::TICKS.load(core::sync::atomic::Ordering::Relaxed);
-    let seconds = ticks / 100;
+    let uptime_ms = crate::timer::uptime_ms();
+    let seconds = uptime_ms / 1000;
     let minutes = seconds / 60;
     let hours = minutes / 60;
 

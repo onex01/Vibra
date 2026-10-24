@@ -116,6 +116,12 @@ pub fn init() {
         // LAPIC spurious (0xFF)
         IDT[0xFF].set_handler(isr_lapic_spurious as *const () as u64);
 
+        // Vector 48: LAPIC timer fallback (когда PIC IRQ0 не доставляется).
+        // Обработчик обязателен всегда: если таймер случайно запущен,
+        // прерывание без дескриптора даёт #GP и остановку машины.
+        IDT[crate::interrupts::apic::VEC_LAPIC_TIMER as usize]
+            .set_handler(isr_timer_apic as *const () as u64);
+
         let idt_ptr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; 256]>() - 1) as u16,
             base: core::ptr::addr_of!(IDT) as u64,
@@ -170,6 +176,16 @@ extern "x86-interrupt" fn isr_spurious_slave(_frame: InterruptStackFrame) {}
 
 // LAPIC spurious (vector 0xFF) — не требует EOI, просто iretq
 extern "x86-interrupt" fn isr_lapic_spurious(_frame: InterruptStackFrame) {}
+
+/// LAPIC timer (vector 48) — fallback, когда PIC IRQ0 не доставляется.
+///
+/// Контекст не переключаем: preemption остаётся на PIC-пути, а здесь важно
+/// лишь продвигать счётчик тиков и будить спящие задачи. `note_tick`
+/// использует try_lock, поэтому вызов безопасен из прерывания.
+extern "x86-interrupt" fn isr_timer_apic(_frame: InterruptStackFrame) {
+    crate::interrupts::apic::eoi();
+    crate::task::note_tick();
+}
 
 // ============ Исключения CPU ============
 

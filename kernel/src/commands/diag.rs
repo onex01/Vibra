@@ -10,6 +10,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  vmm        - verify active address space mappings\n");
         console.print("  wxtest     - verify .rodata mapping is read-only\n");
         console.print("  keyboard   - PS/2 controller state and IRQ counters\n");
+        console.print("  timer      - clock sources, IRQ tick rate, RTC/BIOS time\n");
             console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
         console.print("  panic-test - test fatal error screen (halts VM)\n");
         return CmdResult::Ok;
@@ -22,6 +23,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "vmm" => diag_vmm(console),
         "wxtest" => diag_wxtest(console),
         "keyboard" => diag_keyboard(console),
+        "timer" => diag_timer(console),
         "fault-test" => diag_fault_test(console),
         "panic-test" => panic!("diagnostic panic screen test"),
         _ => {
@@ -308,3 +310,90 @@ fn diag_keyboard(console: &mut Console) {
         );
     }
 }
+
+/// Часы ядра: источник, реальная частота IRQ-тиков, RTC/BIOS и расхождение.
+///
+/// Это основной инструмент для жалоб «на одной машине время идёт медленнее»:
+/// видно, какой источник выбран, какая у него частота и совпадает ли
+/// IRQ-время с аппаратным.
+fn diag_timer(console: &mut Console) {
+    use alloc::format;
+
+    let info = crate::timer::clock_info();
+    let measured_hz = crate::timer::measure_irq_hz(200);
+
+    console.print_colored("[TIMER / CLOCK]\n", crate::framebuffer::COLOR_YELLOW);
+
+    console.print("  source:       ");
+    console.print(&format!("{} ({} Hz)\n", info.source.name(), info.source_hz));
+
+    console.print("  uptime:       ");
+    console.print(&format!(
+        "{}.{:03} s ({} ns)\n",
+        info.uptime_ns / 1_000_000_000,
+        (info.uptime_ns / 1_000_000) % 1000,
+        info.uptime_ns
+    ));
+
+    console.print("  TSC:          ");
+    match info.tsc_hz {
+        Some(hz) => console.print(&format!("invariant, {} Hz ({} MHz)\n", hz, hz / 1_000_000)),
+        None => console.print("not calibrated\n"),
+    }
+
+    console.print("  HPET:         ");
+    if info.hpet_ready {
+        console.print(&format!(
+            "base={:#x} period={} fs ({} Hz)\n",
+            info.hpet_base, info.hpet_period_fs, info.hpet_hz
+        ));
+    } else {
+        console.print("unavailable\n");
+    }
+
+    console.print("  IRQ ticks:    ");
+    console.print(&format!(
+        "{} total, {} Hz measured (expected {}), {}\n",
+        info.irq_ticks,
+        measured_hz,
+        crate::interrupts::idt::TIMER_HZ,
+        if info.irq_healthy { "delivered" } else { "NOT delivered" }
+    ));
+
+    console.print("  RTC:          ");
+    match info.rtc {
+        Some(t) => console.print(&format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} (unix {})\n",
+            t.year, t.month, t.day, t.hour, t.minute, t.second, t.to_unix()
+        )),
+        None => console.print("CMOS read failed\n"),
+    }
+
+    console.print("  wall clock:   ");
+    match info.wall_clock {
+        Some(dt) => console.print(&format!("{}\n", dt.format())),
+        None => console.print("not set (boot RTC unavailable)\n"),
+    }
+
+    console.print("  boot unix:    ");
+    console.print(&format!("{}\n", info.boot_unix));
+
+    // Расхождение между «временем по IRQ-тикам» и аппаратными часами.
+    let irq_secs = info.irq_ticks / crate::interrupts::idt::TIMER_HZ;
+    let clk_secs = info.uptime_ns / 1_000_000_000;
+    console.print("  drift:        ");
+    console.print(&format!(
+        "IRQ-based {} s vs clock {} s ({})\n",
+        irq_secs,
+        clk_secs,
+        if irq_secs == clk_secs { "ok" } else { "IRQ ticks are not a reliable time source" }
+    ));
+
+    if !info.irq_healthy {
+        console.print_colored(
+            "  hint: IRQ0 is not delivered; uptime/date use the hardware clock,\n        and the shell idle path busy-polls instead of hlt.\n",
+            crate::framebuffer::COLOR_YELLOW,
+        );
+    }
+}
+

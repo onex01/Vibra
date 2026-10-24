@@ -1,232 +1,183 @@
-// HPET — High Precision Event Timer
+// HPET — High Precision Event Timer.
 //
-// HPET — современный аппаратный таймер x86, заменяет PIT.
-// Работает через MMIO-регистры по стандартному адресу 0xFED00000.
+// HPET — MMIO-таймер x86 (обычно 0xFED00000), который даёт монотонный
+// 64-битный счётчик. Он не зависит от доставки прерываний, поэтому именно
+// он (или TSC, откалиброванный по нему) используется как источник времени.
 //
 // Регистры:
-//   ID Register   (0x000): ревизия, количество таймеров, размер счётчика
-//   CFG Register  (0x010): глобальное включение, legacy replacement
-//   ISR Register  (0x020): статус прерываний (read-only)
-//   Counter (lo)  (0x024): младшие 32 бита основного счётчика
-//   Counter (hi)  (0x0F0): старшие 32 бита (64-бит режим)
+//   0x000 ID       — [63:32] период счётчика в фемтосекундах,
+//                    [15:0] vendor ID, [13] поддержка 64-битного счётчика
+//   0x010 CFG      — [0] ENABLE_CNF, [1] LEG_RT_CNF (legacy replacement)
+//   0x020 ISR      — статус прерываний (read-only)
+//   0x0F0 COUNTER  — 64-битный основной счётчик (lo 0x0F0, hi 0x0F4)
 //
-// Компаратор N (N >= 0):
-//   Config   (0x100 + N*0x20): конфигурация таймера
-//   Compare  (0x108 + N*0x20): значение сравнения
-//   FSB Route (0x110 + N*0x20): FSB interrupt route (для MSI)
-//
-// Инициализация:
-//   1. Прочитать ID → определить частоту (обычно 10 МГц)
-//   2. Отключить legacy replacement
-//   3. Включить основной счётчик
-//   4. Настроить компаратор 0 для periodick interrupts
+// ВАЖНО: частота HPET НЕ определяется по vendor ID. Спецификация требует
+// брать её из поля PERIOD регистра ID: counter_hz = 1e15 / period_fs.
+// Раньше здесь частота угадывалась по PCI vendor (24 МГц для Intel,
+// 14.318 МГц для AMD), из-за чего `sleep_ms` и uptime на реальном железе
+// расходились в разы — причём на разных машинах по-разному.
 
-use crate::println;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-// ======================== HPET MMIO Addresses ========================
+/// Стандартный физический адрес HPET (используется, если ACPI не дал свой).
+const HPET_DEFAULT_PHYS: u64 = 0xFED0_0000;
 
-/// Стандартный физический адрес HPET (spec)
-const HPET_PHYS_BASE: u64 = 0xFED0_0000;
+const REG_ID: u64 = 0x000;
+const REG_CFG: u64 = 0x010;
+const REG_COUNTER_LO: u64 = 0x0F0;
+const REG_COUNTER_HI: u64 = 0x0F4;
 
-// Register offsets
-const HPET_ID: u64 = 0x000;
-const HPET_CFG: u64 = 0x010;
-const HPET_ISR: u64 = 0x020;
-const HPET_COUNTER_LO: u64 = 0x0F0; // 32-bit counter value
-const HPET_COUNTER_HI: u64 = 0x024; // Legacy 32-bit high (не используется, используем 64-bit)
+const CFG_ENABLE: u64 = 1 << 0;
+const CFG_LEGACY_ROUTE: u64 = 1 << 1;
+const ID_COUNTER_64BIT: u64 = 1 << 13;
 
-// Config bits
-const HPET_CFG_ENABLE: u64 = 1 << 1;     // Global Enable
-const HPET_CFG_LEGACY: u64 = 1 << 1;     // Legacy Replacement Route (бит 1 в CFG)
-const HPET_CFG_LEGACY_BIT: u64 = 1;       // Legacy mode replacement
-
-// Timer N registers
-const HPET_TIMER_CFG: u64 = 0x100;   // Base offset for timer 0
-const HPET_TIMER_COMP: u64 = 0x108;
-const HPET_TIMER_FSB: u64 = 0x110;
-const HPET_TIMER_STRIDE: u64 = 0x020; // Расстояние между таймерами
-
-// Timer Config bits
-const HPET_TN_ENABLE: u64 = 1 << 2;       // Timer Interrupt Enable
-const HPET_TN_PERIODIC: u64 = 1 << 3;     // Periodic Mode
-const HPET_TN_FSB_ENABLE: u64 = 1 << 14;  // FSB Interrupt Mapping enable
-
-// ======================== Globals ========================
+/// Разумные границы частоты HPET: 1 кГц .. 100 МГц.
+const MIN_HZ: u64 = 1_000;
+const MAX_HZ: u64 = 100_000_000;
 
 static HPET_BASE: AtomicU64 = AtomicU64::new(0);
+static HPET_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
+static HPET_HZ: AtomicU64 = AtomicU64::new(0);
 static HPET_READY: AtomicBool = AtomicBool::new(false);
-static HPET_TICKS_PER_SEC: AtomicU64 = AtomicU64::new(10_000_000); // Default 10 MHz
 
+#[inline]
 fn hhdm_virt(phys: u64) -> u64 {
     crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed) + phys
 }
 
-// ======================== MMIO Access ========================
+unsafe fn read32(virt: u64, offset: u64) -> u32 {
+    core::ptr::read_volatile((virt + offset) as *const u32)
+}
 
-unsafe fn hpet_read64(offset: u64) -> u64 {
-    let base = HPET_BASE.load(Ordering::Relaxed);
-    // HPET 64-bit counter: read hi, lo, hi again (проверка обёртки)
-    if offset == HPET_COUNTER_LO {
-        // 64-bit counter: читаем как 64-bit напрямую
-        let lo = core::ptr::read_volatile((base + HPET_COUNTER_LO) as *const u32) as u64;
-        let hi = core::ptr::read_volatile((base + 0x024) as *const u32) as u64;
-        (hi << 32) | lo
-    } else {
-        core::ptr::read_volatile((base + offset) as *const u64)
+unsafe fn read64(virt: u64, offset: u64) -> u64 {
+    let lo = read32(virt, offset) as u64;
+    let hi = read32(virt, offset + 4) as u64;
+    (hi << 32) | lo
+}
+
+unsafe fn write64(virt: u64, offset: u64, val: u64) {
+    core::ptr::write_volatile((virt + offset) as *mut u32, val as u32);
+    core::ptr::write_volatile((virt + offset + 4) as *mut u32, (val >> 32) as u32);
+}
+
+/// Проверить один кандидат-адрес HPET: период, 64-битность, «тикает ли».
+unsafe fn probe(phys: u64) -> Option<(u64, u64)> {
+    let virt = hhdm_virt(phys);
+
+    let id = read64(virt, REG_ID);
+    let period_fs = id >> 32;
+    if period_fs == 0 {
+        return None;
     }
-}
-
-unsafe fn hpet_read32(offset: u64) -> u32 {
-    let base = HPET_BASE.load(Ordering::Relaxed);
-    core::ptr::read_volatile((base + offset) as *const u32)
-}
-
-unsafe fn hpet_write64(offset: u64, val: u64) {
-    let base = HPET_BASE.load(Ordering::Relaxed);
-    core::ptr::write_volatile((base + offset) as *mut u64, val);
-}
-
-unsafe fn hpet_write32(offset: u64, val: u32) {
-    let base = HPET_BASE.load(Ordering::Relaxed);
-    core::ptr::write_volatile((base + offset) as *mut u32, val);
-}
-
-// ======================== Init ========================
-
-/// Инициализация HPET таймера
-/// `acpi_base`: базовый адрес HPET из ACPI таблицы (0 если неизвестен)
-pub fn init(acpi_base: Option<u64>) -> bool {
-    let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
-    if hhdm == 0 {
-        println!("[HPET] HHDM is not initialized");
-        return false;
+    let hz = 1_000_000_000_000_000u64 / period_fs;
+    if !(MIN_HZ..=MAX_HZ).contains(&hz) {
+        return None;
+    }
+    if id & ID_COUNTER_64BIT == 0 {
+        // 32-битный счётчик переполняется каждые ~7 минут при 10 МГц —
+        // для системных часов это неприемлемо. Пусть решает TSC/PIT.
+        crate::println!(
+            "[HPET] {:#x}: 32-bit counter only (period {} fs); skipping",
+            phys,
+            period_fs
+        );
+        return None;
     }
 
-    // Используем адрес из ACPI если есть, иначе fallback на стандартный
-    let phys = acpi_base.unwrap_or(HPET_PHYS_BASE);
+    // Legacy replacement выключаем: иначе HPET подменяет IRQ0/IRQ2 PIT,
+    // и запрограммированный нами PIT-тик перестаёт соответствовать 100 Гц.
+    let cfg = read64(virt, REG_CFG);
+    let cfg = cfg & !CFG_LEGACY_ROUTE;
+    write64(virt, REG_CFG, cfg);
+    write64(virt, REG_CFG, cfg | CFG_ENABLE);
 
-    // Проверяем что адрес в разумном диапазоне (ниже 4GB для HHDM)
-    if phys == 0 || phys > 0x1_0000_0000 {
-        println!("[HPET] Address {:#x} is outside the HHDM range; skipping", phys);
-        return false;
-    }
-
-    let mmio_virt = hhdm + phys;
-    HPET_BASE.store(mmio_virt, Ordering::SeqCst);
-
-    unsafe {
-        // Читаем ID Register
-        let id = hpet_read64(HPET_ID);
-        let revision = (id & 0xFF) as u8;
-        let num_timers = ((id >> 8) & 0x1F) as u8 + 1;
-        let counter_size = (id >> 13) & 1; // 0 = 32-bit, 1 = 64-bit
-        let pci_vendor_id = (id >> 16) as u16;
-
-        println!("[HPET] ID: rev={}, timers={}, {}-bit, vendor={:#06x}",
-            revision, num_timers,
-            if counter_size != 0 { "64" } else { "32" },
-            pci_vendor_id);
-
-        if pci_vendor_id == 0 || pci_vendor_id == 0xFFFF {
-            println!("[HPET] Invalid vendor ID; HPET not detected");
-            return false;
+    // Проверяем, что счётчик действительно идёт.
+    let c0 = read64(virt, REG_COUNTER_LO);
+    let mut advanced = false;
+    for _ in 0..100_000u32 {
+        if read64(virt, REG_COUNTER_LO) != c0 {
+            advanced = true;
+            break;
         }
-
-        // Определяем частоту: PCI vendor ID определяет тактовую частоту
-        // Если vendor = 0x8086 (Intel): 14.31818 МГц / 2 = 24.16 МГц → нет,
-        // HPET spec определяет по умолчанию 10 MHz, но vendor может указать иную.
-        // Для большинства чипсетов (Intel/AMD) частота = 10 МГц (PCI vendor = 0x8086).
-        // Если vendor = 0x10DE (NVIDIA) → 25.175 МГц.
-        let freq = match pci_vendor_id {
-            0x8086 => 24_000_000u64, // Intel: 14.31818 MHz / 2 ≈ 24 MHz (уточняется через MSR)
-            0x1022 => 14_318_180u64, // AMD: 14.31818 MHz
-            _ => 10_000_000u64,       // По умолчанию 10 МГц (HPET spec)
-        };
-
-        println!("[HPET] Frequency: {} Hz ({} MHz)", freq, freq / 1_000_000);
-        HPET_TICKS_PER_SEC.store(freq, Ordering::SeqCst);
-
-        // Отключаем Legacy Replacement (бит 1 в CFG)
-        let cfg = hpet_read64(HPET_CFG);
-        if cfg & HPET_CFG_LEGACY != 0 {
-            hpet_write64(HPET_CFG, cfg & !HPET_CFG_LEGACY);
-            println!("[HPET] Legacy replacement disabled");
-        }
-
-        // Включаем основной счётчик
-        let cfg = hpet_read64(HPET_CFG);
-        hpet_write64(HPET_CFG, cfg | HPET_CFG_ENABLE);
-
-        // Проверяем, что счётчик тикает
-        let count1 = hpet_read64(HPET_COUNTER_LO);
-        // Ждём несколько тиков
-        for _ in 0..1000 {
-            core::hint::spin_loop();
-        }
-        let count2 = hpet_read64(HPET_COUNTER_LO);
-
-        if count1 == count2 {
-            println!("[HPET] Counter is not advancing (count={:#x}); HPET unavailable", count1);
-            // Отключаем обратно
-            let cfg = hpet_read64(HPET_CFG);
-            hpet_write64(HPET_CFG, cfg & !HPET_CFG_ENABLE);
-            return false;
-        }
-
-        let delta = count2 - count1;
-        println!("[HPET] Counter is advancing: delta={}", delta);
-
-        // Настраиваем компаратор 0 для periodic interrupts (vector 48 = APIC timer vector)
-        // Пока только логируем — прерывания не настраиваем без полной APIC интеграции
-        if num_timers > 0 {
-            let timer_cfg = hpet_read64(HPET_TIMER_CFG);
-            println!("[HPET] Comparator 0: CFG={:#x}", timer_cfg);
-        }
-
-        HPET_READY.store(true, Ordering::SeqCst);
-        println!("[HPET] Initialized successfully");
-    }
-
-    true
-}
-
-// ======================== Public API ========================
-
-/// Проверить, инициализирован ли HPET
-pub fn is_ready() -> bool {
-    HPET_READY.load(Ordering::SeqCst)
-}
-
-/// Прочитать текущее значение основного счётчика HPET
-pub fn read_counter() -> u64 {
-    if !is_ready() {
-        return 0;
-    }
-    unsafe { hpet_read64(HPET_COUNTER_LO) }
-}
-
-/// Получить частоту HPET (тактов в секунду)
-pub fn ticks_per_second() -> u64 {
-    HPET_TICKS_PER_SEC.load(Ordering::SeqCst)
-}
-
-/// Busy-wait на N миллисекунд через HPET
-pub fn sleep_ms(ms: u64) {
-    if !is_ready() || ms == 0 {
-        return;
-    }
-
-    let ticks_per_ms = ticks_per_second() / 1000;
-    let target = ticks_per_ms * ms;
-    let start = read_counter();
-
-    while read_counter().wrapping_sub(start) < target {
         core::hint::spin_loop();
     }
+    if !advanced {
+        crate::println!("[HPET] {:#x}: counter does not advance", phys);
+        return None;
+    }
+
+    Some((period_fs, hz))
 }
 
-/// Получить базовый физический адрес HPET (для ACPI)
+/// Инициализация HPET. `acpi_base` — адрес из таблицы ACPI HPET (если есть).
+pub fn init(acpi_base: Option<u64>) -> bool {
+    let mut candidates = [0u64; 2];
+    let mut count = 0usize;
+    if let Some(base) = acpi_base.filter(|b| *b != 0) {
+        candidates[count] = base;
+        count += 1;
+    }
+    if acpi_base != Some(HPET_DEFAULT_PHYS) {
+        candidates[count] = HPET_DEFAULT_PHYS;
+        count += 1;
+    }
+
+    for &phys in &candidates[..count] {
+        if let Some((period_fs, hz)) = unsafe { probe(phys) } {
+            HPET_BASE.store(phys, Ordering::SeqCst);
+            HPET_PERIOD_FS.store(period_fs, Ordering::SeqCst);
+            HPET_HZ.store(hz, Ordering::SeqCst);
+            HPET_READY.store(true, Ordering::SeqCst);
+            crate::println!(
+                "[HPET] base={:#x} period={} fs ({} Hz), 64-bit counter enabled",
+                phys,
+                period_fs,
+                hz
+            );
+            return true;
+        }
+    }
+
+    crate::println!("[HPET] No usable HPET found");
+    false
+}
+
+/// Прочитать 64-битный основной счётчик.
+///
+/// Чтение согласовано: hi читается дважды, чтобы не поймать перенос между
+/// чтениями lo/hi.
+pub fn read_counter() -> u64 {
+    if !HPET_READY.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let virt = hhdm_virt(HPET_BASE.load(Ordering::Relaxed));
+    unsafe {
+        loop {
+            let hi1 = read32(virt, REG_COUNTER_HI) as u64;
+            let lo = read32(virt, REG_COUNTER_LO) as u64;
+            let hi2 = read32(virt, REG_COUNTER_HI) as u64;
+            if hi1 == hi2 {
+                return (hi2 << 32) | lo;
+            }
+        }
+    }
+}
+
+/// Частота счётчика HPET в герцах.
+pub fn counter_hz() -> u64 {
+    HPET_HZ.load(Ordering::Relaxed)
+}
+
+/// Период счётчика HPET в фемтосекундах.
+pub fn period_fs() -> u64 {
+    HPET_PERIOD_FS.load(Ordering::Relaxed)
+}
+
+/// Физический базовый адрес HPET.
 pub fn physical_address() -> u64 {
-    HPET_PHYS_BASE
+    HPET_BASE.load(Ordering::Relaxed)
+}
+
+pub fn is_ready() -> bool {
+    HPET_READY.load(Ordering::Relaxed)
 }

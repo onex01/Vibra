@@ -314,7 +314,8 @@ pub struct Console {
     scale_y: u32,
     // Мигающий курсор
     cursor_blink_state: bool,
-    last_blink_tick: u64,
+    /// Время последнего переключения курсора, мс монотонных часов.
+    last_blink_ms: u64,
     // RAM-тень текстовой сетки (для быстрой прокрутки без чтения WC-памяти).
     cells: Vec<TextCell>,
     // false, если экран рисовался примитивами напрямую — тогда тень устарела
@@ -377,6 +378,16 @@ impl Console {
             crate::display::PixelFormat::Bgr888
         };
 
+        // Консоль рисует пиксели как u32. 16/24 bpp означали бы другой шаг,
+        // и на реальном железе картинка была бы «размазанной». Такие режимы
+        // у UEFI GOP не встречаются, но лучше явно предупредить в логе.
+        if framebuffer.bpp != 32 {
+            crate::println!(
+                "[FB] WARNING: {}-bpp framebuffer; console drawing assumes 32 bpp",
+                framebuffer.bpp
+            );
+        }
+
         let mut console = Console {
             fb_addr,
             pitch,
@@ -397,7 +408,7 @@ impl Console {
             scale_x: 0,
             scale_y: 0,
             cursor_blink_state: true,
-            last_blink_tick: 0,
+            last_blink_ms: 0,
             cells: Vec::new(),
             cells_valid: core::cell::Cell::new(true),
         };
@@ -726,14 +737,16 @@ impl Console {
         }
     }
 
-    /// Обновление мигания курсора — вызывать периодически
-    /// Переключает видимость каждые ~500 мс
+    /// Обновление мигания курсора — вызывать периодически.
+    ///
+    /// Раньше здесь сравнивались IRQ-тики (`TICKS`, 100 Гц) с частотой HPET
+    /// (десятки МГц) — интервал получался в миллионы «тиков», и курсор не
+    /// мигал никогда. Теперь используется монотонное время в миллисекундах.
     pub fn update_cursor_blink(&mut self) {
-        let tick = crate::interrupts::idt::TICKS.load(core::sync::atomic::Ordering::Relaxed);
-        let ticks_per_sec = crate::timer::ticks_per_second();
-        let blink_interval = ticks_per_sec / 2; // ~500 мс
-        if tick.saturating_sub(self.last_blink_tick) >= blink_interval {
-            self.last_blink_tick = tick;
+        const BLINK_MS: u64 = 500;
+        let now = crate::timer::uptime_ms();
+        if now.saturating_sub(self.last_blink_ms) >= BLINK_MS {
+            self.last_blink_ms = now;
             self.cursor_blink_state = !self.cursor_blink_state;
             if self.cursor_blink_state {
                 self.draw_cursor();

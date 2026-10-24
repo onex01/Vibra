@@ -102,20 +102,19 @@ pub fn ping(target_ip: [u8; 4], count: u32) {
     let mut total_rtt: u64 = 0;
 
     for seq in 0..count {
-        let t_start = timer::current_ticks();
-        let tps = timer::ticks_per_second();
+        let t_start = timer::uptime_ms();
 
         // Сбрасываем флаг ответа перед отправкой
         REPLY_RECEIVED.store(false, Ordering::Relaxed);
         ICMP_REPLY_AVAIL.store(false, Ordering::Relaxed);
 
-        // Формируем payload с временем отправки
+        // Формируем payload с временем отправки (мс монотонных часов)
         let mut payload = [0u8; 64];
         payload[0] = 0xDE;
         payload[1] = 0xAD;
         payload[2] = 0xBE;
         payload[3] = 0xEF;
-        let time_ms = if tps > 0 { t_start * 1000 / tps } else { t_start };
+        let time_ms = t_start;
         payload[4] = (time_ms & 0xFF) as u8;
         payload[5] = ((time_ms >> 8) & 0xFF) as u8;
         payload[6] = ((time_ms >> 16) & 0xFF) as u8;
@@ -126,16 +125,14 @@ pub fn ping(target_ip: [u8; 4], count: u32) {
         // Ожидаем ответ с таймаутом 2000 мс
         let timeout_ms = 2000u64;
         let mut got_reply = false;
-        let wait_start = timer::current_ticks();
+        let wait_start = timer::uptime_ms();
 
         loop {
             // Поллим e1000 для получения пакетов (статический буфер)
             super::poll_recv_static();
             crate::task::yield_now();
 
-            let now = timer::current_ticks();
-            let elapsed_ms = if tps > 0 { (now - wait_start) * 1000 / tps } else { now - wait_start };
-            if elapsed_ms >= timeout_ms {
+            if timer::uptime_ms().wrapping_sub(wait_start) >= timeout_ms {
                 break;
             }
 
@@ -148,8 +145,8 @@ pub fn ping(target_ip: [u8; 4], count: u32) {
             core::hint::spin_loop();
         }
 
-        let t_end = timer::current_ticks();
-        let rtt_ms = if tps > 0 { (t_end - t_start) * 1000 / tps } else { t_end - t_start };
+        let t_end = timer::uptime_ms();
+        let rtt_ms = t_end.wrapping_sub(t_start);
 
         if got_reply {
             println!("  Ответ от {}: байт=64 время={}мс seq={}",

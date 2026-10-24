@@ -44,7 +44,7 @@ impl LineEditor {
         self.cursor = 0;
         self.history_idx = self.history_count;
         self.prompt_len = prompt_len;
-        let mut last_heartbeat_tick = crate::interrupts::idt::ticks();
+        let mut last_heartbeat_ms = crate::timer::uptime_ms();
         loop {
             // Serial (COM1) + PS/2 keyboard. Keyboard Unknown scancodes
             // теперь возвращают None → не блокируют serial polling.
@@ -195,19 +195,23 @@ impl LineEditor {
             // busy-loop. После принятого serial-байта не спим: так быстро
             // разгружаем 16-байтный FIFO UART и не теряем длинные команды.
             if next_key.is_none() {
-                let ticks = crate::interrupts::idt::ticks();
-                if ticks.wrapping_sub(last_heartbeat_tick) >= crate::interrupts::idt::TIMER_HZ * 5 {
+                let now_ms = crate::timer::uptime_ms();
+                if now_ms.wrapping_sub(last_heartbeat_ms) >= 5_000 {
                     crate::serial::debugcon_println(format_args!(
-                        "[HEARTBEAT] uptime={}s ticks={}",
-                        ticks / crate::interrupts::idt::TIMER_HZ,
-                        ticks
+                        "[HEARTBEAT] uptime={}s ticks={} clock={}",
+                        now_ms / 1000,
+                        crate::interrupts::idt::ticks(),
+                        crate::timer::current_source().name()
                     ));
-                    last_heartbeat_tick = ticks;
+                    last_heartbeat_ms = now_ms;
                 }
 
                 // Обновляем мигание курсора перед сном
                 console.update_cursor_blink();
-                crate::interrupts::wait();
+                // Если тиковый источник не работает, hlt может не вернуться
+                // (ввод идёт polling'ом и прерываний не генерирует) —
+                // timer::idle_wait в этом случае крутится в spin_loop.
+                crate::timer::idle_wait();
             }
         }
     }

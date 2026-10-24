@@ -60,6 +60,14 @@
 ## 0.3.0 «Hardware Core» — прерывания и блочный слой
 
 - [ ] Завершить PIC → LAPIC/IOAPIC для BSP; определить политику MSI/MSI-X.
+- [x] Часы и время на реальном железе: TSC (invariant, калибровка по HPET
+  или PIT ch2) → HPET (частота из ID-регистра, 64-битный счётчик) → PIT IRQ;
+  `uptime`/`date`/тайм-ауты больше не зависят от частоты IRQ-тиков.
+- [x] Синхронизация с BIOS: CMOS RTC (UIP, BCD, 12/24h, CENTURY из FADT)
+  фиксируется на старте как база wall clock; `date`, `date hw`, `diag timer`.
+- [x] `timer::post_init()` измеряет частоту IRQ-тиков; если IRQ0 не
+  доставляется, поднимает LAPIC timer (vector 48 + EOI), иначе
+  `timer::idle_wait()` не уходит в `hlt` — shell не зависает на ноутбуке.
 - [x] Общий `BlockDevice`: bounds, timeouts, read-only, ошибки и DMA-буферы.
   `PartitionDisk` ограничивает окно раздела, AHCI-команды имеют spin-timeout,
   ошибки проверяются по `PxTFD.ERR`, запись разрешена только через явный API.

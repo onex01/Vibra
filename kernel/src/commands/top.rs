@@ -50,10 +50,11 @@ fn print_cpu_info(console: &mut Console) {
     console.put_char('\n');
 
     // Uptime
-    let (sched_ticks, ctx_sw, _) = crate::task::stats();
-    let uptime_secs = sched_ticks / 100;
+    let uptime_ms = crate::timer::uptime_ms();
+    let uptime_secs = uptime_ms / 1000;
     let uptime_mins = uptime_secs / 60;
     let uptime_hours = uptime_mins / 60;
+    let (sched_ticks, ctx_sw, _) = crate::task::stats();
 
     console.print_colored("│ ", COLOR_YELLOW);
     console.print_colored("Uptime: ", COLOR_WHITE);

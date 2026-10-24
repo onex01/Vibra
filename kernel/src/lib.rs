@@ -302,6 +302,10 @@ pub fn init() -> BootConsole {
     interrupts::enable();
     keyboard::post_init();
 
+    // Проверяем, что IRQ-тики реально доставляются, и при необходимости
+    // поднимаем LAPIC timer. Делается после interrupts::enable().
+    crate::timer::post_init();
+
     // Диагностическая печать ожидающих клавиш и счётчика IRQ — помогает отладить
     // ситуацию, когда ввод в shell не доходит. Выводится один раз во время boot.
     keyboard::dump_pending();

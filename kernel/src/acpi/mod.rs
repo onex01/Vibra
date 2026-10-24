@@ -24,6 +24,8 @@ pub struct AcpiInfo {
     pub hpet_comparator_count: Option<u8>,
     /// FADT IA-PC Boot Architecture Flags (offset 109). Bit 1 = 8042 present.
     pub boot_arch_flags: Option<u16>,
+    /// FADT CENTURY (offset 108) — индекс регистра века в CMOS.
+    pub rtc_century_index: Option<u8>,
 }
 
 pub static ACPI_INFO: Mutex<Option<AcpiInfo>> = Mutex::new(None);
@@ -94,6 +96,7 @@ pub fn init() {
         hpet_base: None,
         hpet_comparator_count: None,
         boot_arch_flags: None,
+        rtc_century_index: None,
     };
 
     for &table_phys in &tables {
@@ -131,6 +134,16 @@ pub fn init() {
                         flags,
                         if flags & 0x0002 != 0 { "yes" } else { "no" }
                     );
+                }
+                // CENTURY: offset 108, индекс CMOS-регистра века (0 = нет).
+                if header.length as usize >= 109 {
+                    let century = unsafe {
+                        core::ptr::read_unaligned((table_virt + 108) as *const u8)
+                    };
+                    if century != 0 && century < 0x80 {
+                        info.rtc_century_index = Some(century);
+                        crate::println!("[ACPI] FADT RTC century register: {:#04x}", century);
+                    }
                 }
             }
             b"MCFG" => {

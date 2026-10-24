@@ -1,11 +1,9 @@
 /// Счётчик кадров в секунду (FPS)
 use crate::framebuffer::Console;
-use crate::interrupts::idt::TICKS;
-use core::sync::atomic::Ordering;
 
 pub struct FpsCounter {
     frame_count: u64,
-    last_tick: u64,
+    last_ms: u64,
     current_fps: u32,
 }
 
@@ -13,20 +11,21 @@ impl FpsCounter {
     pub fn new() -> Self {
         FpsCounter {
             frame_count: 0,
-            last_tick: TICKS.load(Ordering::Relaxed),
+            last_ms: crate::timer::uptime_ms(),
             current_fps: 0,
         }
     }
 
-    /// Вызывать один раз за кадр. Обновляет FPS раз в секунду (100 тиков = 1 сек).
+    /// Вызывать один раз за кадр. Обновляет FPS раз в секунду по монотонным
+    /// часам (IRQ-тики на реальном железе могут не доставляться).
     pub fn tick(&mut self) {
         self.frame_count += 1;
-        let now = TICKS.load(Ordering::Relaxed);
-        let elapsed = now.wrapping_sub(self.last_tick);
-        if elapsed >= 100 {
-            self.current_fps = (self.frame_count * 100 / elapsed) as u32;
+        let now = crate::timer::uptime_ms();
+        let elapsed = now.wrapping_sub(self.last_ms);
+        if elapsed >= 1000 {
+            self.current_fps = (self.frame_count * 1000 / elapsed) as u32;
             self.frame_count = 0;
-            self.last_tick = now;
+            self.last_ms = now;
         }
     }
 

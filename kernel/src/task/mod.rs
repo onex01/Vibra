@@ -108,32 +108,9 @@ pub struct Scheduler {
 static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
 static SCHED_READY: AtomicBool = AtomicBool::new(false);
 
-/// ===== Вызывается из naked stub =====
-
-/// Обработчик тика: вызывается из timer_naked_stub.
-/// Возвращает old_rsp (если контекст не меняется) или new_rsp.
-#[no_mangle]
-pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
-    // EOI обязателен ДО любой попытки взять SCHEDULER: если лок занят и мы
-    // вернёмся раньше, PIC не получит EOI и таймер замолчит навсегда
-    // (shell навсегда останется в hlt, heartbeat исчезает).
-    if crate::interrupts::apic::is_active() {
-        crate::interrupts::apic::eoi();
-    } else {
-        unsafe { crate::interrupts::pic::eoi(0); }
-    }
-
-    let mut guard = match SCHEDULER.try_lock() {
-        Some(g) => g,
-        None => return ctx_ptr,
-    };
-    let sched = match *guard {
-        Some(ref mut s) => s,
-        None => return ctx_ptr,
-    };
-
+/// Продвинуть счётчик планировщика и разбудить задачи, чьё время пришло.
+fn advance_tick(sched: &mut Scheduler) {
     sched.tick_count += 1;
-    crate::interrupts::idt::TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     // Диагностика: тик-маркер идёт напрямую на debugcon, поэтому виден даже
     // если shell перестал получать управление.
@@ -153,8 +130,54 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
             }
         }
     }
+}
+
+/// Тик без переключения контекста.
+///
+/// Используется обработчиком LAPIC timer (vector 48), когда PIC IRQ0
+/// не доставляется. `try_lock` гарантирует, что прерывание не зависнет
+/// на локе планировщика, который держит прерванный код.
+pub fn note_tick() {
+    crate::interrupts::idt::TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if let Some(mut guard) = SCHEDULER.try_lock() {
+        if let Some(ref mut sched) = *guard {
+            advance_tick(sched);
+        }
+    }
+}
+
+
+/// ===== Вызывается из naked stub =====
+
+/// Обработчик тика: вызывается из timer_naked_stub.
+/// Возвращает old_rsp (если контекст не меняется) или new_rsp.
+#[no_mangle]
+pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
+    // EOI обязателен ДО любой попытки взять SCHEDULER: если лок занят и мы
+    // вернёмся раньше, PIC не получит EOI и таймер замолчит навсегда
+    // (shell навсегда останется в hlt, heartbeat исчезает).
+    if crate::interrupts::apic::is_active() {
+        crate::interrupts::apic::eoi();
+    } else {
+        unsafe { crate::interrupts::pic::eoi(0); }
+    }
+
+    // Время идёт независимо от того, взяли ли мы лок планировщика.
+    crate::interrupts::idt::TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+    let mut guard = match SCHEDULER.try_lock() {
+        Some(g) => g,
+        None => return ctx_ptr,
+    };
+    let sched = match *guard {
+        Some(ref mut s) => s,
+        None => return ctx_ptr,
+    };
+
+    advance_tick(sched);
 
     // Квант
+    let tc = sched.tasks.len();
     if sched.tick_count % sched.quantum != 0 || tc <= 1 {
         return ctx_ptr;
     }
