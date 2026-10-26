@@ -91,7 +91,13 @@ impl KeyboardState {
             self.queue[self.head] = scancode;
             self.head = next;
         } else {
+            // Переполнение очереди: потерянный байт вполне может быть break-кодом
+            // модификатора. Если его не учесть, Shift останется «зажатым» и весь
+            // дальнейший ввод уйдёт в верхний регистр — сбрасываем модификаторы.
             self.dropped = self.dropped.wrapping_add(1);
+            self.shift = false;
+            self.ctrl = false;
+            self.alt = false;
         }
     }
 
@@ -548,16 +554,22 @@ pub fn post_init() {
 
 /// Вызывается из IRQ1. Читает данные контроллера и складывает их в очередь.
 pub fn handle_interrupt() {
+    // Вычитываем ВСЁ, что контроллер успел положить в буфер: IRQ1 — фронтовый,
+    // и если прочитать один байт из двух, второй останется в буфере без нового
+    // фронта. При следующем нажатии он будет перезаписан (overrun) — так теряются
+    // break-коды модификаторов и «залипает» Shift, а также пропадает Enter.
     unsafe {
-        let status = inb(PS2_STATUS);
-        // bit 0 = data available, bit 5 = данные от AUX (мышь) — не наши.
-        if status & 0x01 == 0 || status & 0x20 != 0 {
-            return;
+        for _ in 0..32 {
+            let status = inb(PS2_STATUS);
+            // bit 0 = data available, bit 5 = данные от AUX (мышь) — не наши.
+            if status & 0x01 == 0 || status & 0x20 != 0 {
+                break;
+            }
+            let scancode = inb(PS2_DATA);
+            let mut state = KEYBOARD_STATE.lock();
+            state.irq_count = state.irq_count.wrapping_add(1);
+            state.push_scancode(scancode);
         }
-        let scancode = inb(PS2_DATA);
-        let mut state = KEYBOARD_STATE.lock();
-        state.irq_count = state.irq_count.wrapping_add(1);
-        state.push_scancode(scancode);
     }
 }
 

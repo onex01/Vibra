@@ -1,9 +1,12 @@
 // xHCI — рабочий lifecycle для BSP: BIOS handoff, reset, DCBAA, command ring,
-// event ring (ERST), перечисление портов и USB HID boot keyboard.
+// event ring (ERST), перечисление портов, USB HID boot keyboard и USB
+// mass storage (bulk endpoints).
 //
 // Драйвер намеренно polling-based: во время boot прерывания ещё выключены,
 // а на реальном железе MSI/MSI-X для xHCI требует отдельной инфраструктуры.
-// `poll_keyboard()` вызывается из `keyboard::poll_key()` и добирает отчёты.
+// `poll_events()` вызывается из `keyboard::poll_key()` и добирает события;
+// `bulk_transfer()` / `control()` — синхронные, с ожиданием Transfer Event,
+// при этом «чужие» события (отчёты клавиатуры) не теряются.
 //
 // Все ожидания ограничены по числу итераций: неотвечающий контроллер не должен
 // вешать boot (это уже случалось с EHCI/BIOS handoff на ноутбуках).
@@ -26,12 +29,21 @@ const TRB_LINK: u32 = 6;
 const TRB_ENABLE_SLOT: u32 = 9;
 const TRB_ADDRESS_DEVICE: u32 = 11;
 const TRB_CONFIGURE_ENDPOINT: u32 = 12;
+const TRB_EVALUATE_CONTEXT: u32 = 13;
 const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_COMMAND_COMPLETION: u32 = 33;
 const TRB_PORT_STATUS_CHANGE: u32 = 34;
 
+// Completion codes
 const CC_SUCCESS: u32 = 1;
+const CC_TRB_ERROR: u32 = 5;
+const CC_STALL: u32 = 6;
 const CC_SHORT_PACKET: u32 = 13;
+
+// Endpoint types (xHCI 6.2.3, table 6-7)
+const EP_TYPE_BULK_OUT: u32 = 2;
+const EP_TYPE_INTERRUPT_IN: u32 = 7;
+const EP_TYPE_BULK_IN: u32 = 6;
 
 // Operational registers
 const USBCMD: u64 = 0x00;
@@ -65,6 +77,9 @@ const SPEED_FULL: u32 = 1;
 const SPEED_LOW: u32 = 2;
 const SPEED_HIGH: u32 = 3;
 
+/// Максимум данных в одном bulk TRB (17-битное поле длины TRB).
+const MAX_BULK_CHUNK: usize = 32 * 1024;
+
 fn speed_name(speed: u32) -> &'static str {
     match speed {
         SPEED_FULL => "full",
@@ -73,6 +88,50 @@ fn speed_name(speed: u32) -> &'static str {
         4 => "super",
         _ => "unknown",
     }
+}
+
+/// Ошибки HCD-уровня. Классовые драйверы (storage) переводят их в `FsError`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsbError {
+    /// Устройство/контроллер исчезли (или слот не найден).
+    NoDevice,
+    /// Transfer/command не завершился за отведённый бюджет итераций.
+    Timeout,
+    /// Endpoint ответил STALL.
+    Stall,
+    /// Ненулевой completion code.
+    TransferFailed,
+    /// Не удалось выделить DMA-буфер.
+    NoMemory,
+    /// Запрос не поддержан драйвером.
+    Unsupported,
+}
+
+/// Описание найденного USB-устройства (для `diag usb` и реестра устройств).
+#[derive(Clone)]
+pub struct UsbDeviceInfo {
+    pub controller: usize,
+    pub slot: u8,
+    pub port: u8,
+    pub speed: u32,
+    pub vendor: u16,
+    pub product: u16,
+    pub class: u8,
+    pub subclass: u8,
+    pub protocol: u8,
+    /// `keyboard`, `storage` или `unsupported`.
+    pub kind: &'static str,
+}
+
+/// Параметры mass storage устройства, которое можно использовать как диск.
+#[derive(Clone, Copy)]
+pub struct StorageInfo {
+    pub controller: usize,
+    pub slot: u8,
+    pub port: u8,
+    pub vendor: u16,
+    pub product: u16,
+    pub max_transfer: usize,
 }
 
 #[inline]
@@ -107,6 +166,7 @@ fn delay(spins: u32) {
         core::hint::spin_loop();
     }
 }
+
 
 /// Кольцо TRB (command / event / endpoint).
 struct Ring {
@@ -188,6 +248,10 @@ impl Event {
     fn endpoint(&self) -> u8 {
         ((self.control >> 16) & 0x1F) as u8
     }
+    /// Остаток непереданных байт (Transfer Event, status bits 0-23).
+    fn transfer_length(&self) -> usize {
+        (self.status & 0x00FF_FFFF) as usize
+    }
 }
 
 struct HidKeyboard {
@@ -202,6 +266,46 @@ struct HidKeyboard {
     reports: u32,
 }
 
+/// Bulk endpoint массового запоминающего устройства.
+struct BulkEndpoint {
+    dci: u8,
+    max_packet: u16,
+    /// `None` только на время выполнения transfer (кольцо временно «взято»).
+    ring: Option<Ring>,
+}
+
+/// USB mass storage (Bulk-Only Transport) устройство.
+struct StorageDevice {
+    slot: u8,
+    port: u8,
+    vendor: u16,
+    product: u16,
+    interface: u8,
+    /// Адреса endpoint'ов нужны для ClearFeature(HALT).
+    in_address: u8,
+    out_address: u8,
+    in_ep: BulkEndpoint,
+    out_ep: BulkEndpoint,
+    /// Максимальный размер одного bulk transfer (кратно max_packet).
+    max_transfer: usize,
+}
+
+impl StorageDevice {
+    fn endpoint(&mut self, dir_in: bool) -> &mut BulkEndpoint {
+        if dir_in { &mut self.in_ep } else { &mut self.out_ep }
+    }
+}
+
+/// Состояние слота: EP0 нужен классовым драйверам и после перечисления
+/// (GET_MAX_LUN, Bulk-Only Reset), поэтому кольцо живёт в контроллере.
+struct SlotState {
+    slot: u8,
+    port: u8,
+    speed: u32,
+    /// `None` только на время выполнения control transfer.
+    ep0: Option<Ring>,
+}
+
 struct Controller {
     op: u64,
     rt: u64,
@@ -211,11 +315,15 @@ struct Controller {
     cmd: Ring,
     ev: Ring,
     keys: Vec<HidKeyboard>,
+    storage: Vec<StorageDevice>,
+    slots: Vec<SlotState>,
+    devices: Vec<UsbDeviceInfo>,
     /// Сколько страниц scratchpad зарезервировано (нужно для Address Device).
     scratchpad_pages: usize,
-    /// Перечисление портов отложено до первого опроса клавиатуры.
+    /// Перечисление портов уже выполнено.
     enumerated: bool,
 }
+
 
 impl Controller {
     fn port_reg(&self, port: u8) -> u64 {
@@ -281,17 +389,79 @@ impl Controller {
         None
     }
 
-    /// Ждёт Transfer Event для указанного slot/DCI.
-    unsafe fn wait_transfer(&mut self, slot: u8, dci: u8, limit: u32) -> Option<u32> {
-        for _ in 0..limit {
-            if let Some(event) = self.next_event() {
-                if event.trb_type() == TRB_TRANSFER_EVENT
-                    && event.slot() == slot
-                    && event.endpoint() == dci
-                {
-                    return Some(event.completion_code());
+    /// Обрабатывает «чужие» события, пока ждём своё: иначе отчёты клавиатуры
+    /// и изменения портов терялись бы на время длинного bulk transfer.
+    unsafe fn dispatch_event(&mut self, event: Event) {
+        match event.trb_type() {
+            TRB_TRANSFER_EVENT => self.handle_keyboard_event(event),
+            TRB_PORT_STATUS_CHANGE => {
+                let port = ((event.param >> 24) & 0xFF) as u8;
+                if port >= 1 && port <= self.max_ports {
+                    self.port_clear_changes(port);
                 }
             }
+            _ => {}
+        }
+    }
+
+    /// Transfer Event клавиатуры: разбор отчёта + переотправка TRB.
+    unsafe fn handle_keyboard_event(&mut self, event: Event) {
+        let (slot, dci) = (event.slot(), event.endpoint());
+        let db = self.db;
+        let Some(keyboard) = self
+            .keys
+            .iter_mut()
+            .find(|k| k.slot == slot && k.dci == dci)
+        else {
+            return;
+        };
+        if !keyboard.pending {
+            return;
+        }
+
+        let code = event.completion_code();
+        if code == CC_SUCCESS || code == CC_SHORT_PACKET {
+            // Boot-протокол всегда 8 байт; отчёт может быть короче только
+            // при ошибке, поэтому читаем ровно 8.
+            let report = core::slice::from_raw_parts(keyboard.report_virt as *const u8, 8);
+            crate::drivers::usb::hid::handle_boot_report(report);
+            keyboard.reports = keyboard.reports.wrapping_add(1);
+        } else if code == CC_STALL {
+            // Boot-клавиатура не должна STALL'ить; отключаем опрос, чтобы
+            // не крутить ошибку в цикле.
+            keyboard.pending = false;
+            return;
+        }
+
+        // Переотправляем TRB, иначе endpoint остановится после отчёта.
+        keyboard.ring.push(
+            keyboard.report_phys,
+            keyboard.max_packet as u32,
+            (TRB_NORMAL << 10) | (1 << 5),
+        );
+        wr32(db + (keyboard.slot as u64) * 4, keyboard.dci as u32);
+    }
+
+    /// Ждёт Transfer Event для указанного slot/DCI.
+    /// Возвращает `(completion_code, residual)`.
+    unsafe fn wait_transfer_event(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        limit: u32,
+    ) -> Option<(u32, usize)> {
+        for _ in 0..limit {
+            let Some(event) = self.next_event() else {
+                core::hint::spin_loop();
+                continue;
+            };
+            if event.trb_type() == TRB_TRANSFER_EVENT
+                && event.slot() == slot
+                && event.endpoint() == dci
+            {
+                return Some((event.completion_code(), event.transfer_length()));
+            }
+            self.dispatch_event(event);
         }
         None
     }
@@ -309,6 +479,21 @@ unsafe fn control_transfer(
     index: u16,
     data: Option<(&mut [u8], u64)>,
 ) -> Option<usize> {
+    control_transfer_raw(ctrl, slot, ring, bm, request, value, index, data).ok()
+}
+
+/// Как `control_transfer`, но с кодом ошибки: классовые драйверы должны
+/// отличать STALL (нормальный ответ на GET_MAX_LUN) от таймаута.
+unsafe fn control_transfer_raw(
+    ctrl: &mut Controller,
+    slot: u8,
+    ring: *mut Ring,
+    bm: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    data: Option<(&mut [u8], u64)>,
+) -> Result<usize, UsbError> {
     let ring = &mut *ring;
     let len = data.as_ref().map(|(buffer, _)| buffer.len()).unwrap_or(0);
     let dir_in = bm & 0x80 != 0;
@@ -333,46 +518,114 @@ unsafe fn control_transfer(
     ring.push(0, 0, (TRB_STATUS_STAGE << 10) | (1 << 5) | status_dir);
 
     ctrl.doorbell(slot, 1);
-    let code = ctrl.wait_transfer(slot, 1, 4_000_000)?;
-    if code != CC_SUCCESS && code != CC_SHORT_PACKET {
-        return None;
+    match ctrl.wait_transfer_event(slot, 1, 4_000_000) {
+        Some((code, _)) if code == CC_SUCCESS || code == CC_SHORT_PACKET => Ok(len),
+        Some((code, _)) if code == CC_STALL => Err(UsbError::Stall),
+        Some(_) => Err(UsbError::TransferFailed),
+        None => Err(UsbError::Timeout),
     }
-    Some(len)
 }
 
-unsafe fn get_descriptor(
+/// Control transfer с автоматическим DMA-буфером и владением EP0-кольцом.
+unsafe fn slot_control(
     ctrl: &mut Controller,
     slot: u8,
-    ring: *mut Ring,
-    desc_type: u8,
-    desc_index: u8,
-    buf: &mut [u8],
-    phys: u64,
-) -> Option<usize> {
-    control_transfer(
-        ctrl,
-        slot,
-        ring,
-        0x80,
-        6, // GET_DESCRIPTOR
-        ((desc_type as u16) << 8) | desc_index as u16,
-        0,
-        Some((buf, phys)),
-    )
-    .filter(|received| *received >= 8)
+    bm: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    data: Option<&mut [u8]>,
+) -> Result<usize, UsbError> {
+    let Some(position) = ctrl.slots.iter().position(|s| s.slot == slot) else {
+        return Err(UsbError::NoDevice);
+    };
+    let Some(mut ring) = ctrl.slots[position].ep0.take() else {
+        return Err(UsbError::NoDevice);
+    };
+    let ring_ptr = &mut ring as *mut Ring;
+
+    let result = match data {
+        None => control_transfer_raw(ctrl, slot, ring_ptr, bm, request, value, index, None),
+        Some(buffer) if buffer.is_empty() => {
+            control_transfer_raw(ctrl, slot, ring_ptr, bm, request, value, index, None).map(|_| 0)
+        }
+        Some(buffer) => {
+            let len = buffer.len();
+            match DmaBuffer::allocate(len) {
+                Some(mut dma) => {
+                    let dir_in = bm & 0x80 != 0;
+                    if !dir_in {
+                        dma.as_mut_slice().copy_from_slice(buffer);
+                    }
+                    let phys = dma.physical_address() as u64;
+                    let transferred = control_transfer_raw(
+                        ctrl,
+                        slot,
+                        ring_ptr,
+                        bm,
+                        request,
+                        value,
+                        index,
+                        Some((dma.as_mut_slice(), phys)),
+                    );
+                    match transferred {
+                        Ok(n) if dir_in => {
+                            let n = n.min(len);
+                            buffer[..n].copy_from_slice(&dma.as_slice()[..n]);
+                            Ok(n)
+                        }
+                        other => other,
+                    }
+                }
+                None => Err(UsbError::NoMemory),
+            }
+        }
+    };
+
+    if let Some(state) = ctrl.slots.iter_mut().find(|s| s.slot == slot) {
+        state.ep0 = Some(ring);
+    }
+    result
 }
 
+/// Информация об endpoint из configuration descriptor.
 #[derive(Clone, Copy)]
 struct EndpointInfo {
     address: u8,
     max_packet: u16,
     interval: u8,
+    attributes: u8,
 }
 
-/// Ищет HID-интерфейс клавиатуры и его interrupt IN endpoint.
-fn find_hid_keyboard(config: &[u8]) -> Option<(u8, EndpointInfo)> {
+impl EndpointInfo {
+    /// Device Context Index: номер endpoint * 2 + направление (IN = 1).
+    fn dci(&self) -> u8 {
+        ((self.address & 0x0F) << 1) | ((self.address >> 7) & 1)
+    }
+
+    fn is_in(&self) -> bool {
+        self.address & 0x80 != 0
+    }
+}
+
+/// Разобранный интерфейс конфигурации.
+#[derive(Clone, Copy)]
+struct InterfaceInfo {
+    number: u8,
+    class: u8,
+    subclass: u8,
+    protocol: u8,
+    in_ep: Option<EndpointInfo>,
+    out_ep: Option<EndpointInfo>,
+}
+
+/// Разбирает configuration descriptor на интерфейсы с их endpoints.
+///
+/// Раньше здесь был поиск «первого HID-интерфейса»: для mass storage и для
+/// составных устройств (хаб + клавиатура) этого недостаточно.
+fn parse_interfaces(config: &[u8], out: &mut Vec<InterfaceInfo>) {
+    let mut current: Option<InterfaceInfo> = None;
     let mut offset = 0usize;
-    let mut current: Option<(u8, bool)> = None;
 
     while offset + 2 <= config.len() {
         let len = config[offset] as usize;
@@ -383,32 +636,40 @@ fn find_hid_keyboard(config: &[u8]) -> Option<(u8, EndpointInfo)> {
 
         match dtype {
             4 if len >= 9 => {
-                let number = config[offset + 2];
-                let class = config[offset + 5];
-                let subclass = config[offset + 6];
-                let protocol = config[offset + 7];
-                // class 3 = HID; boot interface (subclass 1) или protocol 1 = keyboard.
-                let is_keyboard = class == 3
-                    && (subclass == 1 || protocol == 1)
-                    && protocol <= 1;
-                current = Some((number, is_keyboard));
+                if let Some(iface) = current.take() {
+                    out.push(iface);
+                }
+                current = Some(InterfaceInfo {
+                    number: config[offset + 2],
+                    class: config[offset + 5],
+                    subclass: config[offset + 6],
+                    protocol: config[offset + 7],
+                    in_ep: None,
+                    out_ep: None,
+                });
             }
             5 if len >= 7 => {
-                if let Some((number, is_keyboard)) = current {
-                    let address = config[offset + 2];
-                    let attributes = config[offset + 3];
-                    // bit 7 = IN, bits 0-1 = 3 (interrupt)
-                    if is_keyboard && address & 0x80 != 0 && attributes & 0x03 == 3 {
-                        let max_packet = u16::from_le_bytes([config[offset + 4], config[offset + 5]])
-                            & 0x07FF;
-                        return Some((
-                            number,
-                            EndpointInfo {
-                                address,
-                                max_packet,
-                                interval: config[offset + 6],
-                            },
-                        ));
+                if let Some(iface) = current.as_mut() {
+                    let info = EndpointInfo {
+                        address: config[offset + 2],
+                        attributes: config[offset + 3],
+                        max_packet: u16::from_le_bytes([config[offset + 4], config[offset + 5]])
+                            & 0x07FF,
+                        interval: config[offset + 6],
+                    };
+                    // bits 0-1: 0 = control, 1 = isochronous, 2 = bulk,
+                    // 3 = interrupt.
+                    match info.attributes & 0x03 {
+                        2 | 3 => {
+                            if info.is_in() {
+                                if iface.in_ep.is_none() {
+                                    iface.in_ep = Some(info);
+                                }
+                            } else if iface.out_ep.is_none() {
+                                iface.out_ep = Some(info);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -417,7 +678,31 @@ fn find_hid_keyboard(config: &[u8]) -> Option<(u8, EndpointInfo)> {
 
         offset += len;
     }
-    None
+
+    if let Some(iface) = current.take() {
+        out.push(iface);
+    }
+}
+
+/// Boot-клавиатура: HID boot interface с interrupt IN endpoint.
+fn find_keyboard_interface(interfaces: &[InterfaceInfo]) -> Option<InterfaceInfo> {
+    interfaces.iter().copied().find(|i| {
+        i.class == 3
+            && i.protocol <= 1
+            && (i.subclass == 1 || i.protocol == 1)
+            && i.in_ep.map_or(false, |e| e.attributes & 0x03 == 3)
+    })
+}
+
+/// USB Mass Storage, Bulk-Only Transport: class 8, subclass 6, protocol 0x50.
+fn find_storage_interface(interfaces: &[InterfaceInfo]) -> Option<InterfaceInfo> {
+    interfaces.iter().copied().find(|i| {
+        i.class == 8
+            && i.subclass == 6
+            && i.protocol == 0x50
+            && i.in_ep.map_or(false, |e| e.attributes & 0x03 == 2)
+            && i.out_ep.map_or(false, |e| e.attributes & 0x03 == 2)
+    })
 }
 
 /// Заполняет input context для Address Device (slot + EP0).
@@ -444,33 +729,61 @@ unsafe fn fill_address_context(
     wr32(ep0 + 0x10, 8);
 }
 
-/// Configure Endpoint для interrupt IN клавиатуры.
-unsafe fn configure_keyboard_endpoint(
+/// Описание endpoint для Configure Endpoint.
+struct EpConfig {
+    dci: u8,
+    ep_type: u32,
+    max_packet: u16,
+    interval: u8,
+    ring_phys: u64,
+}
+
+/// Configure Endpoint для набора endpoint'ов (клавиатура, bulk storage).
+unsafe fn configure_endpoints(
     ctrl: &mut Controller,
     slot: u8,
     speed: u32,
     port: u8,
-    dci: u8,
-    max_packet: u16,
-    interval: u8,
-    ring_phys: u64,
+    eps: &[EpConfig],
 ) -> bool {
+    if eps.is_empty() {
+        return true;
+    }
     let Some((in_phys, in_virt)) = alloc_dma(4096) else {
         return false;
     };
 
-    wr32(in_virt + 0x04, (1 << 0) | (1 << dci));
+    let mut add_flags: u32 = 1; // bit 0 = slot context
+    let mut max_dci = 0u8;
+    for ep in eps {
+        add_flags |= 1u32 << ep.dci;
+        max_dci = max_dci.max(ep.dci);
+    }
+    wr32(in_virt + 0x04, add_flags);
 
-    // Slot Context: context entries = DCI
-    wr32(in_virt + 0x20, (speed << 20) | ((dci as u32) << 27));
+    // Slot Context: context entries = максимальный DCI
+    wr32(in_virt + 0x20, (speed << 20) | ((max_dci as u32) << 27));
     wr32(in_virt + 0x24, (port as u32) << 16);
 
-    let ep = in_virt + 0x20 + (dci as u64) * 0x20;
-    wr32(ep + 0x00, (interval as u32) << 16);
-    wr32(ep + 0x04, (3 << 1) | (7 << 3) | ((max_packet as u32) << 16)); // Interrupt IN
-    wr32(ep + 0x08, (ring_phys as u32) | 1);
-    wr32(ep + 0x0C, (ring_phys >> 32) as u32);
-    wr32(ep + 0x10, 8);
+    for ep in eps {
+        let ctx = in_virt + 0x20 + (ep.dci as u64) * 0x20;
+        // Dword 0: interval (bits 16-23). Dword 1: CErr=3 (bits 1-2),
+        // EP type (bits 3-5), MaxPacketSize (bits 16-31).
+        wr32(ctx + 0x00, (ep.interval as u32) << 16);
+        wr32(
+            ctx + 0x04,
+            (3 << 1) | (ep.ep_type << 3) | ((ep.max_packet as u32) << 16),
+        );
+        wr32(ctx + 0x08, (ep.ring_phys as u32) | 1);
+        wr32(ctx + 0x0C, (ep.ring_phys >> 32) as u32);
+        // Средняя длина TRB: 8 для interrupt, 1024 для bulk.
+        let avg_trb = if ep.ep_type == EP_TYPE_BULK_IN || ep.ep_type == EP_TYPE_BULK_OUT {
+            1024
+        } else {
+            8
+        };
+        wr32(ctx + 0x10, avg_trb);
+    }
 
     match ctrl.command(in_phys, TRB_CONFIGURE_ENDPOINT, slot) {
         Some(event) => event.completion_code() == CC_SUCCESS,
@@ -549,14 +862,20 @@ unsafe fn evaluate_ep0(
     wr32(ep0 + 0x0C, (ep0_phys >> 32) as u32);
     wr32(ep0 + 0x10, 8);
 
-    match ctrl.command(in_phys, 13, slot) {
+    match ctrl.command(in_phys, TRB_EVALUATE_CONTEXT, slot) {
         Some(event) => event.completion_code() == CC_SUCCESS,
         None => false,
     }
 }
 
-/// Перечисляет устройство на порту. Клавиатуры складываются в `ctrl.keys`.
-unsafe fn enumerate_device(ctrl: &mut Controller, port: u8, speed: u32) {
+/// Перечисляет устройство на порту: регистрирует его в реестре и настраивает
+/// class-specific endpoints (HID keyboard, mass storage).
+unsafe fn enumerate_device(
+    ctrl: &mut Controller,
+    controller_index: usize,
+    port: u8,
+    speed: u32,
+) {
     let Some(event) = ctrl.command(0, TRB_ENABLE_SLOT, 0) else {
         println!("[xHCI] port {}: Enable Slot timeout", port);
         return;
@@ -571,18 +890,18 @@ unsafe fn enumerate_device(ctrl: &mut Controller, port: u8, speed: u32) {
     }
 
     let Some((dev_phys, _)) = alloc_dma(4096) else { return };
-    let Some((in_phys, in_virt)) = alloc_dma(4096) else { return };
     let Some(mut ep0) = Ring::new() else { return };
     ep0.init_link();
-    let ep0_ring = &mut ep0 as *mut Ring;
+    let ep0_phys = ep0.phys;
 
     // DCBAA[slot] → device context
     wr64(ctrl.dcbaa_virt + (slot as u64) * 8, dev_phys);
 
+    let Some((in_phys, in_virt)) = alloc_dma(4096) else { return };
     // Начальный EP0 max packet: 64 только для HS/Super, иначе 8 (USB 2.0:
     // FS-устройства по умолчанию используют 8-байтовые пакеты).
     let max_packet: u16 = if speed == SPEED_HIGH || speed == 4 { 64 } else { 8 };
-    fill_address_context(in_virt, speed, port, max_packet, ep0.phys);
+    fill_address_context(in_virt, speed, port, max_packet, ep0_phys);
 
     let Some(event) = ctrl.command(in_phys, TRB_ADDRESS_DEVICE, slot) else {
         println!("[xHCI] slot {}: Address Device timeout", slot);
@@ -593,19 +912,20 @@ unsafe fn enumerate_device(ctrl: &mut Controller, port: u8, speed: u32) {
         return;
     }
 
-    let Some((buf_phys, buf_virt)) = alloc_dma(512) else { return };
-    let buf = core::slice::from_raw_parts_mut(buf_virt as *mut u8, 512);
+    // Слот живёт в контроллере: EP0-кольцо нужно и после перечисления
+    // (class requests: GET_MAX_LUN, Bulk-Only Reset).
+    ctrl.slots.push(SlotState { slot, port, speed, ep0: Some(ep0) });
 
     // Первые 8 байт device descriptor: bMaxPacketSize0 лежит в offset 7.
-    if get_descriptor(ctrl, slot, ep0_ring, 1, 0, &mut buf[..8], buf_phys).is_none() {
+    let mut short = [0u8; 8];
+    if slot_control(ctrl, slot, 0x80, 6, 0x0100, 0, Some(&mut short)).is_err() {
         println!("[xHCI] slot {}: GET_DESCRIPTOR(device, 8) failed", slot);
         return;
     }
-    let device_max_packet = buf[7] as u16;
+    let device_max_packet = short[7] as u16;
     if device_max_packet != max_packet && (8..=64).contains(&device_max_packet) {
-        // Evaluate Context применяет новый размер в контроллере; локальную
-        // переменную обновлять не нужно — дальше она не используется.
-        if !evaluate_ep0(ctrl, slot, speed, port, device_max_packet, ep0.phys) {
+        // Evaluate Context применяет новый размер в контроллере.
+        if !evaluate_ep0(ctrl, slot, speed, port, device_max_packet, ep0_phys) {
             println!(
                 "[xHCI] slot {}: Evaluate Context failed, keeping EP0 mps={}",
                 slot, max_packet
@@ -614,75 +934,145 @@ unsafe fn enumerate_device(ctrl: &mut Controller, port: u8, speed: u32) {
     }
 
     // Device descriptor (18 bytes)
-    if get_descriptor(ctrl, slot, ep0_ring, 1, 0, &mut buf[..18], buf_phys).is_none() {
+    let mut device = [0u8; 18];
+    if slot_control(ctrl, slot, 0x80, 6, 0x0100, 0, Some(&mut device)).is_err() {
         println!("[xHCI] slot {}: GET_DESCRIPTOR(device) failed", slot);
         return;
     }
-    let vendor = u16::from_le_bytes([buf[8], buf[9]]);
-    let product = u16::from_le_bytes([buf[10], buf[11]]);
-    let num_configs = buf[17];
-
-    if num_configs == 0 {
+    let vendor = u16::from_le_bytes([device[8], device[9]]);
+    let product = u16::from_le_bytes([device[10], device[11]]);
+    if device[17] == 0 {
         return;
+    }
+
+    // Регистрируем устройство в общем реестре (`usb::register_device_from_descriptor`
+    // раньше не вызывался ниоткуда — команда `devices`/`diag usb` была пустой).
+    if let Some(descriptor) = crate::drivers::usb::parse_device_descriptor(&device) {
+        crate::drivers::usb::register_device_from_descriptor(&descriptor);
     }
 
     // Configuration descriptor: сначала 9 байт, затем целиком.
-    if get_descriptor(ctrl, slot, ep0_ring, 2, 0, &mut buf[..9], buf_phys).is_none() {
+    let mut header = [0u8; 9];
+    if slot_control(ctrl, slot, 0x80, 6, 0x0200, 0, Some(&mut header)).is_err() {
         println!("[xHCI] slot {}: GET_DESCRIPTOR(config header) failed", slot);
         return;
     }
-    let total = u16::from_le_bytes([buf[2], buf[3]]) as usize;
-    if total < 9 || total > 512 {
+    let total = u16::from_le_bytes([header[2], header[3]]) as usize;
+    if total < 9 || total > 4096 {
+        println!("[xHCI] slot {}: config descriptor length {} is invalid", slot, total);
         return;
     }
-    if get_descriptor(ctrl, slot, ep0_ring, 2, 0, &mut buf[..total], buf_phys).is_none() {
+    // Раньше буфер был ограничен 512 байтами: составные устройства и
+    // несколько интерфейсов в него не влезали.
+    let mut config = alloc::vec![0u8; total];
+    if slot_control(ctrl, slot, 0x80, 6, 0x0200, 0, Some(&mut config)).is_err() {
         println!("[xHCI] slot {}: GET_DESCRIPTOR(config) failed", slot);
         return;
     }
+    let config_value = config[5];
 
-    let config_value = buf[5];
-    let Some((interface, endpoint)) = find_hid_keyboard(&buf[..total]) else {
-        println!(
-            "[xHCI] slot {}: device {:04x}:{:04x} is not a boot keyboard",
-            slot, vendor, product
-        );
-        return;
-    };
+    let mut interfaces = Vec::new();
+    parse_interfaces(&config, &mut interfaces);
 
     // SET_CONFIGURATION
-    if control_transfer(ctrl, slot, ep0_ring, 0x00, 9, config_value as u16, 0, None).is_none() {
+    if slot_control(ctrl, slot, 0x00, 9, config_value as u16, 0, None).is_err() {
         println!("[xHCI] slot {}: SET_CONFIGURATION failed", slot);
         return;
     }
 
-    // HID boot protocol + idle rate 0 (report only on change)
-    let _ = control_transfer(ctrl, slot, ep0_ring, 0x21, 0x0B, 0, interface as u16, None);
-    let _ = control_transfer(ctrl, slot, ep0_ring, 0x21, 0x0A, 0, interface as u16, None);
+    let keyboard = find_keyboard_interface(&interfaces);
+    let storage = find_storage_interface(&interfaces);
 
-    let Some(mut ring) = Ring::new() else { return };
-    ring.init_link();
-    // Буфер с запасом: wMaxPacketSize может быть больше 8 байт.
-    let report_len: u16 = if endpoint.max_packet == 0 {
-        8
-    } else {
-        endpoint.max_packet.min(64)
+    let mut kind = "unsupported";
+    if let Some(interface) = keyboard {
+        if setup_keyboard(ctrl, slot, speed, port, &interface) {
+            kind = "keyboard";
+        }
+    }
+    if kind == "unsupported" {
+        if let Some(interface) = storage {
+            if setup_storage(ctrl, slot, speed, port, vendor, product, &interface) {
+                kind = "storage";
+            }
+        }
+    }
+
+    let (class, subclass, protocol) = match keyboard {
+        Some(i) => (i.class, i.subclass, i.protocol),
+        None => match storage {
+            Some(i) => (i.class, i.subclass, i.protocol),
+            None => (device[4], device[5], device[6]),
+        },
     };
-    let Some((report_phys, report_virt)) = alloc_dma(64) else { return };
 
-    // DCI: EP number * 2 + 1 (IN)
-    let dci = ((endpoint.address & 0x0F) << 1) | 1;
-    if !configure_keyboard_endpoint(
-        ctrl,
+    println!(
+        "[xHCI] slot {}: {:04x}:{:04x} class {:02x}/{:02x}/{:02x} -> {}{}",
         slot,
-        speed,
+        vendor,
+        product,
+        class,
+        subclass,
+        protocol,
+        kind,
+        if kind == "unsupported" {
+            alloc::format!(" ({} interface(s), none supported)", interfaces.len())
+        } else {
+            String::new()
+        }
+    );
+
+    ctrl.devices.push(UsbDeviceInfo {
+        controller: controller_index,
+        slot,
         port,
+        speed,
+        vendor,
+        product,
+        class,
+        subclass,
+        protocol,
+        kind,
+    });
+}
+
+/// Настраивает interrupt IN endpoint boot-клавиатуры и запускает опрос.
+unsafe fn setup_keyboard(
+    ctrl: &mut Controller,
+    slot: u8,
+    speed: u32,
+    port: u8,
+    interface: &InterfaceInfo,
+) -> bool {
+    let Some(endpoint) = interface.in_ep else {
+        return false;
+    };
+
+    // HID boot protocol + idle rate 0 (report only on change)
+    let _ = slot_control(ctrl, slot, 0x21, 0x0B, 0, interface.number as u16, None);
+    let _ = slot_control(ctrl, slot, 0x21, 0x0A, 0, interface.number as u16, None);
+
+    let Some(mut ring) = Ring::new() else {
+        return false;
+    };
+    ring.init_link();
+    // Boot-отчёт всегда 8 байт; буфер с запасом на случай большего
+    // wMaxPacketSize (некоторые устройства объявляют 64).
+    let report_len: u16 = 8;
+    let Some((report_phys, report_virt)) = alloc_dma(64) else {
+        return false;
+    };
+
+    let dci = endpoint.dci();
+    let config = [EpConfig {
         dci,
-        endpoint.max_packet,
-        endpoint.interval,
-        ring.phys,
-    ) {
-        println!("[xHCI] slot {}: Configure Endpoint failed", slot);
-        return;
+        ep_type: EP_TYPE_INTERRUPT_IN,
+        max_packet: endpoint.max_packet,
+        interval: endpoint.interval,
+        ring_phys: ring.phys,
+    }];
+    if !configure_endpoints(ctrl, slot, speed, port, &config) {
+        println!("[xHCI] slot {}: Configure Endpoint (interrupt IN) failed", slot);
+        return false;
     }
 
     // Первый interrupt IN transfer.
@@ -701,30 +1091,104 @@ unsafe fn enumerate_device(ctrl: &mut Controller, port: u8, speed: u32) {
     });
 
     println!(
-        "[xHCI] HID keyboard ready: slot {} port {} {:04x}:{:04x} ep=0x{:02x} mps={} interval={}",
-        slot, port, vendor, product, endpoint.address, endpoint.max_packet, endpoint.interval
+        "[xHCI] HID keyboard ready: slot {} port {} ep=0x{:02x} mps={} interval={}",
+        slot, port, endpoint.address, endpoint.max_packet, endpoint.interval
     );
+    true
+}
+
+/// Настраивает bulk IN/OUT endpoints USB mass storage (BOT).
+unsafe fn setup_storage(
+    ctrl: &mut Controller,
+    slot: u8,
+    speed: u32,
+    port: u8,
+    vendor: u16,
+    product: u16,
+    interface: &InterfaceInfo,
+) -> bool {
+    let (Some(in_ep), Some(out_ep)) = (interface.in_ep, interface.out_ep) else {
+        return false;
+    };
+
+    let Some(mut in_ring) = Ring::new() else {
+        return false;
+    };
+    in_ring.init_link();
+    let Some(mut out_ring) = Ring::new() else {
+        return false;
+    };
+    out_ring.init_link();
+
+    let configs = [
+        EpConfig {
+            dci: in_ep.dci(),
+            ep_type: EP_TYPE_BULK_IN,
+            max_packet: in_ep.max_packet,
+            interval: 0,
+            ring_phys: in_ring.phys,
+        },
+        EpConfig {
+            dci: out_ep.dci(),
+            ep_type: EP_TYPE_BULK_OUT,
+            max_packet: out_ep.max_packet,
+            interval: 0,
+            ring_phys: out_ring.phys,
+        },
+    ];
+    if !configure_endpoints(ctrl, slot, speed, port, &configs) {
+        println!("[xHCI] slot {}: Configure Endpoint (bulk) failed", slot);
+        return false;
+    }
+
+    let max_transfer = MAX_BULK_CHUNK.min((in_ep.max_packet as usize).max(512) * 16);
+    ctrl.storage.push(StorageDevice {
+        slot,
+        port,
+        vendor,
+        product,
+        interface: interface.number,
+        in_address: in_ep.address,
+        out_address: out_ep.address,
+        in_ep: BulkEndpoint {
+            dci: in_ep.dci(),
+            max_packet: in_ep.max_packet,
+            ring: Some(in_ring),
+        },
+        out_ep: BulkEndpoint {
+            dci: out_ep.dci(),
+            max_packet: out_ep.max_packet,
+            ring: Some(out_ring),
+        },
+        max_transfer,
+    });
+
+    println!(
+        "[xHCI] mass storage ready: slot {} port {} iface {} bulk in=0x{:02x}/{} out=0x{:02x}/{} (chunk {})",
+        slot, port, interface.number,
+        in_ep.address, in_ep.max_packet,
+        out_ep.address, out_ep.max_packet,
+        max_transfer
+    );
+    true
 }
 
 static XHCI: Mutex<Vec<Controller>> = Mutex::new(Vec::new());
 
-/// Опрашивает event ring всех контроллеров и разбирает HID-отчёты.
-/// Вызывается из `keyboard::poll_key()`.
-pub fn poll_keyboard() {
+/// Есть ли хотя бы один инициализированный контроллер.
+pub fn controller_count() -> usize {
+    XHCI.lock().len()
+}
+
+/// Опрашивает event ring всех контроллеров и разбирает события.
+/// Вызывается из `keyboard::poll_key()` и из shell idle path.
+pub fn poll_events() {
     let mut controllers = match XHCI.try_lock() {
         Some(guard) => guard,
         None => return,
     };
 
     for ctrl in controllers.iter_mut() {
-        // Ленивое перечисление: boot не ждёт USB, а первый опрос клавиатуры
-        // (уже после shell) донастраивает устройства.
-        if !ctrl.enumerated {
-            ctrl.enumerated = true;
-            unsafe { enumerate_ports(ctrl) };
-        }
-
-        let db = ctrl.db;
         let mut budget = 0;
         loop {
             let Some(event) = (unsafe { ctrl.next_event() }) else { break };
@@ -732,52 +1196,209 @@ pub fn poll_keyboard() {
             if budget > 64 {
                 break;
             }
-
-            match event.trb_type() {
-                TRB_TRANSFER_EVENT => {
-                    let slot = event.slot();
-                    let dci = event.endpoint();
-                    let code = event.completion_code();
-
-                    let Some(keyboard) = ctrl
-                        .keys
-                        .iter_mut()
-                        .find(|k| k.slot == slot && k.dci == dci)
-                    else {
-                        continue;
-                    };
-                    if !keyboard.pending {
-                        continue;
-                    }
-
-                    if code == CC_SUCCESS || code == CC_SHORT_PACKET {
-                        let report = unsafe {
-                            core::slice::from_raw_parts(keyboard.report_virt as *const u8, 8)
-                        };
-                        crate::drivers::usb::hid::handle_boot_report(report);
-                        keyboard.reports = keyboard.reports.wrapping_add(1);
-                    }
-
-                    // Переотправляем TRB, иначе endpoint остановится после отчёта.
-                    unsafe {
-                        keyboard.ring.push(
-                            keyboard.report_phys,
-                            keyboard.max_packet as u32,
-                            (TRB_NORMAL << 10) | (1 << 5),
-                        );
-                        wr32(db + (keyboard.slot as u64) * 4, keyboard.dci as u32);
-                    }
-                }
-                TRB_PORT_STATUS_CHANGE => {
-                    let port = ((event.param >> 24) & 0xFF) as u8;
-                    if port >= 1 && port <= ctrl.max_ports {
-                        unsafe { ctrl.port_clear_changes(port) };
-                    }
-                }
-                _ => {}
-            }
+            unsafe { ctrl.dispatch_event(event) };
         }
     }
+}
+
+/// Совместимость: опрос клавиатуры = опрос всех событий.
+pub fn poll_keyboard() {
+    poll_events();
+}
+
+/// Перечисляет все порты всех контроллеров (вызывается после `timer::init()`).
+///
+/// Раньше перечисление было «одноразовым» и происходило при первом опросе
+/// клавиатуры: USB-накопитель до этого не существовал, а зависший порт
+/// блокировал shell. Теперь enumeration явный.
+pub fn enumerate_now() {
+    let mut controllers = match XHCI.try_lock() {
+        Some(guard) => guard,
+        None => {
+            println!("[xHCI] enumeration skipped: controller lock is busy");
+            return;
+        }
+    };
+
+    if controllers.is_empty() {
+        return;
+    }
+
+    println!("[xHCI] enumerating ports...");
+    for index in 0..controllers.len() {
+        if controllers[index].enumerated {
+            continue;
+        }
+        controllers[index].enumerated = true;
+        unsafe { enumerate_ports(&mut controllers[index], index) };
+    }
+
+    let (devices, keyboards) = controllers
+        .iter()
+        .fold((0, 0), |(d, k), c| (d + c.devices.len(), k + c.keys.len()));
+    println!(
+        "[xHCI] enumeration done: {} device(s), {} keyboard(s)",
+        devices, keyboards
+    );
+}
+
+/// Все найденные устройства (для `diag usb`).
+pub fn devices() -> Vec<UsbDeviceInfo> {
+    XHCI
+        .lock()
+        .iter()
+        .flat_map(|ctrl| ctrl.devices.iter().cloned())
+        .collect()
+}
+
+/// Mass storage устройства, готовые к использованию.
+pub fn storage_devices() -> Vec<StorageInfo> {
+    let mut result = Vec::new();
+    for (index, ctrl) in XHCI.lock().iter().enumerate() {
+        for dev in &ctrl.storage {
+            result.push(StorageInfo {
+                controller: index,
+                slot: dev.slot,
+                port: dev.port,
+                vendor: dev.vendor,
+                product: dev.product,
+                max_transfer: dev.max_transfer,
+            });
+        }
+    }
+    result
+}
+
+/// Control transfer к устройству по слоту.
+pub fn control(
+    controller: usize,
+    slot: u8,
+    bm: u8,
+    request: u8,
+    value: u16,
+    index: u16,
+    data: Option<&mut [u8]>,
+) -> Result<usize, UsbError> {
+    let mut controllers = XHCI.lock();
+    let Some(ctrl) = controllers.get_mut(controller) else {
+        return Err(UsbError::NoDevice);
+    };
+    unsafe { slot_control(ctrl, slot, bm, request, value, index, data) }
+}
+
+/// Bulk transfer к устройству по слоту.
+///
+/// `dir_in` = true — чтение с устройства. Возвращает число фактически
+/// переданных байт (может быть меньше `data.len()` при short packet).
+pub fn bulk(
+    controller: usize,
+    slot: u8,
+    dir_in: bool,
+    data: &mut [u8],
+) -> Result<usize, UsbError> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+
+    let mut controllers = XHCI.lock();
+    let Some(ctrl) = controllers.get_mut(controller) else {
+        return Err(UsbError::NoDevice);
+    };
+    let Some(index) = ctrl.storage.iter().position(|d| d.slot == slot) else {
+        return Err(UsbError::NoDevice);
+    };
+
+    let (dci, max_transfer) = {
+        let dev = &mut ctrl.storage[index];
+        (dev.endpoint(dir_in).dci, dev.max_transfer)
+    };
+
+    let mut done = 0usize;
+    while done < data.len() {
+        let chunk = (data.len() - done).min(max_transfer.max(512));
+        let got = unsafe { bulk_chunk(ctrl, index, dir_in, dci, &mut data[done..done + chunk]) }?;
+        done += got;
+        // Короткий пакет означает конец transfer.
+        if got < chunk {
+            break;
+        }
+    }
+    Ok(done)
+}
+
+/// Один bulk transfer (не больше `max_transfer`) через TRB Normal.
+unsafe fn bulk_chunk(
+    ctrl: &mut Controller,
+    device_index: usize,
+    dir_in: bool,
+    dci: u8,
+    data: &mut [u8],
+) -> Result<usize, UsbError> {
+    let Some(mut dma) = DmaBuffer::allocate(data.len()) else {
+        return Err(UsbError::NoMemory);
+    };
+    if !dir_in {
+        dma.as_mut_slice().copy_from_slice(data);
+    }
+    let phys = dma.physical_address() as u64;
+
+    let slot = ctrl.storage[device_index].slot;
+    let Some(mut ring) = ctrl.storage[device_index].endpoint(dir_in).ring.take() else {
+        return Err(UsbError::NoDevice);
+    };
+
+    let mut trb_control = (TRB_NORMAL << 10) | (1 << 5); // ISP = 1
+    if dir_in {
+        trb_control |= 1 << 16;
+    }
+    ring.push(phys, data.len() as u32, trb_control);
+    ctrl.doorbell(slot, dci as u32);
+
+    let event = ctrl.wait_transfer_event(slot, dci, 20_000_000);
+
+    // Кольцо возвращаем устройству в любом случае.
+    ctrl.storage[device_index].endpoint(dir_in).ring = Some(ring);
+
+    let Some((code, residual)) = event else {
+        return Err(UsbError::Timeout);
+    };
+    if code == CC_STALL {
+        return Err(UsbError::Stall);
+    }
+    if code != CC_SUCCESS && code != CC_SHORT_PACKET {
+        return Err(UsbError::TransferFailed);
+    }
+
+    let received = data.len().saturating_sub(residual.min(data.len()));
+    if dir_in && received > 0 {
+        data[..received].copy_from_slice(&dma.as_slice()[..received]);
+    }
+    Ok(received)
+}
+
+/// Bulk-Only Mass Storage Reset + ClearFeature(HALT) на обоих endpoint'ах.
+///
+/// Вызывается после STALL/timeout: без сброса BOT-сессия остаётся в
+/// рассогласованном состоянии (CSW от предыдущей команды).
+pub fn resolve_stall(controller: usize, slot: u8) -> Result<(), UsbError> {
+    let mut controllers = XHCI.lock();
+    let Some(ctrl) = controllers.get_mut(controller) else {
+        return Err(UsbError::NoDevice);
+    };
+    let Some(index) = ctrl.storage.iter().position(|d| d.slot == slot) else {
+        return Err(UsbError::NoDevice);
+    };
+    let (interface, in_address, out_address) = {
+        let dev = &ctrl.storage[index];
+        (dev.interface, dev.in_address, dev.out_address)
+    };
+
+    unsafe {
+        let _ = slot_control(ctrl, slot, 0x21, 0xFF, 0, interface as u16, None);
+        let _ = slot_control(ctrl, slot, 0x02, 1, 0, in_address as u16, None);
+        let _ = slot_control(ctrl, slot, 0x02, 1, 0, out_address as u16, None);
+    }
+    Ok(())
 }
 
 /// Краткий статус для `diag keyboard`.
@@ -1004,11 +1625,14 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
             cmd,
             ev,
             keys: Vec::new(),
+            storage: Vec::new(),
+            slots: Vec::new(),
+            devices: Vec::new(),
             scratchpad_pages: scratchpad_count,
             enumerated: false,
         };
 
-        // Перечисление портов отложено до первого опроса клавиатуры:
+        // Перечисление портов отложено до `enumerate_now()` (после timer::init):
         // на реальном железе оно занимает секунды и не должно задерживать boot.
         println!(
             "[xHCI] {:#x}: running, enumeration deferred (scratchpad {} page(s))",
@@ -1019,11 +1643,16 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
     }
 }
 
-/// Перечисляет подключённые порты и настраивает найденные HID-клавиатуры.
-unsafe fn enumerate_ports(ctrl: &mut Controller) {
+/// Перечисляет подключённые порты и настраивает найденные устройства.
+unsafe fn enumerate_ports(ctrl: &mut Controller, controller_index: usize) {
     for port in 1..=ctrl.max_ports {
         let portsc = rd32(ctrl.port_reg(port));
         if portsc & PORTSC_CCS == 0 {
+            continue;
+        }
+        // Уже перечисленный порт повторно не сбрасываем: reset отключил бы
+        // работающее устройство (клавиатуру или накопитель).
+        if ctrl.devices.iter().any(|d| d.port == port) {
             continue;
         }
         ctrl.port_clear_changes(port);
@@ -1035,7 +1664,7 @@ unsafe fn enumerate_ports(ctrl: &mut Controller) {
                     speed,
                     speed_name(speed)
                 );
-                enumerate_device(ctrl, port, speed);
+                enumerate_device(ctrl, controller_index, port, speed);
             }
             None => println!("[xHCI] port {}: reset failed", port),
         }

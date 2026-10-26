@@ -96,8 +96,10 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
 
             let result = match fs_type {
                 "auto" => fs::mount_auto(path, disk_id).map(|s| format!("OK ({})", s)),
+                // FAT32 монтируем с записью: `cp`/`touch`/лог должны попадать
+                // на носитель. Только чтение — отдельным `mount_ro` внутри.
                 "fat32" | "vfat" => match fs::get_disk_manager().lock().open(disk_id) {
-                    Some(disk) => fs::mount_fat32(path, disk).map(|_| format!("OK (fat32)")),
+                    Some(disk) => fs::mount_fat32_rw(path, disk).map(|_| format!("OK (fat32, rw)")),
                     None => Err(fs::FsError::NotFound),
                 },
                 "ext" | "ext2" | "ext3" | "ext4" => {

@@ -282,11 +282,28 @@ pub fn mount_fs(path: &str, fs: Box<dyn FileSystem>, readonly: bool) -> Result<(
     VFS_MANAGER.mount(path, fs, readonly)
 }
 
+/// Точка монтирования, в которую попадает `path` (самый длинный префикс).
+///
+/// `None` означает, что путь обслуживает не VFS, а legacy ramfs на `/`.
+/// Нужна вызывающему коду, чтобы отличить «здесь вообще нет ФС» от
+/// «ФС есть, но операция запрещена» — глотать второе нельзя.
+pub fn mount_point_of(path: &str) -> Option<String> {
+    let mt = VFS_MANAGER.mount_table.lock();
+    mt.find_fs(path).map(|(idx, _)| mt.get(idx).path.clone())
+}
+
 /// Монтировать FAT32 диск (только чтение — запись на носитель пока запрещена)
 pub fn mount_fat32(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
     let mut fatfs = Fat32Fs::new(disk)?;
     fatfs.mount()?;
     mount_fs(path, Box::new(fatfs), true)
+}
+
+/// Монтировать FAT32 диск с записью (используется log-приёмником и тестами).
+pub fn mount_fat32_rw(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
+    let mut fatfs = Fat32Fs::new_rw(disk)?;
+    fatfs.mount()?;
+    mount_fs(path, Box::new(fatfs), false)
 }
 
 /// Монтировать EXT2/3/4 диск (опционально readonly)
@@ -328,7 +345,10 @@ pub fn mount_auto(path: &str, disk_id: usize) -> Result<&'static str, FsError> {
 
     match fs_type {
         "fat32" => {
-            let mut fs = Fat32Fs::new(disk)?;
+            // FAT32 теперь умеет писать: `mount_auto` монтирует с записью
+            // (readonly=false), поэтому и драйвер открывается в RW-режиме.
+            // `mount_fat32()` оставлен read-only для «только посмотреть».
+            let mut fs = Fat32Fs::new_rw(disk)?;
             fs.mount()?;
             mount_fs(path, Box::new(fs), false)?;
             Ok("fat32")

@@ -10,6 +10,8 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  vmm        - verify active address space mappings\n");
         console.print("  wxtest     - verify .rodata mapping is read-only\n");
         console.print("  keyboard   - PS/2 controller state and IRQ counters\n");
+        console.print("  hw         - SMBIOS + ACPI tables + FADT flags\n");
+        console.print("  usb        - xHCI controllers, devices, storage, log sink\n");
         console.print("  timer      - clock sources, IRQ tick rate, RTC/BIOS time\n");
             console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
         console.print("  panic-test - test fatal error screen (halts VM)\n");
@@ -23,6 +25,8 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "vmm" => diag_vmm(console),
         "wxtest" => diag_wxtest(console),
         "keyboard" => diag_keyboard(console),
+        "hw" => diag_hw(console),
+        "usb" => diag_usb(console),
         "timer" => diag_timer(console),
         "fault-test" => diag_fault_test(console),
         "panic-test" => panic!("diagnostic panic screen test"),
@@ -397,3 +401,11 @@ fn diag_timer(console: &mut Console) {
     }
 }
 
+
+fn diag_hw(console: &mut Console) {
+    super::diag_hw::diag_hw(console);
+}
+
+fn diag_usb(console: &mut Console) {
+    super::diag_usb::diag_usb(console);
+}

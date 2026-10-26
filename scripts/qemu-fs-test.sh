@@ -56,7 +56,7 @@ printf 'hello from mbr partition\n' > "$tmp_dir/mbr_hello.txt"
 echo "==> Creating test images"
 
 # --- 1. FAT32 superfloppy ---
-dd if=/dev/zero of="$img_fat" bs=1M count=32 status=none
+dd if=/dev/zero of="$img_fat" bs=1M count=128 status=none
 mkfs.fat -F 32 -n FSTEST "$img_fat" >/dev/null
 mmd -i "$img_fat" ::/docs
 mcopy -i "$img_fat" "$tmp_dir/hello.txt" ::/hello.txt
@@ -67,16 +67,16 @@ mcopy -i "$img_fat" "$tmp_dir/long.txt" ::/docs/lfn_test.txt
 mkdir -p "$tmp_dir/ext/sub"
 cp "$tmp_dir/ext_hello.txt" "$tmp_dir/ext/hello.txt"
 cp "$tmp_dir/nested.txt" "$tmp_dir/ext/sub/nested.txt"
-dd if=/dev/zero of="$img_ext" bs=1M count=16 status=none
+dd if=/dev/zero of="$img_ext" bs=1M count=128 status=none
 mke2fs -q -t ext2 -b 1024 -d "$tmp_dir/ext" "$img_ext" >/dev/null
 
 # --- 3. NTFS (read-only) ---
-dd if=/dev/zero of="$img_ntfs" bs=1M count=32 status=none
+dd if=/dev/zero of="$img_ntfs" bs=1M count=128 status=none
 mkntfs -F -q -L NTFSVOL "$img_ntfs" >/dev/null 2>&1
 ntfscp -f "$img_ntfs" "$tmp_dir/ntfs_hello.txt" /hello.txt >/dev/null
 
 # --- 4. MBR: один FAT32-раздел с началом на LBA 2048 ---
-dd if=/dev/zero of="$img_mbr" bs=1M count=32 status=none
+dd if=/dev/zero of="$img_mbr" bs=1M count=128 status=none
 sfdisk --quiet "$img_mbr" >/dev/null <<'EOF'
 label: dos
 start=2048, size=40960, type=c

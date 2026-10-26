@@ -88,7 +88,12 @@ impl MountTable {
         let mut best_len = 0;
 
         for (idx, mp) in self.mounts.iter().enumerate() {
-            if path.starts_with(&mp.path) {
+            // Совпадение должно быть по границе компонента: `/mnt2` не лежит
+            // в `/mnt`, хотя и начинается с той же строки.
+            let matches = path == mp.path
+                || (path.starts_with(&mp.path)
+                    && path.as_bytes().get(mp.path.len()) == Some(&b'/'));
+            if matches {
                 // Вычисляем относительный путь
                 let relative = if path.len() > mp.path.len() {
                     &path[mp.path.len()..]

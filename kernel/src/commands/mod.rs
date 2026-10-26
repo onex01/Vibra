@@ -16,6 +16,9 @@ pub mod pwd;
 pub mod uptime;
 pub mod quit;
 pub mod diag;
+pub mod diag_hw;
+pub mod diag_usb;
+pub mod log;
 pub mod heap;
 pub mod neofetch;
 pub mod mount;
@@ -89,6 +92,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "kstat",    help: "show interrupt statistics", func: kstat::run },
     Command { name: "uname",    help: "system information",        func: uname::run },
     Command { name: "diag",     help: "run kernel diagnostics",    func: diag::run },
+    Command { name: "log",      help: "show boot log (log [lines])", func: log::run },
     Command { name: "reboot",   help: "reboot the system",        func: reboot::run },
     Command { name: "tree",     help: "show directory tree",      func: tree::run },
     Command { name: "top",      help: "system monitor (htop-like)", func: top::run },

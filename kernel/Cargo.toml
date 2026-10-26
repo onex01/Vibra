@@ -14,6 +14,9 @@ serial-debug = []
 # ОПАСНО на реальном железе: на внутреннем SSD это GPT partition entries.
 # Только для тестового носителя.
 boot-log-to-disk = []
+# Запись boot-лога в /VIBRA.LOG на FAT32-раздел с меткой VIBRALOG
+# (USB mass storage или второй SATA-диск). Двойное согласие: feature + метка.
+boot-log-to-usb = []
 
 [lib]
 name = "vibra_kernel"

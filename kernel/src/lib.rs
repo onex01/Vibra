@@ -32,7 +32,7 @@ pub mod acpi;
 pub mod net;
 
 // === Limine requests (нужны в lib crate для линкера) ===
-use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest, RsdpRequest};
+use limine::request::{FramebufferRequest, HhdmRequest, MemmapRequest, ExecutableAddressRequest, RsdpRequest, SmbiosRequest};
 use spin::Mutex;
 use commands::CmdResult;
 
@@ -43,6 +43,8 @@ pub static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 pub static MEMORY_MAP_REQUEST: MemmapRequest = MemmapRequest::new();
 pub static EXECUTABLE_ADDR_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 pub static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
+/// SMBIOS entry point (паспорт машины для `diag hw`).
+pub static SMBIOS_REQUEST: SmbiosRequest = SmbiosRequest::new();
 
 /// Флаг отмены текущей команды (Ctrl+Z)
 pub static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
@@ -211,6 +213,7 @@ pub fn init() -> BootConsole {
 
     println!("[BOOT] Step 5: ACPI");
     crate::acpi::init();
+    crate::acpi::smbios::init();
 
     println!("[BOOT] Step 6: Keyboard");
     keyboard::init();
@@ -231,6 +234,18 @@ pub fn init() -> BootConsole {
 
     println!("[BOOT] Step 8: Timer");
     crate::timer::init();
+
+    println!("[BOOT] Step 8.5: USB enumeration");
+    // Перечисление USB отложено до таймера: на реальном железе оно занимает
+    // секунды, а интервалы HID легче считать, когда время уже есть.
+    crate::drivers::usb::xhci::enumerate_now();
+    let usb_disks = crate::drivers::usb::storage::probe();
+    if usb_disks > 0 {
+        println!("[USB-STORAGE] {} disk(s) ready", usb_disks);
+    }
+    // Boot-лог на USB подключаем сразу: дальше идёт инициализация ФС,
+    // и падение на ней должно быть видно на флешке.
+    crate::boot_log::usb::attach();
 
     println!("[BOOT] Step 9: Filesystem");
     fs::init_filesystem();
@@ -346,6 +361,10 @@ pub static LINE_EDITOR: Mutex<shell::LineEditor> = Mutex::new(shell::LineEditor:
 /// Vibra может вызвать init() + shell_loop() или написать свой loop.
 pub fn shell_loop(mut bc: BootConsole) -> ! {
     let mut console = bc.console;
+
+    // Boot закончен: с этого момента idle-цикл может дописывать лог на
+    // носитель, но поиск приёмника троттлится, чтобы не блокировать ввод.
+    crate::boot_log::mark_boot_finished();
 
     console.clear();
     console.print_colored("\n", framebuffer::COLOR_VIBRA_FG);
@@ -492,6 +511,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     boot_log::flush_to_file("/var/log/error.log");
     boot_log::flush_to_file("/boot.log");
+    // Последний шанс увидеть панику на машине без COM-порта.
+    boot_log::panic_flush();
 
     loop { halt(); }
 }

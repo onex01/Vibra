@@ -1,8 +1,12 @@
 // fs/blockdev.rs — обнаружение блочных устройств и их разделов.
 //
-// Связывает драйвер AHCI с VFS: создаёт по одному `AhciDisk` на активный
-// SATA-порт, читает таблицу разделов (MBR/GPT) и регистрирует в DiskManager
-// как `sda`, `sda1`, `sda2`, ...
+// Связывает драйверы (AHCI + USB mass storage) с VFS: создаёт по одному
+// диску на активный SATA-порт и на каждый найденный USB-накопитель, читает
+// таблицу разделов (MBR/GPT) и регистрирует в DiskManager как `sda`, `sda1`,
+// `sdb`, ...
+//
+// Порядок имён: сначала SATA (`sda`...), затем USB продолжает буквы. На
+// ThinkPad T450 внутренний SSD — sda, загрузочная флешка — sdb.
 
 use super::disk::DiskIo;
 use super::disk_manager::{DiskEntry, DiskManager};
@@ -11,17 +15,21 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use spin::Mutex;
 
-/// Обнаружить SATA-диски и их разделы.
+/// Обнаружить блочные устройства и их разделы.
 ///
 /// Возвращает количество добавленных записей (диски + разделы).
 pub fn probe(mgr: &mut DiskManager) -> usize {
-    let ports = crate::drivers::ahci::active_ports();
-    if ports.is_empty() { return 0; }
+    let (added, disks) = probe_ahci(mgr);
+    added + probe_usb(mgr, disks)
+}
 
+/// SATA-диски: `(число записей, число дисков)`.
+fn probe_ahci(mgr: &mut DiskManager) -> (usize, usize) {
+    let ports = crate::drivers::ahci::active_ports();
     let mut added = 0usize;
+    let mut disks = 0usize;
 
     for (idx, port) in ports.iter().enumerate() {
-        // Имя в стиле Linux: sda, sdb, ...
         let disk_name = alloc::format!("sd{}", (b'a' + (idx % 26) as u8) as char);
 
         let info = crate::drivers::ahci::identify_device(*port);
@@ -35,62 +43,114 @@ pub fn probe(mgr: &mut DiskManager) -> usize {
 
         crate::println!(
             "[BLK] {}: {} секторов ({} МиБ){}",
-            disk_name, sectors,
+            disk_name,
+            sectors,
             (sectors * 512) / (1024 * 1024),
-            if model.is_empty() { alloc::string::String::new() } else { alloc::format!(" [{}]", model) }
+            if model.is_empty() {
+                alloc::string::String::new()
+            } else {
+                alloc::format!(" [{}]", model)
+            }
         );
 
         let shared: Arc<Mutex<Box<dyn DiskIo>>> =
             Arc::new(Mutex::new(Box::new(crate::drivers::ahci::AhciDisk::new(*port))));
 
-        // Тип ФС самого диска (актуально для «superfloppy» без таблицы).
-        let disk_fs = {
-            let mut view = SharedDisk::new(shared.clone());
-            detect_fs_type(&mut view)
+        added += register(mgr, &disk_name, shared, sectors);
+        disks += 1;
+    }
+
+    (added, disks)
+}
+
+/// USB-накопители (mass storage). Нумерация продолжает SATA.
+fn probe_usb(mgr: &mut DiskManager, first_index: usize) -> usize {
+    let infos = crate::drivers::usb::storage::disks();
+    let mut added = 0usize;
+
+    for (offset, info) in infos.iter().enumerate() {
+        let letter = (b'a' + ((first_index + offset) % 26) as u8) as char;
+        let disk_name = alloc::format!("sd{}", letter);
+
+        let Some(disk) = crate::drivers::usb::storage::open(offset) else {
+            continue;
+        };
+        if info.sectors == 0 {
+            continue;
+        }
+
+        crate::println!(
+            "[BLK] {}: {} секторов ({} МиБ) [USB {}]",
+            disk_name,
+            info.sectors,
+            info.size_mb(),
+            info.model()
+        );
+
+        let shared: Arc<Mutex<Box<dyn DiskIo>>> = Arc::new(Mutex::new(disk));
+        added += register(mgr, &disk_name, shared, info.sectors);
+    }
+
+    added
+}
+
+/// Регистрирует диск и его разделы. Возвращает число добавленных записей.
+fn register(
+    mgr: &mut DiskManager,
+    disk_name: &str,
+    shared: Arc<Mutex<Box<dyn DiskIo>>>,
+    sectors: u64,
+) -> usize {
+    let mut added = 0usize;
+
+    // Тип ФС самого диска (актуально для «superfloppy» без таблицы).
+    let disk_fs = {
+        let mut view = SharedDisk::new(shared.clone());
+        detect_fs_type(&mut view)
+    };
+
+    mgr.add_entry(DiskEntry {
+        name: alloc::string::String::from(disk_name),
+        kind: "disk",
+        sectors,
+        offset: 0,
+        fs_type: disk_fs,
+        disk: shared.clone(),
+    });
+    added += 1;
+
+    let parts = {
+        let mut view = SharedDisk::new(shared.clone());
+        read_partitions(&mut view)
+    };
+
+    for p in parts {
+        let name = part_name(disk_name, p.index);
+        let fs_type = {
+            // detect_fs_type читает сектор 0 окна, поэтому нужен сдвиг —
+            // делаем отдельное окно через PartitionDisk.
+            let mut win =
+                super::partition::PartitionDisk::new(shared.clone(), p.start_lba, p.sectors);
+            detect_fs_type(&mut win)
         };
 
+        crate::println!(
+            "[BLK] {}: {} МиБ, тип {}, ФС {}",
+            name,
+            (p.sectors * 512) / (1024 * 1024),
+            p.kind.as_str(),
+            fs_type
+        );
+
         mgr.add_entry(DiskEntry {
-            name: disk_name.clone(),
-            kind: "disk",
-            sectors,
-            offset: 0,
-            fs_type: disk_fs,
+            name,
+            kind: "partition",
+            sectors: p.sectors,
+            offset: p.start_lba,
+            fs_type,
             disk: shared.clone(),
         });
         added += 1;
-
-        // Таблица разделов.
-        let parts = {
-            let mut view = SharedDisk::new(shared.clone());
-            read_partitions(&mut view)
-        };
-
-        for p in parts {
-            let name = part_name(&disk_name, p.index);
-            let fs_type = {
-                // detect_fs_type читает сектор 0 окна, поэтому нужен сдвиг —
-                // делаем отдельное окно через PartitionDisk.
-                let mut win = super::partition::PartitionDisk::new(
-                    shared.clone(), p.start_lba, p.sectors,
-                );
-                detect_fs_type(&mut win)
-            };
-
-            crate::println!(
-                "[BLK] {}: {} МиБ, тип {}, ФС {}",
-                name, (p.sectors * 512) / (1024 * 1024), p.kind.as_str(), fs_type
-            );
-
-            mgr.add_entry(DiskEntry {
-                name,
-                kind: "partition",
-                sectors: p.sectors,
-                offset: p.start_lba,
-                fs_type,
-                disk: shared.clone(),
-            });
-            added += 1;
-        }
     }
 
     added
@@ -102,7 +162,9 @@ struct SharedDisk {
 }
 
 impl SharedDisk {
-    fn new(inner: Arc<Mutex<Box<dyn DiskIo>>>) -> Self { Self { inner } }
+    fn new(inner: Arc<Mutex<Box<dyn DiskIo>>>) -> Self {
+        Self { inner }
+    }
 }
 
 impl DiskIo for SharedDisk {

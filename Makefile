@@ -64,7 +64,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build kernel smoke run clean setup install-kernel iso iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test
+.PHONY: all build kernel smoke run clean setup install-kernel iso iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log
 
 all: run
 
@@ -310,3 +310,70 @@ usb: build
 uefi-usb:
 	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 	@UEFI_USB_OVERWRITE="$(UEFI_USB_OVERWRITE)" USB_SIZE_MB="$(USB_SIZE_MB)" bash scripts/build-uefi-usb.sh
+
+
+# === Boot-лог на USB (feature boot-log-to-usb) ===
+#
+# Ядро пишет кольцевой boot-лог в /VIBRA.LOG на FAT32-раздел с меткой
+# VIBRALOG. Двойное согласие: feature при сборке + метка тома.
+
+LOG_PARTITION_MB ?= 64
+USB_DEBUG_SIZE_MB ?= 256
+USB_DEBUG_ESP_MB ?= 64
+
+# Ядро с записью лога на USB (для образов usb-debug / iso-debug).
+boot-log-kernel:
+	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) --features boot-log-to-usb \
+		-Z build-std=core,alloc,compiler_builtins -Z build-std-features
+
+# End-to-end: USB-накопитель с разделом VIBRALOG, проверка содержимого лога.
+boot-log-test:
+	@QEMU="$(QEMU)" bash scripts/qemu-boot-log-test.sh
+
+# USB-накопитель через VFS: mount fat32, ls, cat, запись (`cp`).
+usb-storage-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-usb-storage-test.sh
+
+# GPT-образ флешки: ESP (VIBRA-ESP) + раздел для лога (VIBRALOG).
+usb-debug: boot-log-kernel
+	@USB_DEBUG_SIZE_MB="$(USB_DEBUG_SIZE_MB)" USB_DEBUG_ESP_MB="$(USB_DEBUG_ESP_MB)" \
+		KERNEL_ELF="$(KERNEL_ELF)" bash scripts/build-usb-debug.sh
+
+# Гибридный ISO (UEFI+BIOS) + приложенный раздел VIBRALOG (xorriso).
+#
+# Загрузка: UEFI — с CD и с флешки (ESP внутри GPT); BIOS — только по El Torito
+# (CD). Гибридный MBR для BIOS-загрузки с флешки не ставится: limine bios-install
+# требует отдельный BIOS boot partition, а GPT уже занят ESP и VIBRALOG.
+# Для флешки на реальном железе есть `make usb-debug`.
+iso-debug: boot-log-kernel
+	@echo "==> Creating debug ISO with VIBRALOG partition..."
+	@mkdir -p $(BUILD_DIR)
+	@rm -rf $(BUILD_DIR)/iso_debug_root
+	@mkdir -p $(BUILD_DIR)/iso_debug_root/limine
+	@mkdir -p $(BUILD_DIR)/iso_debug_root/EFI/BOOT
+	@cp $(KERNEL_ELF) $(BUILD_DIR)/iso_debug_root/kernel.elf
+	@cp limine.conf $(BUILD_DIR)/iso_debug_root/limine/
+	@cp $(LIMINE_DIR)/BOOTX64.EFI $(BUILD_DIR)/iso_debug_root/EFI/BOOT/
+	@cp $(LIMINE_DIR)/limine-bios-cd.bin $(BUILD_DIR)/iso_debug_root/limine/
+	@cp $(LIMINE_DIR)/limine-uefi-cd.bin $(BUILD_DIR)/iso_debug_root/limine/
+# Без limine-bios.sys BIOS-ветка El Torito не находит stage2 — образ грузится
+# только через UEFI. Файл должен лежать внутри ISO рядом с limine-bios-cd.bin.
+	@cp $(LIMINE_DIR)/limine-bios.sys $(BUILD_DIR)/iso_debug_root/limine/
+	@LOG_IMG=$$(bash scripts/build-log-partition.sh "$(LOG_PARTITION_MB)" "$(BUILD_DIR)/log-partition.img"); \
+	xorriso -as mkisofs \
+		-b limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
+		--efi-boot limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+		--protective-msdos-label \
+		-append_partition 2 0x0c "$$LOG_IMG" \
+		-o $(BUILD_DIR)/vibra-debug.iso $(BUILD_DIR)/iso_debug_root
+# Гибридный MBR (limine bios-install) здесь не ставим: у образа GPT
+# (EFI-раздел + добавленный VIBRALOG), и limine требует отдельный BIOS boot
+# partition. Для загрузки с CD достаточно El Torito (`-b limine-bios-cd.bin`
+# + limine-bios.sys внутри ISO) — именно так грузится SeaBIOS.
+	@echo "==> debug ISO: $(BUILD_DIR)/vibra-debug.iso"
+	@echo "    GPT partition 4 = VIBRALOG ($(LOG_PARTITION_MB)MB, xorriso -append_partition 2)"
+	@ls -lh $(BUILD_DIR)/vibra-debug.iso
+
+# Прочитать лог с образа/флешки без монтирования: make read-boot-log LOG_DEVICE=/dev/sdX
+read-boot-log:
+	@bash scripts/read-boot-log.sh "$(LOG_DEVICE)"

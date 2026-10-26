@@ -7,6 +7,7 @@
 
 pub mod rsdp;
 pub mod sdt;
+pub mod smbios;
 pub mod madt;
 pub mod mcfg;
 pub mod hpet;
@@ -173,4 +174,38 @@ pub fn init() {
 
     *ACPI_INFO.lock() = Some(info);
     crate::println!("[ACPI] Initialization complete");
+}
+
+/// Список таблиц из XSDT/RSDT: `(сигнатура, физический адрес, длина)`
+/// в порядке перечисления. Нужен `diag hw`: какие таблицы реально есть на
+/// машине (ECDT, DSDT, SSDT, SRAT... ), а не только те, что мы парсим.
+pub fn table_list() -> Vec<([u8; 4], u64, u32)> {
+    let mut result = Vec::new();
+    let Some(rsdp_virt) = rsdp::find_rsdp() else {
+        return result;
+    };
+    let rsdp = unsafe { &*(rsdp_virt as *const rsdp::Rsdp) };
+    let revision = rsdp.revision;
+    let xsdt = rsdp.xsdt_address;
+    let rsdt = rsdp.rsdt_address;
+
+    let table = if revision >= 2 && xsdt != 0 {
+        xsdt
+    } else {
+        rsdt as u64
+    };
+    if table == 0 {
+        return result;
+    }
+
+    let hhdm = crate::memory::paging::HHDM_OFFSET
+        .load(core::sync::atomic::Ordering::Relaxed) as usize;
+
+    for phys in sdt::enumerate_xsdt(table) {
+        let header = unsafe { &*((hhdm + phys) as *const sdt::SdtHeader) };
+        let signature = header.signature;
+        let length = header.length;
+        result.push((signature, phys as u64, length));
+    }
+    result
 }

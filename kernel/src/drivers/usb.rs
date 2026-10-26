@@ -10,6 +10,7 @@ use spin::Mutex;
 use core::sync::atomic::Ordering;
 
 pub mod hid;
+pub mod storage;
 pub mod xhci;
 
 /// Информация об обнаруженном USB контроллере
@@ -125,7 +126,10 @@ pub fn init() {
 
     println!("[USB] Found {} USB controller(s)", devices.len());
 
-    let mut controllers = USB_CONTROLLERS.lock();
+    // Лок держим только на время записи в реестр: `xhci::init_controller`
+    // выполняет MMIO-ожидания (секунды), и под глобальным локом это
+    // блокировало бы `get_controllers()`/`diag usb` из другого контекста.
+    let mut found: Vec<UsbController> = Vec::new();
 
     for pci_dev in &devices {
         // Включаем Bus Master и Memory Space
@@ -166,7 +170,7 @@ pub fn init() {
 
             // Полный lifecycle: BIOS handoff, reset, DCBAA, rings, enumeration.
             if crate::drivers::usb::xhci::init_controller(bar0_phys, mmio_virt) {
-                controllers.push(UsbController {
+                found.push(UsbController {
                     vendor: pci_dev.vendor_id,
                     device: pci_dev.device_id,
                     mmio_base: bar0_phys,
@@ -180,7 +184,9 @@ pub fn init() {
         }
     }
 
-    println!("[USB] {} controller(s) initialized", controllers.len());
+    let initialized = found.len();
+    USB_CONTROLLERS.lock().extend(found);
+    println!("[USB] {} controller(s) initialized", initialized);
 
     // HID: отчёты приходят из xhci::poll_keyboard().
     crate::drivers::usb::hid::init();

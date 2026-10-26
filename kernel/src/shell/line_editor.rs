@@ -45,7 +45,17 @@ impl LineEditor {
         self.history_idx = self.history_count;
         self.prompt_len = prompt_len;
         let mut last_heartbeat_ms = crate::timer::uptime_ms();
+        let mut last_log_flush_ms = last_heartbeat_ms;
         loop {
+            // Boot-лог сбрасываем на USB раз в секунду, пока ждём ввода:
+            // shell простаивает, а лог после boot всё ещё может дописываться
+            // (например, при горячем подключении USB).
+            let now_ms = crate::timer::uptime_ms();
+            if now_ms.saturating_sub(last_log_flush_ms) >= 1000 {
+                last_log_flush_ms = now_ms;
+                crate::boot_log::checkpoint();
+            }
+
             // Serial (COM1) + PS/2 keyboard. Keyboard Unknown scancodes
             // теперь возвращают None → не блокируют serial polling.
             let next_key = crate::serial::poll_key().or_else(keyboard::poll_key);
