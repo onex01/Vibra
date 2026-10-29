@@ -34,10 +34,6 @@ if [[ ! -f "$repo_root/OVMF.fd" ]]; then
     exit 1
 fi
 
-# Никаких параллельных QEMU: иначе hdd.img залочен и прогон получается пустым.
-pkill -9 -f 'qemu-system[-]x86_64' 2>/dev/null || true
-sleep 1
-
 echo "==> Building kernel and boot image"
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
     make -C "$repo_root" build >/dev/null
@@ -149,7 +145,7 @@ send_text() {
     -monitor stdio \
     -display none \
     -drive "if=pflash,format=raw,file=$repo_root/OVMF.fd,readonly=on" \
-    -drive "file=$repo_root/build/hdd.img,format=raw" \
+    -drive "file=$repo_root/build/hdd.img,format=raw,snapshot=on" \
     -drive "file=$img_fat,format=raw" \
     -drive "file=$img_ext,format=raw" \
     -drive "file=$img_ntfs,format=raw" \
