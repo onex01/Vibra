@@ -3,7 +3,7 @@
 <p align="center"><b>Экспериментальное x86_64-ядро на Rust</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0--rc.1--Foundation-blue?style=flat-square" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-0.2.0--rc.2--Foundation-blue?style=flat-square" alt="Version"/>
   <img src="https://img.shields.io/badge/target-x86__64-orange?style=flat-square" alt="Target"/>
   <img src="https://img.shields.io/badge/Rust-no__std-red?style=flat-square" alt="Rust"/>
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License"/>
