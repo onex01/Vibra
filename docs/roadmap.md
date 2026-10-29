@@ -1,6 +1,6 @@
 # Roadmap — Vibra Kernel
 
-> Текущая версия: **0.2.0-rc.1 «Foundation RC1»**.
+> Текущая версия: **0.2.0-rc.2 «Foundation RC2»**.
 > Цель: стабильное диагностическое ядро на реальном x86_64-железе, не ОС.
 
 ## Принципы
@@ -22,7 +22,7 @@
 
 ## 0.2.0 «Foundation» — воспроизводимый x86_64 boot
 
-- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.1`.
+- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.2`.
 - [x] Runtime panic/page-fault checks в изолированной QEMU VM: panic screen,
   CR2, error code, access flags, RIP/RSP/RFLAGS и source location подтверждены.
 - [x] Безопасный runtime W^X check: `diag wxtest` подтвердил read-only `.rodata`
@@ -43,9 +43,64 @@
   рабочего `rustup`), `nightly --component rust-src`, target
   `x86_64-unknown-none`; PATH передаётся через `$GITHUB_PATH`.
 - [x] Warning budgets enforced in CI: debug ≤107, no-default ≤110.
-- [ ] QEMU UEFI smoke-test в CI; workflow добавлен, ожидает первого CI-прогона.
-- [ ] Загрузка ISO (`make iso-smoke`) в UEFI и BIOS в CI; цель добавлена,
-  ожидает первого CI-прогона.
+- [x] Растеризация консоли: строка глифа собирается в `[u64; 4]` и пишется
+  4 записями вместо 8 (символ — 64 store вместо 128), `draw_extended_char`
+  конвертирует цвета 2 раза на символ вместо 128, курсор пишется пакетно.
+  `draw_char_at` пропускает перерисовку при совпадении `TextCell`.
+  Подробности и стоимость — в [framebuffer.md](framebuffer.md).
+- [x] COM1 только в debug: в release `serial::init` не трогает порты,
+  `write_serial_byte` пустая, IRQ4 замаскирован, `isr_serial` не ставится.
+  Экранный boot-лог не зависит от UART. Цели: `make build-release`,
+  `make iso-release`; `./build.sh release` → `make run RELEASE=1 SERIAL_DEBUG=0`.
+- [x] Makefile: `RELEASE=1` действительно собирает release-профиль
+  (`CARGO_PROFILE=--release` в `kernel:`/`uefi-usb:`/`boot-log-kernel:`),
+  `build-release`/`run-release` стали обёртками над `build`, а
+  `install-kernel` берёт `$(KERNEL_ELF)` вместо жёсткого `target/release`.
+- [x] Прокрутка консоли: `scroll()` выбирает стратегию по типу памяти за
+  фреймбуфером (`probe_framebuffer_is_ram`, `rdtsc`-замер чтения). Для RAM —
+  `memmove`, для WC/uncached MMIO — перерисовка из текстовой тени со склейкой
+  пробельных прогонов. Убирает деградацию «строка за строкой» на реальном
+  железе. Подробности — в [framebuffer.md](framebuffer.md).
+- [x] `quit` через ACPI S5: разбор FADT (`PM1a_CNT`, `PM1b_CNT`, DSDT) и
+  пакета `_S5` в DSDT (включая `Zero`/`One`/`BytePrefix`/`WordPrefix`),
+  затем fallback на порты эмуляторов и ACPI reset. `reboot` переведён на
+  ACPI reset. Диагностика — `diag power`. Подробности —
+  в [storage_and_power.md](storage_and_power.md).
+- [x] Каталоги FAT32: `mkdir` (кластер, `.`/`..`, 8.3-запись) и `rmdir`
+  (только пустой, корень защищён); `vfs_mkdir`/`vfs_rmdir`/`vfs_remove`,
+  `create_dir`/`remove_entry`/`remove_dir` идут через VFS, а не только в
+  RamFS; команда `rmdir`.
+- [x] Единый корневой RamFS: VFS `/` и legacy-API видят один экземпляр ФС;
+  `RamFsFile` пишет в каталог, а не в копию `Vec`. Регрессия —
+  `make ramfs-test` (`ls /`, `touch`, `cp`, `hostname`, `/var/log/boot.log`).
+- [x] Read-only по умолчанию для FAT32 и `auto`; запись — только явным `rw`.
+  Флаг `MountPoint.readonly` проверяется в VFS (`vfs_open/create/mkdir/remove`).
+  Регрессия — `make ro-mount-test` (образ не меняется, `COPY.TXT` не появляется).
+- [x] Устойчивость к повреждённым ФС: checked-чтение полей NTFS/ext2/GPT,
+  лимит на чтение файла целиком; регрессия — `make bad-fs-test`.
+- [x] Boot-лог больше не печатается в serial повторно (128 КиБ на реальном
+  UART); полный heap-стресс вынесен в `diag heap-test`, на загрузке — короткий.
+- [x] NVMe подключён к block layer и boot-log: Identify Controller/Namespace,
+  I/O queues, 512/4096-байтные сектора, `mount auto` и VIBRALOG на NVMe.
+  Регрессия — `make nvme-test` (QEMU NVMe, включая 4Kn).
+- [x] `reboot`: FADT RESET_REG → 0xCF9 → 0x92 → i8042 → triple fault.
+- [x] Boot-лог хранится в одном месте: `/var/log/boot.log` (без дублей
+  `/boot.log` и `/var/log/kernel.log`).
+- [x] Shell: Tab для команд и путей, история без затирания prompt, цвет prompt
+  сохраняется, курсор корректно перерисовывается; `Ctrl+C`/`Ctrl+Z`.
+- [x] `beep` использует монотонные часы и корректный делитель PIT; `test`
+  объединяет системные проверки; `cmd --help` работает для всех команд.
+- [x] Запись логов: дисковый приёмник `VIBRALOG` собирается всегда (был под
+  feature `boot-log-to-usb`); исправлен троттлинг `attach()` после boot;
+  команды `log sink`/`log flush`/`log path`; `quit`/`reboot` сохраняют лог.
+- [ ] Framebuffer back buffer (legacy GUI, не блокер kernel-only сборки):
+  исправить `flip()` без `pitch`, рассогласование смещений back buffer при
+  виртуальном разрешении, `clear()` без back buffer, `draw_cursor` с
+  `!bg_color`, отсутствие `color_to_native` в `read_pixel`/`blit`.
+  Список — в [framebuffer.md](framebuffer.md).
+- [x] QEMU UEFI smoke-test в CI; workflow выполняет `./build.sh smoke`.
+- [x] Загрузка ISO (`make iso-smoke`) в UEFI и BIOS в CI; цель выполняется
+  в workflow.
 - [ ] 100 последовательных QEMU boots: matrix runner и CI job добавлены; локально
   подтверждены 2 последовательных boot на `build/hdd.img` и 1 boot GPT/ESP-образа
   (`BOOT_TIMEOUT=90`). В CI по умолчанию 10 итераций (TCG без KVM), 100 задаются

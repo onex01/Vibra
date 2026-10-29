@@ -1,0 +1,8 @@
+[toolchain]
+# Ядро использует nightly-фичи (`abi_x86_interrupt`, `naked_asm!`) и
+# `-Z build-std`, поэтому stable здесь не подходит. Компоненты объявлены
+# явно, чтобы `rustup` не оставлял сборку без rust-src после обновления.
+channel = "nightly"
+profile = "minimal"
+components = ["rust-src"]
+targets = ["x86_64-unknown-none"]

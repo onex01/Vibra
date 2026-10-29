@@ -13,7 +13,7 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.1`
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.2`
 обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 
@@ -110,11 +110,15 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh build          собрать debug kernel.elf
 ./build.sh smoke          проверить UEFI boot и shell prompt в QEMU
 ./build.sh clock-test     проверить RTC, uptime и diag timer
+./build.sh ramfs-test     проверить корневой RamFS, запись файлов и /var/log/boot.log
+./build.sh ro-mount-test  проверить read-only монтирование FAT32
+./build.sh bad-fs-test    проверить устойчивость к повреждённым ФС
 ./build.sh fs-test        проверить FAT32/ext2/NTFS и MBR-раздел
 ./build.sh keyboard-test  проверить ввод PS/2 и USB HID
 ./build.sh iso            собрать гибридный BIOS/UEFI ISO
 ./build.sh iso-smoke      загрузить ISO в UEFI (OVMF) и BIOS (SeaBIOS)
 ./build.sh uefi-usb       собрать GPT-образ с EFI System Partition
+./build.sh check          сборка debug/release-конфигураций + бюджет предупреждений
 ./build.sh debug          собрать и запустить QEMU
 ./build.sh secure         QEMU без serial shell
 ./build.sh usb            собрать образ USB; запись на устройство выполняется вручную
@@ -122,6 +126,10 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 
 Образ USB — экспериментальный. Не записывайте его на единственный носитель с
 данными и не тестируйте операции записи драйверов на ценных дисках.
+
+Монтирование дисков по умолчанию **read-only**. Запись включается только явным
+аргументом: `mount /mnt fat32 sda1 rw`. Это правило одинаково для shell и
+автомонтирования.
 
 ## CI
 

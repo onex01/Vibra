@@ -285,11 +285,135 @@ pub static FONT_DATA: [[u8; 16]; 256] = [
 /// на каждый пиксель был самым медленным местом консоли (на реальном железе
 /// прокрутка занимала десятки миллисекунд). Теперь сдвиг идёт по обычной
 /// памяти, а из фреймбуфера только пишем.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct TextCell {
     ch: u8,
     fg: u32,
     bg: u32,
+}
+
+/// Разворачивает битовую строку глифа (8 пикселей) в 4 слова по 2 пикселя.
+///
+/// Формат вывода: `out[i]` = два u32-пикселя, младшее слово — левый.
+/// Ветвлений нет: `mask` — либо `0`, либо `0xFFFF_FFFF`, поэтому выбор
+/// `fg`/`bg` сводится к `(fg & mask) | (bg & !mask)`.
+///
+/// Это даёт основную экономию: раньше на каждый из 8 пикселей строки
+/// выполнялось сравнение бита и отдельная ветка, теперь 8 итераций
+/// чистых ALU-операций, а запись идёт парами.
+#[inline]
+fn expand_line(line: u8, fg: u32, bg: u32) -> [u64; 4] {
+    let mut out = [0u64; 4];
+    let mut pair = 0;
+    while pair < 4 {
+        // Бит 7 = левый пиксель, поэтому для пары `pair` это биты 7-2p и 6-2p.
+        let left_bit = 7 - 2 * pair;
+        let right_bit = 6 - 2 * pair;
+        let left_mask = ((line >> left_bit) & 1) as u32;
+        let right_mask = ((line >> right_bit) & 1) as u32;
+        let left = (fg & left_mask.wrapping_neg()) | (bg & !left_mask.wrapping_neg());
+        let right = (fg & right_mask.wrapping_neg()) | (bg & !right_mask.wrapping_neg());
+        out[pair] = (left as u64) | ((right as u64) << 32);
+        pair += 1;
+    }
+    out
+}
+
+/// Записывает одну строку глифа (до 8 пикселей) в фреймбуфер.
+///
+/// `available` — сколько пикселей строки ещё влезает по ширине экрана.
+/// Быстрый путь: 4 `write_volatile::<u64>` вместо 8 `write_volatile::<u32>`.
+/// Он используется только при выравнивании адреса на 8 байт — `pitch` в
+/// u32-словах может быть нечётным, и тогда u64-запись была бы unaligned
+/// (на части чипсетов такие записи в WC-память дороже, чем два u32).
+///
+/// # Safety
+/// `dst` должен указывать в отображённый фреймбуфер, а `dst + available`
+/// не должен выходить за его границы.
+#[inline]
+unsafe fn write_glyph_row(dst: *mut u32, words: &[u64; 4], available: usize) {
+    if available >= 8 && (dst as usize) % 8 == 0 {
+        let wide = dst as *mut u64;
+        let mut i = 0;
+        while i < 4 {
+            core::ptr::write_volatile(wide.add(i), words[i]);
+            i += 1;
+        }
+        return;
+    }
+
+    // Медленный путь: хвост строки (обрезан по ширине) или невыровненный адрес.
+    let mut i = 0;
+    while i < available {
+        let pair = words[i / 2];
+        let value = if i % 2 == 0 { pair as u32 } else { (pair >> 32) as u32 };
+        core::ptr::write_volatile(dst.add(i), value);
+        i += 1;
+    }
+}
+
+/// Определяет, ведёт ли фреймбуфер себя как обычная RAM или как медленный MMIO.
+///
+/// # Зачем это нужно
+///
+/// Оптимальная стратегия прокрутки зависит от типа памяти за фреймбуфером, а
+/// он бывает разным:
+///
+/// - **RAM** (QEMU, часть виртуальных машин, некоторые iGPU с кэшируемым
+///   отображением): `memmove` по фреймбуферу — одна операция на пиксель,
+///   быстрее любой перерисовки;
+/// - **write-combining / uncached MMIO** (типичный случай на реальном железе):
+///   чтение из такой памяти не комбинируется, каждый пиксель — отдельная
+///   транзакция по шине. Там `memmove` в десятки раз дороже перерисовки из
+///   текстовой тени, которая во фреймбуфер только пишет.
+///
+/// Проба измеряет стоимость чтения того же объёма из RAM и из фреймбуфера и
+/// сравнивает. Читаем только, ничего не пишем — картинка не портится.
+fn probe_framebuffer_is_ram(fb: *mut u32, pitch: usize, height: usize) -> bool {
+    const N: usize = 512;
+
+    if fb.is_null() || pitch == 0 || height == 0 {
+        return false;
+    }
+
+    // На реальном железе GOP-фреймбуфер почти всегда write-combining/uncached.
+    // Проба чтением может ошибочно признать его RAM (кэш, SMI, стечение
+    // обстоятельств), после чего scroll() уходит в memmove по MMIO и начинает
+    // «тормозить» ровно при заполнении экрана. В виртуальных машинах
+    // фреймбуфер действительно RAM, поэтому гипервизор — единственный случай,
+    // где разрешаем быстрый memmove-путь без риска.
+    let hypervisor = unsafe { core::arch::x86_64::__cpuid(1).ecx & (1 << 31) != 0 };
+    if !hypervisor {
+        return false;
+    }
+
+    static mut SRC: [u32; N] = [0; N];
+    static mut DST: [u32; N] = [0; N];
+
+    // Берём область в середине экрана: край может попадать в другую страницу.
+    let offset = (height / 2) * pitch;
+
+    unsafe {
+        let src = core::ptr::addr_of_mut!(SRC) as *mut u32;
+        let dst = core::ptr::addr_of_mut!(DST) as *mut u32;
+
+        // Прогрев: первый доступ тянет page walk и портит замер.
+        core::ptr::copy_nonoverlapping(src, dst, N);
+
+        let ram_start = core::arch::x86_64::_rdtsc();
+        core::ptr::copy_nonoverlapping(src, dst, N);
+        let ram_cycles = core::arch::x86_64::_rdtsc().wrapping_sub(ram_start);
+
+        let fb_start = core::arch::x86_64::_rdtsc();
+        core::ptr::copy_nonoverlapping(fb.add(offset), dst, N);
+        let fb_cycles = core::arch::x86_64::_rdtsc().wrapping_sub(fb_start);
+
+        // Порог с большим запасом: RAM-копия 2 КиБ — это сотни циклов, а
+        // каждое uncached чтение — сотни циклов само по себе. Даже восьмикратное
+        // превышение ещё означает «похоже на RAM» (шум планировщика, SMI).
+        let limit = ram_cycles.saturating_mul(8).max(20_000);
+        fb_cycles < limit
+    }
 }
 
 pub struct Console {
@@ -321,6 +445,11 @@ pub struct Console {
     // false, если экран рисовался примитивами напрямую — тогда тень устарела
     // и scroll() обязан идти медленным путём.
     cells_valid: core::cell::Cell<bool>,
+    /// Ведёт ли фреймбуфер себя как обычная RAM (см. `probe_framebuffer_is_ram`).
+    ///
+    /// От этого зависит стратегия прокрутки: для RAM дешевле memmove, для
+    /// медленного MMIO — перерисовка из текстовой тени.
+    fb_is_ram: core::cell::Cell<bool>,
 }
 
 // SAFETY: Console is accessed through BOOT_CONSOLE's mutex and only the BSP uses it.
@@ -411,6 +540,11 @@ impl Console {
             last_blink_ms: 0,
             cells: Vec::new(),
             cells_valid: core::cell::Cell::new(true),
+            fb_is_ram: core::cell::Cell::new(probe_framebuffer_is_ram(
+                fb_addr,
+                pitch,
+                height,
+            )),
         };
 
         console.reset_cells();
@@ -474,6 +608,12 @@ impl Console {
         if self.cells_valid.get() {
             let index = row * self.cols + col;
             if let Some(slot) = self.cells.get_mut(index) {
+                // Ячейка уже содержит этот символ с этими цветами: пиксели в
+                // фреймбуфере те же. Пропуск экономит 64 записи на символ —
+                // это частый случай при перерисовке строки и прокрутке.
+                if *slot == cell {
+                    return;
+                }
                 *slot = cell;
             }
         }
@@ -484,19 +624,32 @@ impl Console {
     ///
     /// Цвета конвертируются ОДИН раз на символ, а не на каждый из 128 пикселей
     /// (раньше `color_to_native` вызывался 128 раз на символ).
+    ///
+    /// Строка глифа пишется пакетно: `expand_line` собирает 4 u64 (по два
+    /// пикселя), `write_glyph_row` отдаёт их 4 записями вместо 8. Итого
+    /// 64 записи на символ вместо 128.
     fn draw_cell_pixels(&self, cell: TextCell, col: usize, row: usize) {
+        let fg = crate::display::color_to_native(cell.fg, self.pixel_format);
+        let bg = crate::display::color_to_native(cell.bg, self.pixel_format);
+        self.draw_cell_pixels_native(cell.ch, fg, bg, col, row);
+    }
+
+    /// То же, но цвета уже в нативном формате.
+    ///
+    /// Нужно для прокрутки: там перерисовываются тысячи ячеек, и вызывать
+    /// `color_to_native` на каждую (дважды) — заметная доля стоимости.
+    fn draw_cell_pixels_native(&self, ch: u8, fg: u32, bg: u32, col: usize, row: usize) {
         let start_x = col * FONT_WIDTH;
         let start_y = row * FONT_HEIGHT;
         if start_x >= self.width || start_y >= self.height {
             return;
         }
 
-        let fg = crate::display::color_to_native(cell.fg, self.pixel_format);
-        let bg = crate::display::color_to_native(cell.bg, self.pixel_format);
+        // Сколько пикселей строки влезает по ширине (обычно все 8).
+        let row_len = FONT_WIDTH.min(self.width - start_x);
 
         // Пробел — самый частый символ при прокрутке: заливаем построчно срезом.
-        if cell.ch == b' ' {
-            let row_len = FONT_WIDTH.min(self.width - start_x);
+        if ch == b' ' {
             for dy in 0..FONT_HEIGHT {
                 let pixel_y = start_y + dy;
                 if pixel_y >= self.height {
@@ -510,23 +663,16 @@ impl Console {
             return;
         }
 
-        let glyph = &FONT_DATA[cell.ch as usize];
+        let glyph = &FONT_DATA[ch as usize];
         for dy in 0..FONT_HEIGHT {
-            let line = glyph[dy];
             let pixel_y = start_y + dy;
             if pixel_y >= self.height {
                 break;
             }
-            for dx in 0..FONT_WIDTH {
-                let pixel_x = start_x + dx;
-                if pixel_x < self.width {
-                    // Бит 7 = левый пиксель, бит 0 = правый
-                    let color = if (line >> (7 - dx)) & 1 == 1 { fg } else { bg };
-                    unsafe {
-                        let offset = pixel_y * self.pitch + pixel_x;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), color);
-                    }
-                }
+            let words = expand_line(glyph[dy], fg, bg);
+            unsafe {
+                let row_ptr = self.fb_addr.add(pixel_y * self.pitch + start_x);
+                write_glyph_row(row_ptr, &words, row_len);
             }
         }
     }
@@ -633,18 +779,56 @@ impl Console {
         }
     }
 
-    /// Прокрутка экрана на одну строку вверх.
+    /// Прокрутка экрана на одну текстовую строку вверх.
     ///
-    /// Сдвиг делается memmove'ом по фреймбуферу, а RAM-тень ячеек (если она
-    /// есть) синхронизируется отдельно. Раньше здесь был полный перерисон
-    /// экрана из тени (rows*cols*FONT_W*FONT_H пиксельных записей). На реальном
-    /// GPU это терпимо, но во фреймбуфере QEMU (MMIO) каждая запись — выход в
-    /// эмулятор, и загрузка с печатью boot-лога растягивалась на минуты.
+    /// # Почему здесь больше нет memmove по фреймбуферу
+    ///
+    /// Раньше сдвиг делался `core::ptr::copy` прямо по видеопамяти. Это
+    /// работало только в теории: `copy` — это memmove, он сначала **читает**
+    /// источник, а фреймбуфер на реальном железе отображён как write-combining
+    /// или uncached MMIO. Чтение из WC-памяти не комбинируется: каждый из
+    /// ~1 000 000 пикселей уходил отдельной транзакцией по шине, и одна
+    /// прокрутка стоила десятки-сотни миллисекунд.
+    ///
+    /// Отсюда ровно тот симптом, который виден на железе: пока курсор ниже
+    /// последней строки, `scroll()` не вызывается вообще и строка печатается
+    /// мгновенно; как только экран заполнен, прокрутка идёт на каждый перевод
+    /// строки — и вывод «замедляется с каждой строкой». В QEMU дефект не
+    /// проявлялся, потому что эмулятор отвечает на MMIO мгновенно.
+    ///
+    /// Теперь источник — RAM-тень `cells`: сдвиг идёт по обычной памяти, а во
+    /// фреймбуфер только пишем. `redraw_from_cells` дополнительно склеивает
+    /// подряд идущие пробельные ячейки в одну заливку, поэтому пустая часть
+    /// экрана перерисовывается почти бесплатно.
+    ///
+    /// Если тень недоступна (`cells_valid == false` — экран рисовался
+    /// примитивами напрямую, например gfx-демо), остаётся старый путь со
+    /// сдвигом по видеопамяти: медленный, но корректный, и случается редко.
     fn scroll(&mut self) {
         if self.rows == 0 || self.cols == 0 {
             return;
         }
 
+        let can_redraw = self.cells_valid.get() && self.cells.len() == self.cols * self.rows;
+
+        // Медленный MMIO-фреймбуфер: перерисовка из тени, во фреймбуфер только
+        // пишем. Чтение из write-combining памяти здесь и было источником
+        // замедления — см. комментарий к `probe_framebuffer_is_ram`.
+        if can_redraw && !self.fb_is_ram.get() {
+            self.cells.copy_within(self.cols.., 0);
+            let blank = TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color };
+            let last_row = (self.rows - 1) * self.cols;
+            for cell in &mut self.cells[last_row..] {
+                *cell = blank;
+            }
+            self.redraw_from_cells();
+            self.cursor_row = self.rows - 1;
+            return;
+        }
+
+        // RAM-фреймбуфер (QEMU, часть VM): memmove дешевле — одна операция на
+        // пиксель вместо сборки глифов. Здесь же оказываемся, когда тени нет
+        // (`cells_valid == false`): тогда это единственный корректный путь.
         let lines_to_move = FONT_HEIGHT;
         let shift_pixels = lines_to_move * self.pitch;
 
@@ -680,6 +864,70 @@ impl Console {
         self.cursor_row = self.rows - 1;
     }
 
+    /// Перерисовывает экран из RAM-тени `cells`, не читая видеопамять.
+    ///
+    /// Прогоны подряд идущих пробельных ячеек заливаются одним `slice::fill`
+    /// на каждую пиксельную строку. Это и есть основной выигрыш прокрутки:
+    /// типичный экран заполнен на 10-20%, и пустая часть перестаёт стоить
+    /// хоть сколько-нибудь заметных транзакций.
+    fn redraw_from_cells(&self) {
+        if !self.cells_valid.get() || self.cells.len() != self.cols * self.rows {
+            return;
+        }
+
+        let blank = TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color };
+        let blank_bg = crate::display::color_to_native(blank.bg, self.pixel_format);
+
+        // Кэш последней конвертации: на экране обычно 1-2 комбинации цветов,
+        // поэтому `color_to_native` вызывается несколько раз, а не 2×N.
+        let mut cached_fg = blank.fg;
+        let mut cached_bg = blank.bg;
+        let mut native_fg = crate::display::color_to_native(blank.fg, self.pixel_format);
+        let mut native_bg = blank_bg;
+
+        for row in 0..self.rows {
+            let base = row * self.cols;
+            let mut col = 0;
+            while col < self.cols {
+                let cell = self.cells[base + col];
+                if cell != blank {
+                    if cell.fg != cached_fg || cell.bg != cached_bg {
+                        cached_fg = cell.fg;
+                        cached_bg = cell.bg;
+                        native_fg = crate::display::color_to_native(cell.fg, self.pixel_format);
+                        native_bg = crate::display::color_to_native(cell.bg, self.pixel_format);
+                    }
+                    self.draw_cell_pixels_native(cell.ch, native_fg, native_bg, col, row);
+                    col += 1;
+                    continue;
+                }
+
+                // Прогон пробелов: находим его конец и заливаем одним куском.
+                let mut end = col + 1;
+                while end < self.cols && self.cells[base + end] == blank {
+                    end += 1;
+                }
+
+                let start_x = col * FONT_WIDTH;
+                if start_x >= self.width {
+                    break;
+                }
+                let run_width = ((end - col) * FONT_WIDTH).min(self.width - start_x);
+                for dy in 0..FONT_HEIGHT {
+                    let py = row * FONT_HEIGHT + dy;
+                    if py >= self.height {
+                        break;
+                    }
+                    unsafe {
+                        let ptr = self.fb_addr.add(py * self.pitch + start_x);
+                        core::slice::from_raw_parts_mut(ptr, run_width).fill(blank_bg);
+                    }
+                }
+                col = end;
+            }
+        }
+    }
+
     pub fn set_cursor(&mut self, col: usize, row: usize) {
         self.cursor_col = col;
         self.cursor_row = row;
@@ -694,22 +942,17 @@ impl Console {
         let y = self.cursor_row * FONT_HEIGHT;
         // Underline cursor: рисуем горизонтальную линию 2px внизу ячейки
         let inv_bg = crate::display::color_to_native(!self.bg_color, self.pixel_format);
-        for dx in 0..FONT_WIDTH {
-            let py = y + FONT_HEIGHT - 1;
-            let px = x + dx;
-            if px < self.width && py < self.height {
-                unsafe {
-                    let offset = py * self.pitch + px;
-                    core::ptr::write_volatile(self.fb_addr.add(offset), inv_bg);
-                }
+        // Сплошная строка (0xFF) одного цвета: 4 записи u64 на строку вместо 8 u32.
+        let words = expand_line(0xFF, inv_bg, inv_bg);
+        let row_len = FONT_WIDTH.min(self.width.saturating_sub(x));
+        for dy in [FONT_HEIGHT - 1, FONT_HEIGHT - 2] {
+            let py = y + dy;
+            if py >= self.height {
+                continue;
             }
-            // Вторая строка для толщины
-            let py2 = y + FONT_HEIGHT - 2;
-            if px < self.width && py2 < self.height {
-                unsafe {
-                    let offset = py2 * self.pitch + px;
-                    core::ptr::write_volatile(self.fb_addr.add(offset), inv_bg);
-                }
+            unsafe {
+                let row_ptr = self.fb_addr.add(py * self.pitch + x);
+                write_glyph_row(row_ptr, &words, row_len);
             }
         }
     }
@@ -722,17 +965,17 @@ impl Console {
         let x = self.cursor_col * FONT_WIDTH;
         let y = self.cursor_row * FONT_HEIGHT;
         let bg = crate::display::color_to_native(self.bg_color, self.pixel_format);
-        // Стираем 2 нижних строки
-        for dx in 0..FONT_WIDTH {
-            for dy in FONT_HEIGHT - 2..FONT_HEIGHT {
-                let px = x + dx;
-                let py = y + dy;
-                if px < self.width && py < self.height {
-                    unsafe {
-                        let offset = py * self.pitch + px;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), bg);
-                    }
-                }
+        // Стираем 2 нижних строки — тоже пакетно.
+        let words = expand_line(0xFF, bg, bg);
+        let row_len = FONT_WIDTH.min(self.width.saturating_sub(x));
+        for dy in [FONT_HEIGHT - 1, FONT_HEIGHT - 2] {
+            let py = y + dy;
+            if py >= self.height {
+                continue;
+            }
+            unsafe {
+                let row_ptr = self.fb_addr.add(py * self.pitch + x);
+                write_glyph_row(row_ptr, &words, row_len);
             }
         }
     }
@@ -773,20 +1016,25 @@ impl Console {
         let glyph = &FONT_DATA[font_index];
         let start_x = col * FONT_WIDTH;
         let start_y = row * FONT_HEIGHT;
+        if start_x >= self.width || start_y >= self.height {
+            return;
+        }
+
+        // Раньше `color_to_native` вызывался здесь на каждый из 128 пикселей —
+        // теперь дважды на символ, а строки пишутся пакетно.
+        let fg = crate::display::color_to_native(fg, self.pixel_format);
+        let bg = crate::display::color_to_native(bg, self.pixel_format);
+        let row_len = FONT_WIDTH.min(self.width - start_x);
 
         for dy in 0..FONT_HEIGHT {
-            let line = glyph[dy];
-            for dx in 0..FONT_WIDTH {
-                let pixel_x = start_x + dx;
-                let pixel_y = start_y + dy;
-                if pixel_x < self.width && pixel_y < self.height {
-                    let color = if (line >> (7 - dx)) & 1 == 1 { fg } else { bg };
-                    let native_color = crate::display::color_to_native(color, self.pixel_format);
-                    unsafe {
-                        let offset = pixel_y * self.pitch + pixel_x;
-                        core::ptr::write_volatile(self.fb_addr.add(offset), native_color);
-                    }
-                }
+            let pixel_y = start_y + dy;
+            if pixel_y >= self.height {
+                break;
+            }
+            let words = expand_line(glyph[dy], fg, bg);
+            unsafe {
+                let row_ptr = self.fb_addr.add(pixel_y * self.pitch + start_x);
+                write_glyph_row(row_ptr, &words, row_len);
             }
         }
     }

@@ -48,11 +48,14 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("\n");
         console.print_colored("Usage:\n", COLOR_CYAN);
         console.print("  mount                                - show mounted filesystems\n");
-        console.print("  mount <path> auto <disk_id|name>     - auto-detect and mount\n");
-        console.print("  mount <path> fat32 <disk_id|name>    - mount FAT32 (read/write)\n");
+        console.print("  mount <path> auto <disk_id|name>     - auto-detect (read-only)\n");
+        console.print("  mount <path> fat32 <disk_id|name>    - mount FAT32 (read-only)\n");
+        console.print("  mount <path> fat32 <disk_id|name> rw - mount FAT32 read/write\n");
         console.print("  mount <path> ext <disk_id|name>      - mount EXT2/3/4 (read-only)\n");
         console.print("  mount <path> ntfs <disk_id|name>     - mount NTFS (read-only)\n");
         console.print("  mount <path> ramfs                   - mount RAMFS\n");
+        console.print("\n");
+        console.print_colored("Write access to physical media is opt-in: pass 'rw' explicitly.\n", COLOR_YELLOW);
     } else {
         console.print_colored("Mounting filesystems...\n", COLOR_YELLOW);
         
@@ -94,12 +97,34 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
 
             console.print(&format!("  Mounting {} at {} from disk {}... ", fs_type, path, dev));
 
+            // exFAT пока не поддерживается: честно сообщаем, а не отдаём
+            // неинформативное "Operation not supported".
+            let detected = {
+                let mgr = fs::get_disk_manager().lock();
+                mgr.info(disk_id).map(|(_, _, _, t)| t)
+            };
+            if detected == Some("exfat") {
+                console.print_colored("SKIPPED (exFAT is not supported)\n", COLOR_RED);
+                console.print_colored("  Use a FAT32/NTFS volume or convert the disk.\n", COLOR_YELLOW);
+                return CmdResult::Ok;
+            }
+
+            // Запись на физический носитель — только по явному `rw`.
+            let write = args.iter().skip(3).any(|a| *a == "rw");
+
             let result = match fs_type {
-                "auto" => fs::mount_auto(path, disk_id).map(|s| format!("OK ({})", s)),
-                // FAT32 монтируем с записью: `cp`/`touch`/лог должны попадать
-                // на носитель. Только чтение — отдельным `mount_ro` внутри.
+                "auto" => {
+                    if write {
+                        fs::mount_auto_rw(path, disk_id).map(|s| format!("OK ({}, rw)", s))
+                    } else {
+                        fs::mount_auto(path, disk_id).map(|s| format!("OK ({}, ro)", s))
+                    }
+                }
                 "fat32" | "vfat" => match fs::get_disk_manager().lock().open(disk_id) {
-                    Some(disk) => fs::mount_fat32_rw(path, disk).map(|_| format!("OK (fat32, rw)")),
+                    Some(disk) if write => {
+                        fs::mount_fat32_rw(path, disk).map(|_| format!("OK (fat32, rw)"))
+                    }
+                    Some(disk) => fs::mount_fat32(path, disk).map(|_| format!("OK (fat32, ro)")),
                     None => Err(fs::FsError::NotFound),
                 },
                 "ext" | "ext2" | "ext3" | "ext4" => {
@@ -112,6 +137,10 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                     Some(disk) => fs::mount_ntfs(path, disk).map(|_| format!("OK (ntfs, ro)")),
                     None => Err(fs::FsError::NotFound),
                 },
+                "exfat" => {
+                    console.print_colored("not supported: exFAT (use FAT32/NTFS)\n", COLOR_RED);
+                    return CmdResult::Ok;
+                }
                 _ => {
                     console.print_colored(&format!("unknown type '{}'\n", fs_type), COLOR_RED);
                     return CmdResult::Ok;

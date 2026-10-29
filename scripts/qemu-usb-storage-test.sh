@@ -69,7 +69,7 @@ rm -f "$serial_log"
         sleep 1
     done
 
-    send_text "mount /mnt fat32 sdb"
+    send_text "mount /mnt fat32 sdb rw"
     send_text $'\n'
     sleep 2
     send_text "ls /mnt"

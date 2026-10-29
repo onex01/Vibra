@@ -468,8 +468,10 @@ fn read_dir(
                 if entry.is_long_name() {
                     let mut part = [0u16; 13];
                     let mut i = 0;
+                    // Поля имени LFN — UTF-16LE: 5 символов (1..11),
+                    // 6 символов (14..26), 2 символа (28..32).
                     for (from, to) in [(1usize, 11usize), (14, 26), (28, 32)] {
-                        for position in from..to {
+                        for position in (from..to).step_by(2) {
                             if i < 13 {
                                 part[i] = u16::from_le_bytes([
                                     buf[offset + position],
@@ -728,6 +730,14 @@ impl Fat32Fs {
         if boot.sectors_per_cluster == 0 || !boot.sectors_per_cluster.is_power_of_two() {
             return Err(FsError::InvalidPath);
         }
+        // Повреждённый BPB не должен приводить к делению на ноль или чтению
+        // за границей тома: проверяем ключевые поля геометрии.
+        if boot.reserved_sectors == 0 || boot.fat_size_32 == 0 {
+            return Err(FsError::InvalidPath);
+        }
+        if boot.fat_count == 0 || boot.fat_count > 4 {
+            return Err(FsError::InvalidPath);
+        }
 
         let fat_start = boot.reserved_sectors as u64;
         let fat_size = boot.fat_size_32 as u64;
@@ -741,6 +751,9 @@ impl Fat32Fs {
         };
         let data_sectors = total_sectors.saturating_sub(data_start);
         let total_clusters = (data_sectors / boot.sectors_per_cluster as u64) as u32;
+        if total_clusters < 2 {
+            return Err(FsError::InvalidPath);
+        }
 
         Ok(Self {
             disk: shared,
@@ -1028,12 +1041,111 @@ impl FileSystem for Fat32Fs {
         write_sector(&self.disk, slot.sector, &buf)
     }
 
-    fn mkdir(&mut self, _path: &str) -> Result<(), FsError> {
-        Err(FsError::NotSupported)
+    fn mkdir(&mut self, path: &str) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+
+        let (dir_cluster, name) = parent_cluster(&self.disk, &self.geo, path)?;
+        let name83 = to_83(&name).ok_or(FsError::NotSupported)?;
+
+        // Уже существует (файл или каталог) — это не ошибка драйвера, но и не
+        // повод перезаписывать чужую цепочку кластеров.
+        if find_in_dir(&self.disk, &self.geo, dir_cluster, &name)?.is_some() {
+            return Err(FsError::AlreadyExists);
+        }
+
+        // Каталог обязан занимать хотя бы один кластер: в нём живут записи
+        // `.` и `..`, без них том считается повреждённым (chkdsk/fsck).
+        let new_cluster = alloc_cluster(&self.disk, &self.geo, None)?;
+        let base = self
+            .geo
+            .cluster_to_sector(new_cluster)
+            .ok_or(FsError::InvalidPath)?;
+
+        let zeros = [0u8; SECTOR_SIZE];
+        for index in 0..self.geo.sectors_per_cluster as u64 {
+            write_sector(&self.disk, base + index, &zeros)?;
+        }
+
+        let (date, time) = dos_now();
+        let make_entry = |raw_name: [u8; 11], cluster: u32| FatDirEntry {
+            name: raw_name,
+            attributes: FatDirEntry::ATTR_DIRECTORY,
+            reserved: 0,
+            creation_time_tenths: 0,
+            creation_time: time,
+            creation_date: date,
+            last_access_date: date,
+            first_cluster_high: (cluster >> 16) as u16,
+            write_time: time,
+            write_date: date,
+            first_cluster_low: (cluster & 0xFFFF) as u16,
+            file_size: 0,
+        };
+
+        // `.` указывает на сам каталог, `..` — на родителя. Для каталога в
+        // корне FAT32 `..` обязан содержать кластер 0, а не номер корневого
+        // кластера: иначе том не проходит проверку консистентности.
+        let dot = make_entry(*b".          ", new_cluster);
+        let parent_for_dotdot = if dir_cluster == self.geo.root_cluster {
+            0
+        } else {
+            dir_cluster
+        };
+        let dotdot = make_entry(*b"..         ", parent_for_dotdot);
+
+        let mut buf = [0u8; SECTOR_SIZE];
+        buf[0..32].copy_from_slice(&entry_bytes(&dot));
+        buf[32..64].copy_from_slice(&entry_bytes(&dotdot));
+        write_sector(&self.disk, base, &buf)?;
+
+        // Запись о каталоге в родительском каталоге.
+        let (sector, offset) = find_free_slot(&self.disk, &self.geo, dir_cluster)?;
+        let entry = make_entry(name83, new_cluster);
+        let mut parent_buf = [0u8; SECTOR_SIZE];
+        read_sector(&self.disk, sector, &mut parent_buf)?;
+        parent_buf[offset..offset + 32].copy_from_slice(&entry_bytes(&entry));
+        write_sector(&self.disk, sector, &parent_buf)
     }
 
-    fn rmdir(&mut self, _path: &str) -> Result<(), FsError> {
-        Err(FsError::NotSupported)
+    fn rmdir(&mut self, path: &str) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+
+        let Some(slot) = find_path(&self.disk, &self.geo, path)? else {
+            return Err(FsError::NotFound);
+        };
+        if !slot.entry.is_directory() {
+            return Err(FsError::NotADirectory);
+        }
+
+        let cluster = slot.entry.get_cluster();
+        // Корневой каталог удалить нельзя: у него нет записи в родителе, и
+        // освобождение его цепочки сделало бы том нечитаемым.
+        if cluster == self.geo.root_cluster || cluster < 2 {
+            return Err(FsError::PermissionDenied);
+        }
+
+        // Каталог удаляется только пустым. Записи `.` и `..` пустотой не
+        // считаются — иначе `rmdir` сносил бы непустые каталоги, оставляя
+        // их содержимое в виде потерянных кластеров.
+        for (entry, name) in read_dir(&self.disk, &self.geo, cluster)? {
+            if name == "." || name == ".." || name.is_empty() {
+                continue;
+            }
+            let _ = entry;
+            return Err(FsError::NotEmpty);
+        }
+
+        free_chain(&self.disk, &self.geo, cluster)?;
+
+        // 0xE5 = удалённая запись (имя сохраняется для восстановления).
+        let mut buf = [0u8; SECTOR_SIZE];
+        read_sector(&self.disk, slot.sector, &mut buf)?;
+        buf[slot.offset] = 0xE5;
+        write_sector(&self.disk, slot.sector, &buf)
     }
 
     fn readdir(&mut self, path: &str) -> Result<Vec<DirEntry>, FsError> {

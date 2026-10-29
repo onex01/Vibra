@@ -22,6 +22,11 @@ unsafe fn inb(port: u16) -> u8 {
     val
 }
 
+#[inline]
+unsafe fn io_wait() {
+    outb(0x80, 0);
+}
+
 /// Включить звук на заданной частоте (Гц)
 pub fn beep(frequency: u32) {
     if frequency == 0 {
@@ -29,19 +34,23 @@ pub fn beep(frequency: u32) {
         return;
     }
 
-    let divisor = 1193180 / frequency;
+    // PIT: 1.193182 МГц. Делитель обязан быть в 1..=65535, иначе частота
+    // уезжает в ультразвук/слышимый шум и динамик «молчит».
+    let divisor = (1_193_180u32 / frequency.clamp(20, 20_000)).clamp(1, 65_535) as u16;
 
     unsafe {
-        // Настраиваем PIT Channel 2
-        outb(PIT_COMMAND, 0xB6); // Channel 2, lobyte/hibyte, square wave
+        // Channel 2, lobyte/hibyte, mode 3 (square wave).
+        outb(PIT_COMMAND, 0xB6);
+        io_wait();
         outb(PIT_CHANNEL2_DATA, divisor as u8);
+        io_wait();
         outb(PIT_CHANNEL2_DATA, (divisor >> 8) as u8);
+        io_wait();
 
-        // Включаем speaker
+        // Включаем speaker: бит 0 = gate, бит 1 = data.
         let tmp = inb(SPEAKER_PORT);
-        if tmp | 3 != tmp {
-            outb(SPEAKER_PORT, tmp | 3);
-        }
+        outb(SPEAKER_PORT, tmp | 0x03);
+        io_wait();
     }
 }
 
@@ -49,16 +58,16 @@ pub fn beep(frequency: u32) {
 pub fn silent() {
     unsafe {
         let tmp = inb(SPEAKER_PORT);
-        outb(SPEAKER_PORT, tmp & !3);
+        outb(SPEAKER_PORT, tmp & !0x03);
+        io_wait();
     }
 }
 
-/// Короткий звуковой сигнал
+/// Короткий звуковой сигнал.
 pub fn beep_short() {
     beep(1000);
-    // Примерная задержка ~100ms через busy-wait PIT
-    // В реальной ОС использовал бы таймер
-    for _ in 0..5_000_000u32 {
+    let start = crate::timer::uptime_ms();
+    while crate::timer::uptime_ms().wrapping_sub(start) < 100 {
         core::hint::spin_loop();
     }
     silent();

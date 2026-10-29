@@ -43,12 +43,12 @@ static ATTACH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 /// Время последней попытки (мс с загрузки) — троттлинг после boot.
 static LAST_ATTACH_MS: AtomicUsize = AtomicUsize::new(0);
 /// Во время загрузки попыток немного: диски появляются на шаге 8.5.
-const MAX_BOOT_ATTEMPTS: usize = 8;
+const MAX_BOOT_ATTEMPTS: usize = 3;
 /// После загрузки — редкие попытки для горячего подключения носителя.
-const MAX_IDLE_ATTEMPTS: usize = 24;
+const MAX_IDLE_ATTEMPTS: usize = 4;
 /// Интервал между попытками в idle: чаще — значит блокировать shell
 /// (скан дисков занимает десятки мс, а PS/2-сканкоды при этом теряются).
-const IDLE_RETRY_MS: usize = 5000;
+const IDLE_RETRY_MS: usize = 30_000;
 
 struct Sink {
     fs: Fat32Fs,
@@ -163,6 +163,11 @@ fn candidate_windows() -> Vec<Box<dyn DiskIo>> {
             disks.push(disk);
         }
     }
+    // NVMe: на современных ноутбуках это единственный внутренний диск, и
+    // раньше boot-log вообще не сканировал его — VIBRALOG не находился.
+    if let Some(disk) = crate::drivers::nvme::create_disk() {
+        disks.push(disk);
+    }
     for port in crate::drivers::ahci::active_ports() {
         disks.push(Box::new(crate::drivers::ahci::AhciDisk::new(port)));
     }
@@ -221,28 +226,37 @@ pub fn attach() -> bool {
 
     // После загрузки idle-цикл shell дергает `flush` раз в секунду: сканировать
     // диски каждый раз нельзя (долгие блокирующие чтения теряют PS/2-сканкоды),
-    // поэтому или редко, или никогда.
+    // поэтому троттлим ВСЕГДА, а не только после исчерпания boot-попыток.
+    // Раньше условие `attempts >= MAX_BOOT_ATTEMPTS` означало, что если за
+    // время boot диски ещё не появились и счётчик остался нулевым, то после
+    // загрузки `attach()` сканировал носители на каждом `checkpoint()` —
+    // то есть раз в секунду и на каждое нажатие клавиши в простое.
     let after_boot = super::boot_finished();
     if after_boot {
         let attempts = ATTACH_ATTEMPTS.load(Ordering::Relaxed);
         if attempts >= MAX_BOOT_ATTEMPTS + MAX_IDLE_ATTEMPTS {
             return false;
         }
-        if attempts >= MAX_BOOT_ATTEMPTS {
-            let now = crate::timer::uptime_ms() as usize;
-            let last = LAST_ATTACH_MS.load(Ordering::Relaxed);
-            if now.saturating_sub(last) < IDLE_RETRY_MS {
-                return false;
-            }
+        let now = crate::timer::uptime_ms() as usize;
+        let last = LAST_ATTACH_MS.load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < IDLE_RETRY_MS {
+            return false;
         }
     }
     LAST_ATTACH_MS.store(crate::timer::uptime_ms() as usize, Ordering::Relaxed);
 
-    let windows = candidate_windows();
-    if windows.is_empty() {
+    // Счётчик попыток увеличиваем ДО сканирования: если дисков ещё нет,
+    // иначе каждый checkpoint заново перебирал бы пустой список.
+    let attempt = ATTACH_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    if attempt >= MAX_BOOT_ATTEMPTS + MAX_IDLE_ATTEMPTS {
         return false;
     }
-    if ATTACH_ATTEMPTS.fetch_add(1, Ordering::Relaxed) >= MAX_BOOT_ATTEMPTS + MAX_IDLE_ATTEMPTS {
+    if !after_boot && attempt >= MAX_BOOT_ATTEMPTS {
+        return false;
+    }
+
+    let windows = candidate_windows();
+    if windows.is_empty() {
         return false;
     }
 

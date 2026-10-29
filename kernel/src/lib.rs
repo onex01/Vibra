@@ -64,6 +64,14 @@ pub fn request_cancel() {
     CANCEL_FLAG.store(true, Ordering::Relaxed);
 }
 
+/// Опросить клавиатуру/COM1 и обработать Ctrl+C.
+///
+/// Длинные команды вызывают это в своих циклах: клавиатурный драйвер
+/// выставляет `CANCEL_FLAG` при Ctrl+C, а команда проверяет `is_cancelled()`.
+pub fn poll_input() {
+    let _ = serial::poll_key().or_else(keyboard::poll_key);
+}
+
 #[inline]
 fn halt() { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
 
@@ -75,49 +83,15 @@ fn current_stack_pointer() -> u64 {
     rsp
 }
 
-// Стресс-тест heap: 10k циклов alloc/drop разного размера.
+// Короткий стресс-тест heap на загрузке: полный прогон доступен командой
+// `diag heap-test`, чтобы boot не тратил на него время на каждой машине.
 fn heap_stress() {
-    use alloc::{vec, vec::Vec};
-    const ITERS: usize = 10_000;
-
-    let (used_before, _) = memory::heap::stats();
-
-    let mut patterns = [0u8; 256];
-    let mut seed: u8 = 0x5A;
-    for i in 0..256 {
-        seed ^= (i as u8).wrapping_mul(0x9B);
-        patterns[i] = seed;
-    }
-
-    for i in 0..ITERS {
-        let n = 8 + (i % 248);
-        let mut v: Vec<u8> = Vec::with_capacity(n);
-        let mut idx = i;
-        while v.len() < n {
-            v.push(patterns[idx % 256]);
-            idx = idx.wrapping_add(7);
-        }
-        let sample = v[n / 2];
-        let expected = patterns[(i + (n / 2) * 7) % 256];
-        if sample != expected {
-            println!("[HEAP] stress: CORRUPTION at iter {} (got {:#x} want {:#x})", i, sample, expected);
-            return;
-        }
-        drop(v);
-
-        if i % 2000 == 0 && i != 0 {
-            let held_len = 8 + ((i / 2000) * 37) % 248;
-            let _h = vec![0xCDu8; held_len];
-            let _ = _h;
-        }
-    }
-
-    let (used_after, _) = memory::heap::stats();
-    if used_after == used_before {
-        println!("[HEAP] stress: {} iters OK (used {} -> {})", ITERS, used_before, used_after);
+    const BOOT_ITERS: usize = 256;
+    let (iters, ok, drift) = memory::heap::stress(BOOT_ITERS);
+    if ok {
+        println!("[HEAP] stress: {} iters OK", iters);
     } else {
-        let drift = used_after as i64 - used_before as i64;
-        println!("[HEAP] stress: {} iters LEAK ({} -> {})", ITERS, used_before, used_after);
+        println!("[HEAP] stress: {} iters FAILED (drift {} bytes)", iters, drift);
     }
 }
 
@@ -248,16 +222,10 @@ pub fn init() -> BootConsole {
     crate::boot_log::usb::attach();
 
     println!("[BOOT] Step 9: Filesystem");
+    // init_filesystem сам монтирует единственный корневой RamFS в VFS.
     fs::init_filesystem();
     boot_log::checkpoint();
     boot_log::init();
-
-    use alloc::boxed::Box;
-    use crate::fs::{FileSystem, VfsManager};
-    let mut vfs = VfsManager::new();
-    let mut ramfs = fs::RamFs::new();
-    FileSystem::mount(&mut ramfs).ok();
-    vfs.mount("/", Box::new(ramfs), false).ok();
 
     kernel::init();
     task::init();
@@ -381,6 +349,9 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
     console.print_colored("\"\n", framebuffer::COLOR_VIBRA_FG);
     console.print_colored("    Type 'help' for commands | Tab to autocomplete\n\n", framebuffer::COLOR_VIBRA_FG);
 
+    // Маркер готовности консоли в COM1 — только для debug-сборки.
+    // В release порт 0x3F8 не трогаем вовсе (см. serial.rs).
+    #[cfg(feature = "serial-debug")]
     unsafe {
         core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'C', options(nostack, preserves_flags));
     }
@@ -412,6 +383,7 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
         let line_len = {
             let mut editor = LINE_EDITOR.lock();
             editor.set_prompt(prompt_str);
+            editor.set_prompt_color(framebuffer::COLOR_VIBRA_PROMPT);
             let line = editor.read_line(&mut console, prompt_len);
             line_buffer[..line.len()].copy_from_slice(line.as_bytes());
             line.len()
@@ -433,6 +405,17 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
         let args = &parts[1..n_parts];
 
         if let Some(cmd) = commands::find_command(cmd_name) {
+            // Единая подсказка для всех команд: `cmd --help` / `cmd -h`.
+            if args.iter().any(|a| *a == "--help" || *a == "-h") {
+                console.print_colored("  ", framebuffer::COLOR_YELLOW);
+                console.print_colored(cmd.name, framebuffer::COLOR_VIBRA_PROMPT);
+                console.print_colored(" - ", framebuffer::COLOR_YELLOW);
+                console.print_colored(cmd.help, framebuffer::COLOR_VIBRA_FG);
+                console.put_char('\n');
+                continue;
+            }
+            // Новый запуск команды не должен наследовать отмену от предыдущей.
+            crate::reset_cancel();
             match (cmd.func)(args, &mut console) {
                 CmdResult::Ok | CmdResult::Continue => {}
                 CmdResult::Exit => {
@@ -510,7 +493,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
 
     boot_log::flush_to_file("/var/log/error.log");
-    boot_log::flush_to_file("/boot.log");
+    boot_log::flush_to_file("/var/log/boot.log");
     // Последний шанс увидеть панику на машине без COM-порта.
     boot_log::panic_flush();
 

@@ -543,26 +543,90 @@ const AHCI_MAX_SECTORS: usize = 128;
 /// читались «наполовину». Теперь запрос режется на куски.
 impl crate::fs::disk::DiskIo for AhciDisk {
     fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
-        for (i, chunk) in buf.chunks_mut(AHCI_MAX_SECTORS * 512).enumerate() {
-            let count = (chunk.len() / 512) as u16;
-            if count == 0 || chunk.len() % 512 != 0 {
-                return Err(crate::fs::vfs::FsError::InvalidPath);
+        self.read_bytes(sector.saturating_mul(512), buf)
+    }
+
+    fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
+        self.write_bytes(sector.saturating_mul(512), buf)
+    }
+}
+
+impl AhciDisk {
+    fn read_bytes(&mut self, byte_offset: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let ss = self.sector_size as u64;
+        if ss == 0 {
+            return Err(crate::fs::vfs::FsError::IoError);
+        }
+        let lba = byte_offset / ss;
+        let in_sector = (byte_offset % ss) as usize;
+
+        if in_sector == 0 && buf.len() % ss as usize == 0 {
+            let max_bytes = AHCI_MAX_SECTORS * ss as usize;
+            for (i, chunk) in buf.chunks_mut(max_bytes).enumerate() {
+                let count = (chunk.len() / ss as usize) as u16;
+                if count == 0 || chunk.len() % ss as usize != 0 {
+                    return Err(crate::fs::vfs::FsError::InvalidPath);
+                }
+                let lba = lba + (i * AHCI_MAX_SECTORS) as u64;
+                if !read_sectors(self.port, lba, count, chunk) {
+                    return Err(crate::fs::vfs::FsError::IoError);
+                }
             }
-            let lba = sector + (i * AHCI_MAX_SECTORS) as u64;
+            return Ok(());
+        }
+
+        let need = (in_sector + buf.len() + ss as usize - 1) / ss as usize;
+        let mut tmp = alloc::vec![0u8; need * ss as usize];
+        let max_bytes = AHCI_MAX_SECTORS * ss as usize;
+        for (i, chunk) in tmp.chunks_mut(max_bytes).enumerate() {
+            let count = (chunk.len() / ss as usize) as u16;
+            let lba = lba + (i * AHCI_MAX_SECTORS) as u64;
             if !read_sectors(self.port, lba, count, chunk) {
                 return Err(crate::fs::vfs::FsError::IoError);
             }
         }
+        buf.copy_from_slice(&tmp[in_sector..in_sector + buf.len()]);
         Ok(())
     }
 
-    fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
-        for (i, chunk) in buf.chunks(AHCI_MAX_SECTORS * 512).enumerate() {
-            let count = (chunk.len() / 512) as u16;
-            if count == 0 || chunk.len() % 512 != 0 {
-                return Err(crate::fs::vfs::FsError::InvalidPath);
+    fn write_bytes(&mut self, byte_offset: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let ss = self.sector_size as u64;
+        if ss == 0 {
+            return Err(crate::fs::vfs::FsError::IoError);
+        }
+        let lba = byte_offset / ss;
+        let in_sector = (byte_offset % ss) as usize;
+
+        if in_sector == 0 && buf.len() % ss as usize == 0 {
+            let max_bytes = AHCI_MAX_SECTORS * ss as usize;
+            for (i, chunk) in buf.chunks(max_bytes).enumerate() {
+                let count = (chunk.len() / ss as usize) as u16;
+                if count == 0 || chunk.len() % ss as usize != 0 {
+                    return Err(crate::fs::vfs::FsError::InvalidPath);
+                }
+                let lba = lba + (i * AHCI_MAX_SECTORS) as u64;
+                if !write_sectors(self.port, lba, count, chunk) {
+                    return Err(crate::fs::vfs::FsError::IoError);
+                }
             }
-            let lba = sector + (i * AHCI_MAX_SECTORS) as u64;
+            return Ok(());
+        }
+
+        // Неполный сектор: read-modify-write.
+        let need = (in_sector + buf.len() + ss as usize - 1) / ss as usize;
+        let mut tmp = alloc::vec![0u8; need * ss as usize];
+        let max_bytes = AHCI_MAX_SECTORS * ss as usize;
+        for (i, chunk) in tmp.chunks_mut(max_bytes).enumerate() {
+            let count = (chunk.len() / ss as usize) as u16;
+            let lba = lba + (i * AHCI_MAX_SECTORS) as u64;
+            if !read_sectors(self.port, lba, count, chunk) {
+                return Err(crate::fs::vfs::FsError::IoError);
+            }
+        }
+        tmp[in_sector..in_sector + buf.len()].copy_from_slice(buf);
+        for (i, chunk) in tmp.chunks(max_bytes).enumerate() {
+            let count = (chunk.len() / ss as usize) as u16;
+            let lba = lba + (i * AHCI_MAX_SECTORS) as u64;
             if !write_sectors(self.port, lba, count, chunk) {
                 return Err(crate::fs::vfs::FsError::IoError);
             }
@@ -573,11 +637,26 @@ impl crate::fs::disk::DiskIo for AhciDisk {
 
 pub struct AhciDisk {
     port: u32,
+    sector_size: u16,
 }
 
 impl AhciDisk {
     pub fn new(port: u32) -> Self {
-        Self { port }
+        // VFS/boot-log работают в 512-байтных секторах. Для 4Kn-диска нужен
+        // реальный размер сектора, иначе GPT/FAT будут читать не с того
+        // смещения. `with_sector_size` используется там, где IDENTIFY уже
+        // выполнен (blockdev), а здесь — для остальных вызывающих.
+        let sector_size = identify_device(port)
+            .map(|info| info.sector_size)
+            .unwrap_or(512);
+        Self::with_sector_size(port, sector_size)
+    }
+
+    pub fn with_sector_size(port: u32, sector_size: u16) -> Self {
+        Self {
+            port,
+            sector_size: if sector_size == 0 { 512 } else { sector_size },
+        }
     }
 
     pub fn port(&self) -> u32 {

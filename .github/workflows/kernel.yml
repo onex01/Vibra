@@ -86,6 +86,21 @@ jobs:
       - name: Test clock, RTC and ramfs layout
         run: ./build.sh clock-test
 
+      - name: Test root RamFS and file writes
+        run: ./build.sh ramfs-test
+
+      - name: Test read-only mount policy
+        run: ./build.sh ro-mount-test
+
+      - name: Test resilience to corrupt filesystems
+        run: ./build.sh bad-fs-test
+
+      - name: Test NVMe and mount auto
+        run: ./build.sh nvme-test
+
+      - name: Test interactive shell (Tab, history, help)
+        run: ./build.sh shell-test
+
       - name: Test PS/2 and USB HID keyboard
         run: ./build.sh keyboard-test
 

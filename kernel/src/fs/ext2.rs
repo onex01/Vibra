@@ -75,7 +75,15 @@ impl Ext2Fs {
         let mut buf = [0u8; 1024];
         disk.read(2, &mut buf).map_err(|_| FsError::IoError)?;
         let superblock = Ext2Superblock::parse(&buf)?;
-        let block_size = 1024 << superblock.log_block_size;
+        // log_block_size — степень двойки: 0..=6 (1 КиБ..64 КиБ). Огромное
+        // значение из повреждённого суперблока дало бы переполнение сдвига.
+        if superblock.log_block_size > 6 {
+            return Err(FsError::InvalidPath);
+        }
+        if superblock.blocks_per_group == 0 || superblock.inodes_per_group == 0 {
+            return Err(FsError::InvalidPath);
+        }
+        let block_size = 1024u32 << superblock.log_block_size;
 
         Ok(Self {
             disk: spin::Mutex::new(disk),

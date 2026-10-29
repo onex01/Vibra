@@ -26,7 +26,9 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::format;
 
-static LEGACY_RAMFS: Lazy<Mutex<ramfs::RamFs>> = Lazy::new(|| {
+/// Единственный корневой RamFS. Раньше в VFS монтировался второй, пустой
+/// экземпляр, из-за чего `ls /` был пуст, а `write_file` писал в копию `Vec`.
+static ROOT_RAMFS: Lazy<Mutex<ramfs::RamFs>> = Lazy::new(|| {
     Mutex::new(ramfs::RamFs::new())
 });
 
@@ -44,7 +46,7 @@ static DISK_MANAGER: Lazy<Mutex<DiskManager>> = Lazy::new(|| {
 
 /// Инициализация файловой системы (вызывается из main.rs)
 pub fn init_filesystem() {
-    let mut ramfs = LEGACY_RAMFS.lock();
+    let mut ramfs = ROOT_RAMFS.lock();
     ramfs.mount().ok();
 
     // Канонический набор каталогов. Раньше здесь был «отладочный» набор
@@ -77,6 +79,13 @@ pub fn init_filesystem() {
 
     // Инициализируем виртуальные ФС и монтируем в VFS
     let vfs = &VFS_MANAGER;
+
+    // / — корневой RamFS. Монтируется первым и является тем же экземпляром,
+    // который наполняется выше: legacy-API и VFS видят одни и те же файлы.
+    match vfs.mount("/", Box::new(ramfs.clone()), false) {
+        Ok(()) => crate::println!("[FS] root ramfs mounted at /"),
+        Err(e) => crate::println!("[FS] root ramfs mount failed: {:?}", e),
+    }
 
     // /proc — procfs
     let procfs = procfs::ProcFs::new();
@@ -148,33 +157,39 @@ pub fn set_current_dir(path: &str) {
     *CURRENT_DIR.lock() = Some(String::from(path));
 }
 
-pub fn fs_count() -> usize {
-    let mut ramfs = LEGACY_RAMFS.lock();
-    if let Ok(entries) = ramfs.readdir("/") {
-        entries.len()
-    } else {
-        0
+/// Предел на чтение файла целиком: `cat` большого файла не должен съесть кучу.
+pub const MAX_READ_BYTES: usize = 32 * 1024 * 1024;
+
+fn read_all(file: &mut dyn File) -> Result<Vec<u8>, FsError> {
+    let size = file.size();
+    if size > MAX_READ_BYTES {
+        return Err(FsError::NotSupported);
     }
+    let mut buf = alloc::vec![0u8; size];
+    if size > 0 {
+        file.read(&mut buf)?;
+    }
+    Ok(buf)
+}
+
+pub fn fs_count() -> usize {
+    list_dir("/").len()
 }
 
 pub fn list_entries() -> Vec<DirEntry> {
-    let mut ramfs = LEGACY_RAMFS.lock();
-    let dir = get_current_dir();
-    if let Ok(entries) = ramfs.readdir(&dir) {
-        entries
-    } else {
-        Vec::new()
-    }
+    list_dir(&get_current_dir())
 }
 
 pub fn list_dir(path: &str) -> Vec<DirEntry> {
-    // Сначала пробуем VFS
-    if let Ok(entries) = vfs_readdir(path) {
-        return entries;
+    // Сначала пробуем VFS (включая procfs/sysfs/devtmpfs).
+    match vfs_readdir(path) {
+        Ok(entries) => return entries,
+        Err(FsError::NotFound) => {}
+        Err(_) => return Vec::new(),
     }
 
-    // Fallback: legacy RamFS
-    let mut ramfs = LEGACY_RAMFS.lock();
+    // Fallback: корневой RamFS, если путь не покрыт таблицей монтирования.
+    let mut ramfs = ROOT_RAMFS.lock();
     if let Ok(entries) = ramfs.readdir(path) {
         entries
     } else {
@@ -183,53 +198,114 @@ pub fn list_dir(path: &str) -> Vec<DirEntry> {
 }
 
 pub fn create_file(name: &str) -> Result<(), FsError> {
-    let mut ramfs = LEGACY_RAMFS.lock();
     let path = combine_path(&get_current_dir(), name);
-    ramfs.create(&path)?;
-    Ok(())
+
+    match vfs_create(&path) {
+        Ok(_) => Ok(()),
+        Err(FsError::NotFound) => {
+            let mut ramfs = ROOT_RAMFS.lock();
+            ramfs.create(&path)?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
-    // Сначала пробуем VFS (включая procfs/sysfs/devtmpfs)
-    if let Ok(mut file) = vfs_open(name) {
-        let size = file.size();
-        let mut buf = alloc::vec![0u8; size];
-        if size > 0 {
-            file.read(&mut buf)?;
-        }
-        return Ok(buf);
+    // Сначала пробуем VFS (включая procfs/sysfs/devtmpfs).
+    match vfs_open(name) {
+        Ok(mut file) => return read_all(file.as_mut()),
+        Err(FsError::NotFound) => {}
+        // Ошибку смонтированной ФС нельзя маскировать fallback-ом в ramfs.
+        Err(e) => return Err(e),
     }
 
-    // Fallback: legacy RamFS
-    let ramfs = LEGACY_RAMFS.lock();
+    // Fallback: корневой RamFS.
+    let ramfs = ROOT_RAMFS.lock();
     let path = combine_path(&get_current_dir(), name);
     let mut file = ramfs.open(&path)?;
-    let size = file.size();
-    let mut buf = alloc::vec![0u8; size];
-    if size > 0 {
-        file.read(&mut buf)?;
-    }
-    Ok(buf)
+    read_all(file.as_mut())
 }
 
 pub fn write_file(name: &str, data: &[u8]) -> Result<(), FsError> {
-    let mut ramfs = LEGACY_RAMFS.lock();
     let path = combine_path(&get_current_dir(), name);
-    let _ = ramfs.remove(&path); // Перезаписываем
-    let mut file = ramfs.create(&path)?;
-    file.write(data)?;
-    Ok(())
+
+    // Перезаписываем: удаляем старый файл, если он есть. Ошибки чтения/удаления
+    // на read-only томе должны дойти до пользователя, а не осесть в ramfs.
+    match vfs_remove(&path) {
+        Ok(()) | Err(FsError::NotFound) => {}
+        Err(e) => return Err(e),
+    }
+
+    match vfs_create(&path) {
+        Ok(mut file) => {
+            file.write(data)?;
+            Ok(())
+        }
+        Err(FsError::NotFound) => {
+            let mut ramfs = ROOT_RAMFS.lock();
+            let _ = ramfs.remove(&path);
+            let mut file = ramfs.create(&path)?;
+            file.write(data)?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn create_dir(name: &str) -> Result<(), FsError> {
-    let mut ramfs = LEGACY_RAMFS.lock();
     let path = combine_path(&get_current_dir(), name);
+
+    // Сначала VFS: если путь попадает в смонтированный FAT32, каталог должен
+    // появиться именно там. Раньше вызов всегда уходил в LEGACY_RAMFS, и
+    // `mkdir /mnt/x` на диске не создавал ничего.
+    match vfs_mkdir(&path) {
+        Ok(()) => return Ok(()),
+        // Путь не принадлежит ни одной точке монтирования — это нормально
+        // для корневого RamFS.
+        Err(FsError::NotFound) => {}
+        // Том только для чтения или не умеет каталоги: пробовать RamFS
+        // бессмысленно, ошибка должна дойти до пользователя.
+        Err(e) => return Err(e),
+    }
+
+    let mut ramfs = ROOT_RAMFS.lock();
     ramfs.mkdir(&path)
 }
 
-pub fn remove_entry(name: &str) -> Result<(), FsError> {
-    let mut ramfs = LEGACY_RAMFS.lock();
+/// Удалить каталог (только пустой).
+///
+/// Отдельно от `remove_entry`, потому что `rmdir` не должен сносить файлы:
+/// иначе `rmdir file.txt` молча удалил бы файл.
+pub fn remove_dir(name: &str) -> Result<(), FsError> {
     let path = combine_path(&get_current_dir(), name);
+
+    match vfs_rmdir(&path) {
+        Ok(()) => return Ok(()),
+        Err(FsError::NotFound) => {}
+        Err(e) => return Err(e),
+    }
+
+    let mut ramfs = ROOT_RAMFS.lock();
+    ramfs.rmdir(&path)
+}
+
+pub fn remove_entry(name: &str) -> Result<(), FsError> {
+    let path = combine_path(&get_current_dir(), name);
+
+    // Файл или каталог на дисковом томе — через VFS.
+    match vfs_remove(&path) {
+        Ok(()) => return Ok(()),
+        Err(FsError::NotFound) | Err(FsError::IsADirectory) => {}
+        Err(e) => return Err(e),
+    }
+    match vfs_rmdir(&path) {
+        Ok(()) => return Ok(()),
+        Err(FsError::NotFound) | Err(FsError::NotADirectory) => {}
+        Err(e) => return Err(e),
+    }
+
+    let mut ramfs = ROOT_RAMFS.lock();
     // Пробуем удалить как файл, если не вышло - как директорию
     if ramfs.remove(&path).is_err() {
         ramfs.rmdir(&path)?;
@@ -243,8 +319,8 @@ pub fn dir_exists(path: &str) -> bool {
         return true;
     }
 
-    // Fallback: legacy RamFS
-    let ramfs = LEGACY_RAMFS.lock();
+    // Fallback: корневой RamFS.
+    let ramfs = ROOT_RAMFS.lock();
     let full_path = combine_path(&get_current_dir(), path);
     if let Ok(meta) = ramfs.stat(&full_path) {
         meta.file_type == FileType::Directory
@@ -323,7 +399,18 @@ pub fn mount_ntfs(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
 /// Смонтировать раздел/диск из реестра, определив ФС автоматически.
 ///
 /// Возвращает имя смонтированной ФС (`"fat32"`, `"ext2"`, `"ntfs"`).
+/// По умолчанию — только чтение; для FAT32 запись включается
+/// `mount_auto_rw`.
 pub fn mount_auto(path: &str, disk_id: usize) -> Result<&'static str, FsError> {
+    mount_auto_mode(path, disk_id, false)
+}
+
+/// Автомонтирование FAT32 с записью (явный `rw` в команде mount).
+pub fn mount_auto_rw(path: &str, disk_id: usize) -> Result<&'static str, FsError> {
+    mount_auto_mode(path, disk_id, true)
+}
+
+fn mount_auto_mode(path: &str, disk_id: usize, write: bool) -> Result<&'static str, FsError> {
     // Тип ФС уже определён при probe, но если запись добавлена вручную
     // (`test-disk ram`), определяем на месте.
     let fs_type = {
@@ -345,21 +432,29 @@ pub fn mount_auto(path: &str, disk_id: usize) -> Result<&'static str, FsError> {
 
     match fs_type {
         "fat32" => {
-            // FAT32 теперь умеет писать: `mount_auto` монтирует с записью
-            // (readonly=false), поэтому и драйвер открывается в RW-режиме.
-            // `mount_fat32()` оставлен read-only для «только посмотреть».
-            let mut fs = Fat32Fs::new_rw(disk)?;
+            // Запись на физический носитель включается только явным `rw`.
+            let mut fs = if write {
+                Fat32Fs::new_rw(disk)?
+            } else {
+                Fat32Fs::new(disk)?
+            };
             fs.mount()?;
-            mount_fs(path, Box::new(fs), false)?;
+            mount_fs(path, Box::new(fs), !write)?;
             Ok("fat32")
         }
         "ext2" => {
+            if write {
+                return Err(FsError::ReadOnly);
+            }
             let mut fs = Ext2Fs::new(disk)?;
             fs.mount()?;
             mount_fs(path, Box::new(fs), true)?;
             Ok("ext2")
         }
         "ntfs" => {
+            if write {
+                return Err(FsError::ReadOnly);
+            }
             let mut fs = NtfsFs::new(disk)?;
             fs.mount()?;
             mount_fs(path, Box::new(fs), true)?;
@@ -380,7 +475,7 @@ pub fn is_mounted(path: &str) -> bool {
     VFS_MANAGER.mount_table.lock().is_mounted(path)
 }
 
-/// Попытаться найти и открыть файл через VFS
+/// Попытаться найти и открыть файл через VFS.
 pub fn vfs_open(path: &str) -> Result<Box<dyn File>, FsError> {
     let mt = VFS_MANAGER.mount_table.lock();
 
@@ -391,7 +486,13 @@ pub fn vfs_open(path: &str) -> Result<Box<dyn File>, FsError> {
         } else {
             &relative_path
         };
-        mt.get(idx).fs.open(target_path)
+        let mount = mt.get(idx);
+        let file = mount.fs.open(target_path)?;
+        if mount.readonly {
+            Ok(Box::new(vfs::ReadOnlyFile { inner: file }))
+        } else {
+            Ok(file)
+        }
     } else {
         Err(FsError::NotFound)
     }
@@ -402,6 +503,9 @@ pub fn vfs_create(path: &str) -> Result<Box<dyn File>, FsError> {
     let mut mt = VFS_MANAGER.mount_table.lock();
 
     if let Some((idx, relative_path)) = mt.find_fs(path) {
+        if mt.get(idx).readonly {
+            return Err(FsError::ReadOnly);
+        }
         let target_path = if relative_path.is_empty() || relative_path == "/" {
             "/"
         } else {
@@ -424,6 +528,67 @@ pub fn vfs_readdir(path: &str) -> Result<Vec<DirEntry>, FsError> {
             &relative_path
         };
         mt.get_mut(idx).fs.readdir(target_path)
+    } else {
+        Err(FsError::NotFound)
+    }
+}
+
+/// Попытаться создать каталог через VFS.
+///
+/// Нужен, чтобы `mkdir /mnt/x` работал на смонтированном FAT32, а не только
+/// на корневом RamFS: раньше `fs::create_dir` был жёстко привязан к
+/// `LEGACY_RAMFS` и на дисковых томах каталог просто не появлялся.
+pub fn vfs_mkdir(path: &str) -> Result<(), FsError> {
+    let mut mt = VFS_MANAGER.mount_table.lock();
+
+    if let Some((idx, relative_path)) = mt.find_fs(path) {
+        if mt.get(idx).readonly {
+            return Err(FsError::ReadOnly);
+        }
+        let target_path = if relative_path.is_empty() || relative_path == "/" {
+            "/"
+        } else {
+            &relative_path
+        };
+        mt.get_mut(idx).fs.mkdir(target_path)
+    } else {
+        Err(FsError::NotFound)
+    }
+}
+
+/// Удалить каталог через VFS.
+pub fn vfs_rmdir(path: &str) -> Result<(), FsError> {
+    let mut mt = VFS_MANAGER.mount_table.lock();
+
+    if let Some((idx, relative_path)) = mt.find_fs(path) {
+        if mt.get(idx).readonly {
+            return Err(FsError::ReadOnly);
+        }
+        let target_path = if relative_path.is_empty() || relative_path == "/" {
+            "/"
+        } else {
+            &relative_path
+        };
+        mt.get_mut(idx).fs.rmdir(target_path)
+    } else {
+        Err(FsError::NotFound)
+    }
+}
+
+/// Удалить файл через VFS.
+pub fn vfs_remove(path: &str) -> Result<(), FsError> {
+    let mut mt = VFS_MANAGER.mount_table.lock();
+
+    if let Some((idx, relative_path)) = mt.find_fs(path) {
+        if mt.get(idx).readonly {
+            return Err(FsError::ReadOnly);
+        }
+        let target_path = if relative_path.is_empty() || relative_path == "/" {
+            "/"
+        } else {
+            &relative_path
+        };
+        mt.get_mut(idx).fs.remove(target_path)
     } else {
         Err(FsError::NotFound)
     }

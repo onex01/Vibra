@@ -37,6 +37,7 @@ struct NtfsBoot {
 
 impl NtfsBoot {
     fn parse(s: &[u8]) -> Result<Self, FsError> {
+        if s.len() < 512 { return Err(FsError::InvalidPath); }
         if &s[3..11] != b"NTFS    " { return Err(FsError::InvalidPath); }
 
         let bytes_per_sector = u16::from_le_bytes([s[11], s[12]]);
@@ -77,20 +78,32 @@ impl NtfsBoot {
 // Вспомогательные разборщики
 // ==========================================
 
-fn rd_u16(b: &[u8], o: usize) -> u16 { u16::from_le_bytes([b[o], b[o + 1]]) }
+fn rd_u16(b: &[u8], o: usize) -> u16 {
+    match b.get(o..o + 2) {
+        Some(s) => u16::from_le_bytes([s[0], s[1]]),
+        None => 0,
+    }
+}
 fn rd_u32(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+    match b.get(o..o + 4) {
+        Some(s) => u32::from_le_bytes([s[0], s[1], s[2], s[3]]),
+        None => 0,
+    }
 }
 fn rd_u64(b: &[u8], o: usize) -> u64 {
-    u64::from_le_bytes([
-        b[o], b[o + 1], b[o + 2], b[o + 3],
-        b[o + 4], b[o + 5], b[o + 6], b[o + 7],
-    ])
+    match b.get(o..o + 8) {
+        Some(s) => u64::from_le_bytes([
+            s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+        ]),
+        None => 0,
+    }
 }
 
 /// UTF-16LE → String (символы вне BMP → '?').
 fn utf16_to_string(b: &[u8], count: usize) -> String {
     let mut s = String::new();
+    // Не читаем за границей среза, даже если count из заголовка больше.
+    let count = count.min(b.len() / 2);
     let mut i = 0;
     while i < count {
         let u = rd_u16(b, i * 2);
@@ -191,6 +204,7 @@ fn attr_offsets(rec: &[u8]) -> Vec<(usize, u32)> {
 
 /// Полезная нагрузка resident-атрибута.
 fn attr_resident_value<'a>(rec: &'a [u8], off: usize) -> Option<&'a [u8]> {
+    if off.checked_add(24)? > rec.len() { return None; }
     if rec[off + 8] != 0 { return None; }
     let vlen = rd_u32(rec, off + 16) as usize;
     let voff = rd_u16(rec, off + 20) as usize;

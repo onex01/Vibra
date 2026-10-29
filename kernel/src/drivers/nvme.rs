@@ -52,7 +52,7 @@ struct NvmeSubQueueEntry {
     mptr: u64,
     prp1: u64,
     prp2: u64,
-    _reserved2: [u32; 9],
+    _reserved2: [u32; 6],
 }
 
 // NVMe Completion Queue Entry (16 байт)
@@ -244,14 +244,13 @@ impl NvmeController {
             mptr: 0,
             prp1: self.id_buf_phys,
             prp2: 0,
-            _reserved2: [0; 9],
+            _reserved2: [0; 6],
         };
 
-        // CNDW10: CSType=1 (Controller), CNS=0
-        // Encode CSType into the first dword of _reserved2
-        // Actually, for Identify Controller: CNTID=0 in DW10 bits[15:0], CSTYPE=1 in DW10 bits[31:16]
-        // DW10: CSTYPE (bits 31:16) = 1, CNTID (bits 15:0) = 0
-        let dw10: u32 = 0x0001_0000; // CSTYPE=1 (Controller Identify)
+        // DW10: CNS=0x01 (Identify Controller), CNTID=0 (bits 31:16).
+        // Раньше здесь стояло 0x0001_0000: это CNTID=1 при CNS=0, то есть
+        // Identify Namespace с несуществующим CNTID — QEMU отвечал SC=0x0B.
+        let dw10: u32 = 0x01;
         cmd._reserved2[0] = dw10;
 
         match self.admin_submit(&cmd) {
@@ -261,29 +260,31 @@ impl NvmeController {
                     // Парсим данные Identify Controller
                     let data = core::slice::from_raw_parts(self.id_buf as *const u16, 2048);
 
-                    // Модель — слова 13..23 (20 байт, ASCII с байт-свопом)
-                    let mut model_raw = [0u8; 40];
-                    for i in 0..20 {
-                        let w = data[13 + i];
-                        model_raw[i * 2] = (w >> 8) as u8;
-                        model_raw[i * 2 + 1] = w as u8;
-                    }
-                    let model_end = model_raw.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
-                    let model = alloc::string::String::from_utf8_lossy(&model_raw[..model_end]);
+                    // Поля Identify Controller: serial — bytes 4..24 (words 2..11),
+                // model — bytes 24..64 (words 12..31). Раньше индексы были
+                // сдвинуты на слово и выводили мусор.
+                let serial_words = 10;
+                let mut serial_raw = [0u8; 20];
+                for i in 0..serial_words {
+                    let w = data[2 + i];
+                    serial_raw[i * 2] = w as u8;
+                    serial_raw[i * 2 + 1] = (w >> 8) as u8;
+                }
+                let serial_end = serial_raw.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
+                let serial = alloc::string::String::from_utf8_lossy(&serial_raw[..serial_end]);
 
-                    // серийный номер — слова 3..7 (8 байт, ASCII с байт-свопом)
-                    let mut serial_raw = [0u8; 16];
-                    for i in 0..4 {
-                        let w = data[3 + i];
-                        serial_raw[i * 2] = (w >> 8) as u8;
-                        serial_raw[i * 2 + 1] = w as u8;
-                    }
-                    let serial_end = serial_raw.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
-                    let serial = alloc::string::String::from_utf8_lossy(&serial_raw[..serial_end]);
+                let mut model_raw = [0u8; 40];
+                for i in 0..20 {
+                    let w = data[12 + i];
+                    model_raw[i * 2] = w as u8;
+                    model_raw[i * 2 + 1] = (w >> 8) as u8;
+                }
+                let model_end = model_raw.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
+                let model = alloc::string::String::from_utf8_lossy(&model_raw[..model_end]);
 
-                    println!("[NVMe] Controller: {}", model);
-                    println!("[NVMe] Serial number: {}", serial);
-                    println!("[NVMe] Maximum queue entries: {}", data[512] as u32 + 1);
+                println!("[NVMe] Controller: {}", model);
+                println!("[NVMe] Serial number: {}", serial);
+                println!("[NVMe] Maximum queue entries: {}", data[256] as u32 + 1);
                 } else {
                     println!("[NVMe] Identify failed: SC={:#x}", sc);
                 }
@@ -325,18 +326,23 @@ impl NvmeController {
             mptr: 0,
             prp1: self.io_cq_phys,
             prp2: 0,
-            _reserved2: [0; 9],
+            _reserved2: [0; 6],
         };
         // DW10: QID=0, QSIZE=63 (64 entries - 1)
-        cq_cmd._reserved2[0] = (63 << 16) | 0; // QSIZE=63, QID=0
-        // DW11: IV=0, IEN=1 (Interrupts Enabled), PC=1 (Physically Contiguous)
-        cq_cmd._reserved2[1] = 0x00000003; // PC=1, IEN=1
+        cq_cmd._reserved2[0] = (63 << 16) | 1; // QSIZE=63, QID=1
+        // DW11: IV=0, IEN=0, PC=1 (physically contiguous). Раньше здесь
+        // стояло 0x3: PC=0, то есть QEMU ждал PRP-list, а получал страницу.
+        cq_cmd._reserved2[1] = 0x00000001; // PC=1 (bit 0), IEN=0
 
         match self.admin_submit(&cq_cmd) {
             Some(comp) => {
                 let sc = (comp.status >> 1) & 0x7F;
                 if sc != 0 {
-                    println!("[NVMe] Failed to create I/O CQ: SC={:#x}", sc);
+                    let status_raw = comp.status;
+                    let opcode_raw = cq_cmd.opcode;
+                    let prp1_raw = cq_cmd.prp1;
+                    println!("[NVMe] Failed to create I/O CQ: SC={:#x} status={:#x} opcode={:#x} prp1={:#x}",
+                        sc, status_raw, opcode_raw, prp1_raw);
                     return false;
                 }
             }
@@ -353,12 +359,12 @@ impl NvmeController {
             mptr: 0,
             prp1: self.io_sq_phys,
             prp2: 0,
-            _reserved2: [0; 9],
+            _reserved2: [0; 6],
         };
         // DW10: QSIZE=63, QID=0
-        sq_cmd._reserved2[0] = (63 << 16) | 0; // QSIZE=63, QID=0
+        sq_cmd._reserved2[0] = (63 << 16) | 1; // QSIZE=63, QID=1
         // DW11: CQID=0 (associated CQ), PC=1, QPRIO=0
-        sq_cmd._reserved2[1] = 0x00000001; // PC=1, CQID=0
+        sq_cmd._reserved2[1] = 0x00010001; // CQID=1, PC=1
 
         match self.admin_submit(&sq_cmd) {
             Some(comp) => {
@@ -391,7 +397,7 @@ impl NvmeController {
             mptr: 0,
             prp1: buf_phys,
             prp2: 0,
-            _reserved2: [0; 9],
+            _reserved2: [0; 6],
         };
         // DW10: CSTYPE=0 (Namespace Identify), CNS=0
         cmd._reserved2[0] = 0x00000000;
@@ -413,9 +419,14 @@ impl NvmeController {
                     // LBA Format support descriptors начиная с байта 128
                     // Каждый descriptor: 4 байта (MS, LBADS, RP, etc.)
                     let fmt_offset = 128 + lba_fmt_index * 4;
-                    if fmt_offset + 1 < data.len() {
-                        let lbads = data[fmt_offset + 1]; // LBA Data Size
-                        self.block_size = 1u32 << lbads;
+                    if fmt_offset + 3 < data.len() {
+                        // LBA Format: MS[15:0], LBADS[23:16], RP[25:24].
+                        let lbads = data[fmt_offset + 2]; // LBA Data Size
+                        self.block_size = if lbads >= 9 && lbads <= 16 {
+                            1u32 << lbads
+                        } else {
+                            512
+                        };
                     } else {
                         self.block_size = 512; // По умолчанию
                     }
@@ -602,125 +613,196 @@ pub fn init() {
     }
 }
 
-/// Реализация DiskIo для NVMe
-impl crate::fs::disk::DiskIo for NvmeController {
-    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
-        let blocks_to_read = (buf.len() / self.block_size as usize) as u32;
-        if blocks_to_read == 0 {
+impl NvmeController {
+    /// Читает `blocks` логических блоков устройства начиная с `lba`.
+    ///
+    /// `crate::fs` работает в 512-байтных секторах. На NVMe с 4Kn
+    /// (`block_size == 4096`) один такой сектор — это 1/8 блока, поэтому
+    /// публичный `DiskIo::read` ниже делает bounce-buffer.
+    unsafe fn read_dev(&mut self, lba: u64, blocks: u32, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        if blocks == 0 {
             return Ok(());
         }
 
-        // Выделяем промежуточный DMA буфер
-        let buf_size = blocks_to_read as usize * self.block_size as usize;
-        let dma_layout = core::alloc::Layout::from_size_align(buf_size, 4096).unwrap();
-        let dma_buf = unsafe { alloc::alloc::alloc_zeroed(dma_layout) };
+        let buf_size = blocks as usize * self.block_size as usize;
+        if buf.len() < buf_size {
+            return Err(crate::fs::vfs::FsError::IoError);
+        }
+        let dma_layout = core::alloc::Layout::from_size_align(buf_size, 4096)
+            .map_err(|_| crate::fs::vfs::FsError::IoError)?;
+        let dma_buf = alloc::alloc::alloc_zeroed(dma_layout);
         if dma_buf.is_null() {
             return Err(crate::fs::vfs::FsError::IoError);
         }
         let dma_phys = virt_to_phys(dma_buf as u64);
 
-        unsafe {
-            let mut cmd = NvmeSubQueueEntry {
-                opcode: NVME_IO_READ,
-                flags: 0,
-                cid: 10,
-                nsid: self.ns_id,
-                _reserved: 0,
-                mptr: 0,
-                prp1: dma_phys,
-                prp2: 0,
-                _reserved2: [0; 9],
-            };
+        let mut cmd = NvmeSubQueueEntry {
+            opcode: NVME_IO_READ,
+            flags: 0,
+            cid: 10,
+            nsid: self.ns_id,
+            _reserved: 0,
+            mptr: 0,
+            prp1: dma_phys,
+            prp2: 0,
+            _reserved2: [0; 6],
+        };
 
-            // DW10: SLBA (low 32 bits)
-            cmd._reserved2[0] = sector as u32;
-            // DW11: SLBA (high 32 bits)
-            cmd._reserved2[1] = (sector >> 32) as u32;
-            // DW12: Number of Logical Blocks (low 16 bits)
-            cmd._reserved2[2] = (blocks_to_read - 1) as u32;
+        cmd._reserved2[0] = lba as u32;
+        cmd._reserved2[1] = (lba >> 32) as u32;
+        cmd._reserved2[2] = blocks - 1;
 
-            match self.io_submit(&cmd) {
-                Some(comp) => {
-                    let sc = (comp.status >> 1) & 0x7F;
-                    if sc == 0 {
-                        core::ptr::copy_nonoverlapping(dma_buf, buf.as_mut_ptr(), buf_size);
-                        alloc::alloc::dealloc(dma_buf, dma_layout);
-                        Ok(())
-                    } else {
-                        alloc::alloc::dealloc(dma_buf, dma_layout);
-                        Err(crate::fs::vfs::FsError::IoError)
-                    }
-                }
-                None => {
-                    alloc::alloc::dealloc(dma_buf, dma_layout);
+        let result = match self.io_submit(&cmd) {
+            Some(comp) => {
+                let sc = (comp.status >> 1) & 0x7F;
+                if sc == 0 {
+                    core::ptr::copy_nonoverlapping(dma_buf, buf.as_mut_ptr(), buf_size);
+                    Ok(())
+                } else {
                     Err(crate::fs::vfs::FsError::IoError)
                 }
             }
-        }
+            None => Err(crate::fs::vfs::FsError::IoError),
+        };
+
+        alloc::alloc::dealloc(dma_buf, dma_layout);
+        result
     }
 
-    fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
-        let blocks_to_write = (buf.len() / self.block_size as usize) as u32;
-        if blocks_to_write == 0 {
+    /// Записывает `blocks` логических блоков устройства начиная с `lba`.
+    unsafe fn write_dev(&mut self, lba: u64, blocks: u32, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
+        if blocks == 0 {
             return Ok(());
         }
 
-        let buf_size = blocks_to_write as usize * self.block_size as usize;
-        let dma_layout = core::alloc::Layout::from_size_align(buf_size, 4096).unwrap();
-        let dma_buf = unsafe { alloc::alloc::alloc_zeroed(dma_layout) };
+        let buf_size = blocks as usize * self.block_size as usize;
+        if buf.len() < buf_size {
+            return Err(crate::fs::vfs::FsError::IoError);
+        }
+        let dma_layout = core::alloc::Layout::from_size_align(buf_size, 4096)
+            .map_err(|_| crate::fs::vfs::FsError::IoError)?;
+        let dma_buf = alloc::alloc::alloc_zeroed(dma_layout);
         if dma_buf.is_null() {
             return Err(crate::fs::vfs::FsError::IoError);
         }
         let dma_phys = virt_to_phys(dma_buf as u64);
 
-        unsafe {
-            // Копируем данные в DMA буфер
-            core::ptr::copy_nonoverlapping(buf.as_ptr(), dma_buf, buf_size);
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), dma_buf, buf_size);
 
-            let mut cmd = NvmeSubQueueEntry {
-                opcode: NVME_IO_WRITE,
-                flags: 0,
-                cid: 11,
-                nsid: self.ns_id,
-                _reserved: 0,
-                mptr: 0,
-                prp1: dma_phys,
-                prp2: 0,
-                _reserved2: [0; 9],
-            };
+        let mut cmd = NvmeSubQueueEntry {
+            opcode: NVME_IO_WRITE,
+            flags: 0,
+            cid: 11,
+            nsid: self.ns_id,
+            _reserved: 0,
+            mptr: 0,
+            prp1: dma_phys,
+            prp2: 0,
+            _reserved2: [0; 6],
+        };
 
-            cmd._reserved2[0] = sector as u32;
-            cmd._reserved2[1] = (sector >> 32) as u32;
-            cmd._reserved2[2] = (blocks_to_write - 1) as u32;
+        cmd._reserved2[0] = lba as u32;
+        cmd._reserved2[1] = (lba >> 32) as u32;
+        cmd._reserved2[2] = blocks - 1;
 
-            match self.io_submit(&cmd) {
-                Some(comp) => {
-                    let sc = (comp.status >> 1) & 0x7F;
-                    alloc::alloc::dealloc(dma_buf, dma_layout);
-                    if sc == 0 {
-                        Ok(())
-                    } else {
-                        Err(crate::fs::vfs::FsError::IoError)
-                    }
-                }
-                None => {
-                    alloc::alloc::dealloc(dma_buf, dma_layout);
+        let result = match self.io_submit(&cmd) {
+            Some(comp) => {
+                let sc = (comp.status >> 1) & 0x7F;
+                if sc == 0 {
+                    Ok(())
+                } else {
                     Err(crate::fs::vfs::FsError::IoError)
                 }
             }
+            None => Err(crate::fs::vfs::FsError::IoError),
+        };
+
+        alloc::alloc::dealloc(dma_buf, dma_layout);
+        result
+    }
+
+    /// Чтение с произвольным байтовым смещением (адаптер 512 → block_size).
+    fn read_bytes(&mut self, byte_offset: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let bs = self.block_size as u64;
+        if bs == 0 {
+            return Err(crate::fs::vfs::FsError::IoError);
         }
+        let lba = byte_offset / bs;
+        let in_block = (byte_offset % bs) as usize;
+
+        if in_block == 0 && buf.len() % bs as usize == 0 {
+            let blocks = (buf.len() / bs as usize) as u32;
+            return unsafe { self.read_dev(lba, blocks, buf) };
+        }
+
+        let need = (in_block + buf.len() + bs as usize - 1) / bs as usize;
+        let mut tmp = alloc::vec![0u8; need * bs as usize];
+        unsafe { self.read_dev(lba, need as u32, &mut tmp)? };
+        buf.copy_from_slice(&tmp[in_block..in_block + buf.len()]);
+        Ok(())
+    }
+
+    /// Запись с произвольным байтовым смещением: при неполном блоке делает
+    /// read-modify-write, чтобы не затереть соседние 512-байтные сектора.
+    fn write_bytes(&mut self, byte_offset: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let bs = self.block_size as u64;
+        if bs == 0 {
+            return Err(crate::fs::vfs::FsError::IoError);
+        }
+        let lba = byte_offset / bs;
+        let in_block = (byte_offset % bs) as usize;
+
+        if in_block == 0 && buf.len() % bs as usize == 0 {
+            let blocks = (buf.len() / bs as usize) as u32;
+            return unsafe { self.write_dev(lba, blocks, buf) };
+        }
+
+        let need = (in_block + buf.len() + bs as usize - 1) / bs as usize;
+        let mut tmp = alloc::vec![0u8; need * bs as usize];
+        unsafe { self.read_dev(lba, need as u32, &mut tmp)? };
+        tmp[in_block..in_block + buf.len()].copy_from_slice(buf);
+        unsafe { self.write_dev(lba, need as u32, &tmp) }
     }
 }
 
-/// Создать NVMe DiskIo объект для подключения к файловой системе
-pub fn create_disk() -> Option<crate::alloc::boxed::Box<dyn crate::fs::disk::DiskIo>> {
-    let ctrl = NVME_CONTROLLER.lock();
-    if ctrl.is_none() {
-        return None;
+/// Обёртка над глобальным NVMe-контроллером для VFS/block layer.
+///
+/// Сам контроллер живёт в `NVME_CONTROLLER`; `NvmeDisk` только сериализует
+/// доступ через его `Mutex` и реализует `DiskIo`.
+pub struct NvmeDisk;
+
+impl crate::fs::disk::DiskIo for NvmeDisk {
+    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let mut guard = NVME_CONTROLLER.lock();
+        let ctrl = guard.as_mut().ok_or(crate::fs::vfs::FsError::IoError)?;
+        ctrl.read_bytes(sector.saturating_mul(512), buf)
     }
-    // Пока возвращаем None — нужен ownership transfer
-    // В реальной системе контроллер должен быть передан в FS
-    None
+
+    fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let mut guard = NVME_CONTROLLER.lock();
+        let ctrl = guard.as_mut().ok_or(crate::fs::vfs::FsError::IoError)?;
+        ctrl.write_bytes(sector.saturating_mul(512), buf)
+    }
+}
+
+/// Реализация DiskIo для NVMe (оставлена для прямого доступа к контроллеру).
+impl crate::fs::disk::DiskIo for NvmeController {
+    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        self.read_bytes(sector.saturating_mul(512), buf)
+    }
+
+    fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
+        self.write_bytes(sector.saturating_mul(512), buf)
+    }
+}
+
+/// Создать NVMe DiskIo объект для подключения к файловой системе.
+pub fn create_disk() -> Option<crate::alloc::boxed::Box<dyn crate::fs::disk::DiskIo>> {
+    if NVME_CONTROLLER.lock().is_some() {
+        Some(crate::alloc::boxed::Box::new(NvmeDisk))
+    } else {
+        None
+    }
 }
 
 /// Проверить, доступен ли NVMe контроллер

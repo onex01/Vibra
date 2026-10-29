@@ -2,10 +2,12 @@
 //
 // Все `println!` (serial) попадают в кольцевой буфер (128 КиБ) через
 // `log_byte`. Оттуда лог:
-//   1. пишется в /boot.log и /var/log/boot.log (ramfs, после init_filesystem);
-//   2. при feature `boot-log-to-usb` — в файл /VIBRA.LOG на FAT32-разделе
-//      с меткой `VIBRALOG` (загрузочная флешка или отдельный диск).
-//      Это единственный канал диагностики на ноутбуке без COM-порта;
+//   1. пишется в /var/log/boot.log (ramfs, после init_filesystem);
+//   2. в файл /VIBRA.LOG на FAT32-разделе с меткой `VIBRALOG` (загрузочная
+//      флешка или отдельный диск). Это единственный канал диагностики на
+//      ноутбуке без COM-порта. Раньше приёмник собирался только с feature
+//      `boot-log-to-usb`, и в обычной сборке лог жил лишь в ramfs — то есть
+//      исчезал при выключении. Теперь модуль компилируется всегда;
 //   3. при feature `boot-log-to-disk` — legacy raw-запись в LBA 2/3 (опасно
 //      на реальном железе, только для тестового носителя).
 //
@@ -33,24 +35,7 @@ static LOG_TOTAL: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "boot-log-to-disk")]
 static LOG_WRITTEN: AtomicBool = AtomicBool::new(false);
 
-#[cfg(feature = "boot-log-to-usb")]
 pub mod usb;
-
-/// Заглушка, когда запись на USB выключена: вызовы остаются в коде,
-/// но не тянут за собой зависимости.
-#[cfg(not(feature = "boot-log-to-usb"))]
-pub mod usb {
-    pub fn attach() -> bool {
-        false
-    }
-    pub fn flush(_panic: bool) {}
-    pub fn is_attached() -> bool {
-        false
-    }
-    pub fn written() -> u64 {
-        0
-    }
-}
 
 /// Записать байт в лог-буфер.
 pub fn log_byte(b: u8) {
@@ -199,10 +184,8 @@ pub fn flush_to_file(path: &str) {
         return;
     }
 
-    let _ = crate::fs::remove_entry(path);
-    if crate::fs::create_file(path).is_ok() {
-        let _ = crate::fs::write_file(path, &log);
-    }
+    // write_file сам создаёт/перезаписывает файл через VFS.
+    let _ = crate::fs::write_file(path, &log);
 }
 
 /// Инициализация: raw-запись + файлы в ramfs + сводка в serial.
@@ -213,25 +196,12 @@ pub fn init() {
     flush_raw();
 
     flush_to_file("/var/log/boot.log");
-    flush_to_file("/var/log/kernel.log");
-    // Копия в корне: читается с любой ОС, если ramfs вдруг недоступен.
-    flush_to_file("/boot.log");
 
     let len = total_len();
     println!("[LOG] Boot log saved ({} bytes)", len);
-    println!("[LOG] /boot.log + /var/log/boot.log");
+    println!("[LOG] /var/log/boot.log");
 
-    if len > 0 {
-        println!("[LOG] === FULL BOOT LOG ===");
-        let log = get_log_bytes();
-        for &byte in &log {
-            if byte == b'\n' || byte == b'\r' {
-                crate::serial::write_serial_byte(byte);
-            } else if (0x20..0x7F).contains(&byte) {
-                crate::serial::write_serial_byte(byte);
-            }
-        }
-        crate::serial::write_serial_byte(b'\n');
-        crate::serial::write_serial_byte(b'\n');
-    }
+    // Полный лог уже транслировался в serial/framebuffer построчно. Повторная
+    // печать всех 128 КиБ на реальном UART занимает десятки секунд, поэтому
+    // она доступна только по запросу: `log` или `log <N>` в shell.
 }

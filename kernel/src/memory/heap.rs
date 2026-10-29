@@ -341,3 +341,58 @@ pub fn stats() -> (usize, usize) {
 pub fn region() -> (usize, usize) {
     ALLOCATOR.region()
 }
+
+/// Стресс-тест аллокатора: `iters` циклов alloc/write/check/drop.
+///
+/// Возвращает `(iters, ok, drift_bytes)`. На загрузке выполняется короткий
+/// прогон, полный (10 000) — по команде `diag heap-test`: раньше он занимал
+/// заметную долю boot-времени на каждой машине.
+pub fn stress(iters: usize) -> (usize, bool, i64) {
+    use alloc::{vec, vec::Vec};
+
+    let (used_before, _) = stats();
+
+    let mut patterns = [0u8; 256];
+    let mut seed: u8 = 0x5A;
+    for i in 0..256 {
+        seed ^= (i as u8).wrapping_mul(0x9B);
+        patterns[i] = seed;
+    }
+
+    for i in 0..iters {
+        // Ctrl+C должен прерывать и полный heap-стресс.
+        if i % 512 == 0 {
+            crate::poll_input();
+            if crate::is_cancelled() {
+                crate::reset_cancel();
+                println!("[HEAP] stress: cancelled at iter {}", i);
+                return (i, true, 0);
+            }
+        }
+
+        let n = 8 + (i % 248);
+        let mut v: Vec<u8> = Vec::with_capacity(n);
+        let mut idx = i;
+        while v.len() < n {
+            v.push(patterns[idx % 256]);
+            idx = idx.wrapping_add(7);
+        }
+        let sample = v[n / 2];
+        let expected = patterns[(i + (n / 2) * 7) % 256];
+        if sample != expected {
+            println!("[HEAP] stress: CORRUPTION at iter {} (got {:#x} want {:#x})", i, sample, expected);
+            return (i, false, 0);
+        }
+        drop(v);
+
+        if i % 2000 == 0 && i != 0 {
+            let held_len = 8 + ((i / 2000) * 37) % 248;
+            let _h = vec![0xCDu8; held_len];
+            let _ = _h;
+        }
+    }
+
+    let (used_after, _) = stats();
+    let drift = used_after as i64 - used_before as i64;
+    (iters, drift == 0, drift)
+}

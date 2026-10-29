@@ -6,6 +6,7 @@ pub mod cd;
 pub mod cp;
 pub mod mv;
 pub mod mkdir;
+pub mod rmdir;
 pub mod cat;
 pub mod rm;
 pub mod edit;
@@ -49,6 +50,7 @@ pub mod history;
 pub mod net;
 pub mod systest;
 pub mod hidtest;
+pub mod test;
 
 use crate::framebuffer::Console;
 
@@ -80,6 +82,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "cp",      help: "copy file",                  func: cp::run },
     Command { name: "mv",      help: "move/rename file",           func: mv::run },
     Command { name: "mkdir",   help: "create directory",           func: mkdir::run },
+    Command { name: "rmdir",   help: "remove empty directory",      func: rmdir::run },
     Command { name: "cat",     help: "print file contents",        func: cat::run },
     Command { name: "edit",    help: "edit/create file contents",  func: edit::run },
     Command { name: "echo",    help: "print text to screen",       func: echo::run },
@@ -109,6 +112,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "lspci",   help: "list PCI devices",          func: lspci::run },
     Command { name: "usertest", help: "run user-space process",  func: usertest::run },
     Command { name: "systest",  help: "interactive system test",   func: systest::run },
+    Command { name: "test",     help: "run system checks (test all|cpu|mem|disk|net...)", func: test::run },
     Command { name: "hidtest",  help: "inject test keys from HID subsystem", func: hidtest::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
     Command { name: "display", help: "show display info",          func: display::run },

@@ -254,6 +254,17 @@ impl KeyboardState {
     }
 
     fn translate(&self, ch: char) -> Key {
+        // Ctrl+<letter> → управляющий код (Ctrl+C = 0x03, Ctrl+Z = 0x1A).
+        // Ctrl+C сразу поднимает флаг отмены: длинные команды и скрипты
+        // проверяют его в своих циклах.
+        if self.ctrl && ch.is_ascii_alphabetic() {
+            let ctrl = ((ch.to_ascii_lowercase() as u8) - b'a' + 1) as char;
+            if ctrl == '\x03' {
+                crate::request_cancel();
+            }
+            return Key::Char(ctrl);
+        }
+
         let ch = if ch.is_ascii_alphabetic() {
             if self.caps ^ self.shift {
                 ch.to_ascii_uppercase()

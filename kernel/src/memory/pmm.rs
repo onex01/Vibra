@@ -43,7 +43,7 @@ impl PmmInner {
     }
 }
 
-// Битмап живёт отдельным статическим массивом (4 ГБ / 8 = 128 КБ в .bss).
+// Битмап живёт отдельным статическим массивом (16M фреймов / 8 = 2 МБ в .bss).
 // Инициализируем «всё занято» — init() разметит USABLE.
 static BITMAP: Mutex<[u8; BITMAP_SIZE]> = Mutex::new([0xFF; BITMAP_SIZE]);
 static PMM: Mutex<PmmInner> = Mutex::new(PmmInner::new());

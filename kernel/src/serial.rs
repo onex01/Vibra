@@ -1,21 +1,34 @@
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "serial-debug")]
-use core::sync::atomic::AtomicU8;
-use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, AtomicU8};
+#[cfg(feature = "serial-debug")]
 use spin::Mutex;
 
+// Всё, что связано с UART, компилируется только в debug-сборке
+// (`serial-debug` включён по умолчанию, снимается `--no-default-features`).
+// В release COM1 не инициализируется и не опрашивается: канала ввода и
+// вывода через UART в бинаре не остаётся. Вывод boot-лога на экран от этого
+// не зависит — `write_byte` отдельно зовёт `framebuffer::write_boot_byte`.
+#[cfg(feature = "serial-debug")]
 const COM1: u16 = 0x3F8;
+#[cfg(feature = "serial-debug")]
 const LINE_STATUS: u16 = COM1 + 5;
+#[cfg(feature = "serial-debug")]
 const TRANSMITTER_EMPTY: u8 = 0x20;
+#[cfg(feature = "serial-debug")]
 const DATA_READY: u8 = 0x01;
+#[cfg(feature = "serial-debug")]
 const RX_DATA: u16 = COM1; // Receive buffer register
+#[cfg(feature = "serial-debug")]
 const MODEM_CONTROL: u16 = COM1 + 4;
+#[cfg(feature = "serial-debug")]
 const SCRATCH: u16 = COM1 + 7;
 
 // Сколько итераций ждать THRE, прежде чем признать UART мёртвым.
 // Без ограничения отсутствующий/сломанный COM1 вешает ядро навсегда
 // (ровно на первом println! после смены CR3 на реальном железе).
+#[cfg(feature = "serial-debug")]
 const TX_SPIN_LIMIT: u32 = 100_000;
 
 /// Отвечает ли COM1 на loopback-пробу. На ноутбуках без физического UART
@@ -23,9 +36,13 @@ const TX_SPIN_LIMIT: u32 = 100_000;
 static SERIAL_PRESENT: AtomicBool = AtomicBool::new(false);
 
 /// Ring buffer для serial input (IRQ4 driven)
+#[cfg(feature = "serial-debug")]
 const SERIAL_BUF_SIZE: usize = 256;
+#[cfg(feature = "serial-debug")]
 static SERIAL_BUF: Mutex<[u8; SERIAL_BUF_SIZE]> = Mutex::new([0u8; SERIAL_BUF_SIZE]);
+#[cfg(feature = "serial-debug")]
 static SERIAL_HEAD: AtomicU16 = AtomicU16::new(0);
+#[cfg(feature = "serial-debug")]
 static SERIAL_TAIL: AtomicU16 = AtomicU16::new(0);
 #[cfg(feature = "serial-debug")]
 static SERIAL_ESCAPE_STATE: AtomicU8 = AtomicU8::new(0);
@@ -36,12 +53,19 @@ unsafe fn outb(port: u16, value: u8) {
 }
 
 #[inline]
+#[cfg(feature = "serial-debug")]
 unsafe fn inb(port: u16) -> u8 {
     let value: u8;
     core::arch::asm!("in al, dx", out("al") value, in("dx") port, options(nostack, preserves_flags));
     value
 }
 
+/// Инициализация COM1 (только debug-сборка).
+///
+/// В release UART не трогаем вообще: ни loopback-пробы, ни записи в порты
+/// 0x3F8..0x3FF. `is_present()` тогда всегда `false`, а `write_serial_byte`
+/// ничего не делает.
+#[cfg(feature = "serial-debug")]
 pub fn init() {
     unsafe {
         // Проба UART: loopback + scratch-регистр (0x3F8+7).
@@ -70,12 +94,22 @@ pub fn init() {
     }
 }
 
+/// Release-сборка: UART выключен, порты не инициализируются.
+#[cfg(not(feature = "serial-debug"))]
+pub fn init() {
+    SERIAL_PRESENT.store(false, Ordering::SeqCst);
+}
+
 /// Есть ли на машине живой COM1 (loopback-проба в `init`).
 pub fn is_present() -> bool {
     SERIAL_PRESENT.load(Ordering::Relaxed)
 }
 
-/// Вызывается из IRQ4 handler (isr_serial)
+/// Вызывается из IRQ4 handler (isr_serial).
+///
+/// Только debug: в release IRQ4 замаскирован, а сам обработчик в IDT не
+/// регистрируется (см. `interrupts/idt.rs` и `interrupts/pic.rs`).
+#[cfg(feature = "serial-debug")]
 pub fn handle_interrupt() {
     unsafe {
         while inb(LINE_STATUS) & DATA_READY != 0 {
@@ -91,6 +125,7 @@ pub fn handle_interrupt() {
     }
 }
 
+#[cfg(feature = "serial-debug")]
 fn push_byte(b: u8) {
     let head = SERIAL_HEAD.load(Ordering::Relaxed);
     let tail = SERIAL_TAIL.load(Ordering::Relaxed);
@@ -105,6 +140,7 @@ fn push_byte(b: u8) {
 }
 
 /// Pop байт из ring buffer (безопасно для poll_key)
+#[cfg(feature = "serial-debug")]
 fn pop_byte() -> Option<u8> {
     crate::interrupts::without_interrupts(|| {
         let head = SERIAL_HEAD.load(Ordering::Acquire);
@@ -126,11 +162,13 @@ pub fn write_byte(b: u8) {
     crate::framebuffer::write_boot_byte(b);
 }
 
+#[cfg(feature = "serial-debug")]
 fn write_byte_without_framebuffer(b: u8) {
     crate::boot_log::log_byte(b);
     write_serial_byte(b);
 }
 
+#[cfg(feature = "serial-debug")]
 pub(crate) fn write_serial_byte(b: u8) {
     // Без живого UART не ждём THRE вообще: на части машин порт читается как
     // 0x00 и неограниченный спин превращается в вечное зависание ядра.
@@ -149,6 +187,14 @@ pub(crate) fn write_serial_byte(b: u8) {
         outb(COM1, b);
     }
 }
+
+/// Release-сборка: байт никуда не уходит.
+///
+/// Функция пустая и `#[inline(always)]`, поэтому из бинаря исчезают и спин
+/// на THRE, и сам `out` в 0x3F8 — остаётся только `boot_log` и framebuffer.
+#[cfg(not(feature = "serial-debug"))]
+#[inline(always)]
+pub(crate) fn write_serial_byte(_b: u8) {}
 
 struct DebugConWriter;
 
@@ -234,6 +280,8 @@ fn decode_plain_byte(byte: u8) -> Option<crate::keyboard::Key> {
         b'\r' | b'\n' => Some(Key::Enter),
         0x08 | 0x7f => Some(Key::Backspace),
         b'\t' => Some(Key::Tab),
+        // Ctrl+C — отмена текущей команды/строки
+        0x03 => Some(Key::Char('\x03')),
         // Ctrl+A — начало строки
         0x01 => Some(Key::Char('\x01')),
         // Ctrl+E — конец строки
@@ -257,6 +305,9 @@ pub fn poll_key() -> Option<crate::keyboard::Key> {
 }
 
 /// Дублирует текст framebuffer-консоли в COM1.
+///
+/// В release-сборке зеркало отключено: экран и `boot_log` пишутся отдельно,
+/// поэтому вывод не теряется, а байт в UART не уходит.
 pub fn mirror_console_char(ch: char) {
     #[cfg(feature = "serial-debug")]
     {
@@ -268,6 +319,8 @@ pub fn mirror_console_char(ch: char) {
             write_byte_without_framebuffer(byte);
         }
     }
+    #[cfg(not(feature = "serial-debug"))]
+    let _ = ch;
 }
 
 pub fn write_str(s: &str) {

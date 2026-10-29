@@ -1,6 +1,6 @@
 # Vibra Kernel — статус проекта
 
-**Версия:** `0.2.0-rc.1` «Foundation RC1»
+**Версия:** `0.2.0-rc.2` «Foundation RC2»
 **Поддерживаемая архитектура:** только `x86_64-unknown-none`  
 **Загрузка:** Limine через UEFI; QEMU — основная тестовая среда
 
@@ -16,13 +16,13 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 Подтверждено только прохождение компиляции и QEMU-путь, когда он явно
 зафиксирован тестом. Наличие исходного файла не является поддержкой железа.
 
-| Подсистема | Состояние 0.2.0-rc.1 |
+| Подсистема | Состояние 0.2.0-rc.2 |
 |---|---|
 | Limine, serial, framebuffer | базовый x86_64 boot path |
 | PMM, heap, paging/VMM | экспериментально, требуется стресс на железе |
 | PS/2, PIC/PIT, GDT/IDT | базовый диагностический путь |
 | PCI/ACPI | инвентаризация и частичная инициализация |
-| AHCI/NVMe, FAT32/Ext2/NTFS | AHCI + block layer + MBR/GPT + read-only mount в QEMU |
+| AHCI/NVMe, FAT32/Ext2/NTFS | AHCI + NVMe + block layer + MBR/GPT + mount (read-only по умолчанию) в QEMU |
 | xHCI/HID | enumeration и HID boot keyboard в QEMU; на реальном железе не подтверждено |
 | e1000/RTL8139, IPv4/ICMP | QEMU-ориентированный прототип, без DHCP/TCP |
 | ARM64 / Orange Pi Zero 3 | не поддерживается |
@@ -41,6 +41,9 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | `make build` | сборка ядра и установка его в `build/hdd.img` |
 | `make smoke` | UEFI-загрузка в QEMU, маркеры boot-пути и heartbeat |
 | `make clock-test` | `date`/`uptime`/`diag timer`, `/proc/uptime` и состав рамфс |
+| `make ramfs-test` | корневой RamFS через VFS: `ls`, запись, `hostname`, `/var/log/boot.log` |
+| `make ro-mount-test` | FAT32 read-only по умолчанию; запись только с `rw` |
+| `make bad-fs-test` | повреждённые ФС не роняют ядро |
 | `make fs-test` | FAT32/ext2/NTFS read-only + MBR-раздел через shell по serial |
 | `make keyboard-test` | ввод PS/2 и USB HID клавиатуры через monitor `sendkey` |
 | `make iso-smoke` | загрузка гибридного ISO в UEFI (OVMF) и BIOS (SeaBIOS) |
@@ -61,16 +64,20 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 сборки не подходят.
 
 В CI выполняются `doctor`, `setup`, бюджеты предупреждений, `smoke`,
-`clock-test`, `keyboard-test`, `fs-test`, сборка ISO и его загрузка в UEFI/BIOS,
-сборка GPT/ESP-образа и его загрузка в QEMU/OVMF, panic/page-fault отчёты и
-матрица последовательных загрузок (10 по умолчанию, `workflow_dispatch` →
-`boot_iterations`). Логи QEMU выкладываются артефактом `qemu-logs` даже при
-падении.
+`clock-test`, `ramfs-test`, `ro-mount-test`, `bad-fs-test`, `keyboard-test`,
+`fs-test`, сборка ISO и его загрузка в UEFI/BIOS, сборка GPT/ESP-образа и его
+загрузка в QEMU/OVMF, panic/page-fault отчёты и матрица последовательных
+загрузок (10 по умолчанию, `workflow_dispatch` → `boot_iterations`). Логи QEMU
+выкладываются артефактом `qemu-logs` даже при падении.
 
 ## Документы
 
 - `architecture.md` — фактическая архитектура и ограничения.
+- `framebuffer.md` — консоль, прокрутка и стоимость отрисовки, debug-only COM1.
+- `storage_and_power.md` — ACPI poweroff, каталоги FAT32, приёмники логов.
 - `memory.md` — модель памяти и известные риски.
+- `testing.md` — матрица QEMU-проверок и критерии приёмки.
+- `verified-hardware.md` — шаблон отчёта о прогоне на реальной машине.
 - `usb_and_boot.md` — QEMU/UEFI-процедуры и статус USB.
 - `roadmap.md` — измеримые критерии версий.
 - `usb_progress.md` — инженерные заметки о незавершённом xHCI.
@@ -79,5 +86,5 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 
 Единственная публичная версия — версия ядра. До `0.5.0` minor-версии отражают
 достигнутые проверяемые hardware milestones, а не количество файлов или
-демонстраций. `0.2.0-rc.1` — prerelease Foundation; финальный `0.2.0` ждёт
+демонстраций. `0.2.0-rc.2` — prerelease Foundation; финальный `0.2.0` ждёт
 выполнения CI, QEMU boot matrix и проверки на реальном x86_64.

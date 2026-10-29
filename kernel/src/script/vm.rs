@@ -58,7 +58,10 @@ impl VM {
 
     pub fn run(&mut self, program: &Program) -> ScriptResult {
         for stmt in program {
-            // Проверяем Ctrl+Z отмену
+            // Ctrl+C обрабатывается клавиатурой/серийным портом; скрипт
+            // должен явно опустошить очередь, иначе флаг отмены не поднимется.
+            let _ = crate::serial::poll_key().or_else(crate::keyboard::poll_key);
+            // Проверяем Ctrl+Z/Ctrl+C отмену
             if crate::is_cancelled() {
                 crate::reset_cancel();
                 self.println("\n[Script] Cancelled by user (Ctrl+Z)");
@@ -74,8 +77,9 @@ impl VM {
             Stmt::VarDecl(name, expr) => { let v = self.eval(expr); self.set_var(name, v); Ok(()) }
             Stmt::Assign(name, expr) => { let v = self.eval(expr); self.set_var(name, v); Ok(()) }
             Stmt::Print(exprs) => {
+                let strs: Vec<String> = exprs.iter().map(|e| self.eval(e).to_str()).collect();
                 let mut first = true;
-                let strs: Vec<String> = exprs.iter().map(|e| self.eval(e).to_str()).collect(); let mut first = true; for s in &strs { if !first { self.print(" "); } self.print(s); first = false; }
+                for s in &strs { if !first { self.print(" "); } self.print(s); first = false; }
                 self.println(""); Ok(())
             }
             Stmt::If { cond, then_body, else_body } => {
@@ -84,7 +88,23 @@ impl VM {
                 Ok(())
             }
             Stmt::While { cond, body } => {
-                while self.eval(cond).to_num() != 0 { for s in body { self.exec(s)?; } }
+                // Ограничение на число итераций: Ctrl+Z обрабатывается
+                // редактором строки, а не во время выполнения скрипта, поэтому
+                // бесконечный `while` иначе навсегда занимает shell.
+                const MAX_ITERATIONS: u64 = 10_000_000;
+                let mut iterations = 0u64;
+                while self.eval(cond).to_num() != 0 {
+                    if crate::is_cancelled() {
+                        crate::reset_cancel();
+                        self.println("\n[Script] Cancelled by user");
+                        return Ok(());
+                    }
+                    iterations += 1;
+                    if iterations > MAX_ITERATIONS {
+                        return Err(String::from("[Script] iteration limit exceeded"));
+                    }
+                    for s in body { self.exec(s)?; }
+                }
                 Ok(())
             }
             Stmt::Beep(expr) => { let f = self.eval(expr).to_num() as u32; crate::devices::pc_speaker::beep(f); Ok(()) }

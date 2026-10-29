@@ -11,7 +11,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     }
 
     let freq: u32 = args[0].parse().unwrap_or(0);
-    let duration: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200);
+    let duration: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200).min(10_000);
 
     if freq == 0 {
         crate::devices::pc_speaker::silent();
@@ -22,11 +22,15 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print_num(freq as usize);
         console.print(" Hz for ");
         console.print_num(duration as usize);
-        console.print("ms\n");
+        console.print("ms (Ctrl+C to stop)\n");
 
-        // Busy-wait delay
-        let iterations = duration as u64 * 50_000;
-        for _ in 0..iterations {
+        let start = crate::timer::uptime_ms();
+        while crate::timer::uptime_ms().wrapping_sub(start) < duration as u64 {
+            // Даём прервать длинный beep.
+            if crate::keyboard::poll_key().is_some() || crate::is_cancelled() {
+                crate::reset_cancel();
+                break;
+            }
             core::hint::spin_loop();
         }
         crate::devices::pc_speaker::silent();

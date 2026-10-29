@@ -188,7 +188,11 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
     };
 
     sched.tasks[cur].saved_rsp = ctx_ptr;
-    sched.tasks[cur].state = TaskState::Ready;
+    // Zombie не воскрешаем: задача, завершившаяся в обработчике (например,
+    // page fault в ring 3), не должна снова стать Ready на следующем тике.
+    if sched.tasks[cur].state == TaskState::Running {
+        sched.tasks[cur].state = TaskState::Ready;
+    }
     sched.tasks[cur].time_slices += 1;
 
     // Round-robin
@@ -247,7 +251,9 @@ pub extern "sysv64" fn softirq_handler(ctx_ptr: u64) -> u64 {
     }
 
     sched.tasks[cur].saved_rsp = ctx_ptr;
-    sched.tasks[cur].state = TaskState::Ready;
+    if sched.tasks[cur].state == TaskState::Running {
+        sched.tasks[cur].state = TaskState::Ready;
+    }
 
     let mut next = (cur + 1) % tc;
     let start = next;
@@ -381,6 +387,11 @@ pub fn spawn(name: &str, entry: fn(), priority: Priority) -> Option<u32> {
 }
 
 pub fn exit_task(id: u32) {
+    // Задачу 0 (kshell) нельзя завершить: на ней живёт сама оболочка.
+    if id == 0 {
+        crate::println!("[SCHED] refusing to exit task 0 (kshell)");
+        return;
+    }
     let mut guard = SCHEDULER.lock();
     if let Some(ref mut sched) = *guard {
         for task in &mut sched.tasks {
@@ -391,6 +402,16 @@ pub fn exit_task(id: u32) {
             }
         }
     }
+}
+
+/// Завершить текущую задачу и немедленно уступить планировщику.
+///
+/// Вызывается из обработчиков исключений ring 3: возвращаться к упавшей
+/// инструкции нельзя — она упадёт снова, и ядро зациклится.
+pub fn kill_current_and_yield() {
+    let id = current_task_id().unwrap_or(0);
+    exit_task(id);
+    yield_now();
 }
 
 pub fn sleep_task(id: u32, ticks: u64) {

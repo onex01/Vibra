@@ -11,9 +11,11 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  wxtest     - verify .rodata mapping is read-only\n");
         console.print("  keyboard   - PS/2 controller state and IRQ counters\n");
         console.print("  hw         - SMBIOS + ACPI tables + FADT flags\n");
+        console.print("  power      - ACPI poweroff path (PM1_CNT, _S5 SLP_TYP)\n");
         console.print("  usb        - xHCI controllers, devices, storage, log sink\n");
         console.print("  timer      - clock sources, IRQ tick rate, RTC/BIOS time\n");
-            console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
+        console.print("  heap-test  - full heap stress test (10k alloc/drop)\n");
+        console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
         console.print("  panic-test - test fatal error screen (halts VM)\n");
         return CmdResult::Ok;
     }
@@ -26,8 +28,15 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "wxtest" => diag_wxtest(console),
         "keyboard" => diag_keyboard(console),
         "hw" => diag_hw(console),
+        "power" => {
+            console.print_colored("[DIAG] poweroff path\n", crate::framebuffer::COLOR_CYAN);
+            console.print("  ");
+            console.print(&crate::acpi::power::describe());
+            console.print("\n");
+        }
         "usb" => diag_usb(console),
         "timer" => diag_timer(console),
+        "heap-test" => diag_heap_test(console),
         "fault-test" => diag_fault_test(console),
         "panic-test" => panic!("diagnostic panic screen test"),
         _ => {
@@ -254,6 +263,20 @@ fn diag_wxtest(console: &mut Console) {
     } else {
         console.print_colored("  VMM not active yet. Skipping test.\n", crate::framebuffer::COLOR_YELLOW);
         console.print_colored("[W^X TEST] SKIP\n", crate::framebuffer::COLOR_YELLOW);
+    }
+}
+
+fn diag_heap_test(console: &mut Console) {
+    console.print_colored("[HEAP TEST] 10000 iters...\n", crate::framebuffer::COLOR_YELLOW);
+    let (iters, ok, drift) = crate::memory::heap::stress(10_000);
+    if ok {
+        console.print("  PASS: ");
+        console.print_num(iters);
+        console.print(" iters, no leak\n");
+    } else {
+        console.print_colored("  FAIL: drift ", crate::framebuffer::COLOR_RED);
+        console.print_num(drift.unsigned_abs() as usize);
+        console.print(" bytes\n");
     }
 }
 

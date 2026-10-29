@@ -101,7 +101,8 @@ pub fn init() {
             crate::task::ctx_switch::timer_naked_stub as *const () as u64);
         // Vector 33: PIC keyboard
         IDT[pic::PIC1_OFFSET as usize + 1].set_handler(isr_keyboard as *const () as u64);
-        // Vector 36: PIC serial (COM1 IRQ4)
+        // Vector 36: PIC serial (COM1 IRQ4) — только debug-сборка, см. serial.rs.
+        #[cfg(feature = "serial-debug")]
         IDT[pic::PIC1_OFFSET as usize + 4].set_handler(isr_serial as *const () as u64);
         // Spurious
         IDT[pic::PIC1_OFFSET as usize + 7].set_handler(isr_spurious_master as *const () as u64);
@@ -153,7 +154,9 @@ extern "x86-interrupt" fn isr_keyboard(_frame: InterruptStackFrame) {
     }
 }
 
-// Serial port handler (IRQ4 via IO APIC, vector 36)
+// Serial port handler (IRQ4 via IO APIC, vector 36).
+// Только debug: в release IRQ4 замаскирован, а обработчик не регистрируется.
+#[cfg(feature = "serial-debug")]
 extern "x86-interrupt" fn isr_serial(_frame: InterruptStackFrame) {
     // Делегируем обработку в модуль serial (он собирает байты в ring buffer)
     crate::serial::handle_interrupt();
@@ -229,8 +232,7 @@ extern "x86-interrupt" fn isr_general_protection(frame: InterruptStackFrame, err
 
     if is_user {
         println!("[KILL] User process terminated (GPF)");
-        let pid = crate::task::current_task_id().unwrap_or(0);
-        crate::task::exit_task(pid);
+        crate::task::kill_current_and_yield();
     } else {
         super::halt_loop();
     }
@@ -256,15 +258,16 @@ extern "x86-interrupt" fn isr_page_fault(frame: InterruptStackFrame, error_code:
     dump_frame(&frame);
 
     if is_user {
-        // User page fault — убиваем процесс, ОС продолжает работу
+        // User page fault — убиваем процесс, ОС продолжает работу.
+        // Возврат к упавшей инструкции недопустим: она упадёт снова.
         println!("[KILL] User process terminated (page fault at {:#x})", cr2);
-        let pid = crate::task::current_task_id().unwrap_or(0);
-        crate::task::exit_task(pid);
-        // Не halt — планировщик выберет другую задачу на следующем тике
+        crate::task::kill_current_and_yield();
     } else if is_user_addr {
-        // Kernel page fault на user-адресе — логируем, но не halt
-        // (баг в kernel code при доступе к user памяти)
-        println!("[WARN] Kernel fault on user address — continuing");
+        // Kernel-код обратился к user-адресу и не смог его отобразить.
+        // Раньше здесь был `return`, и ядро бесконечно падало на той же
+        // инструкции. Это дефект ядра, а не пользователя — останавливаемся.
+        println!("[FATAL] Kernel page fault on user address — halting");
+        super::halt_loop();
     } else {
         // Kernel page fault на kernel-адресе — критическая ошибка
         println!("[FATAL] Kernel page fault — halting");

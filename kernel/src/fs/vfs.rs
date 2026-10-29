@@ -169,6 +169,40 @@ pub trait FileSystem: Send + Sync {
     fn chown(&mut self, _path: &str, _uid: u32, _gid: u32) -> Result<(), FsError> { Err(FsError::NotSupported) }
 }
 
+/// Обёртка файла на read-only томе: чтение/seek разрешены, запись — нет.
+///
+/// Нужна, чтобы флаг `MountPoint.readonly` работал даже для ФС, которые сами
+/// не проверяют режим (ramfs, ext2).
+pub struct ReadOnlyFile {
+    pub inner: Box<dyn File>,
+}
+
+impl File for ReadOnlyFile {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, FsError> {
+        self.inner.read(buf)
+    }
+
+    fn write(&mut self, _buf: &[u8]) -> Result<usize, FsError> {
+        Err(FsError::ReadOnly)
+    }
+
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64, FsError> {
+        self.inner.seek(pos)
+    }
+
+    fn position(&self) -> u64 {
+        self.inner.position()
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn close(self: Box<Self>) -> Result<(), FsError> {
+        self.inner.close()
+    }
+}
+
 /// Менеджер виртуальной файловой системы
 pub struct VfsManager {
     pub mount_table: spin::Mutex<MountTable>,

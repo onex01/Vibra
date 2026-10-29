@@ -17,6 +17,7 @@ pub struct LineEditor {
     history_idx: usize,
     prompt_buf: [u8; 128], // буфер для prompt строки
     prompt_len: usize,
+    prompt_color: u32,
     // Для циклического дополнения по Tab
     tab_index: i32,        // -1 = нет активного дополнения, иначе индекс совпадения
     tab_match_count: usize, // количество совпадений при последнем нажатии Tab
@@ -34,6 +35,7 @@ impl LineEditor {
             history_idx: 0,
             prompt_buf: [0; 128],
             prompt_len: 0,
+            prompt_color: crate::framebuffer::COLOR_VIBRA_PROMPT,
             tab_index: -1,
             tab_match_count: 0,
         }
@@ -167,6 +169,14 @@ impl LineEditor {
                             }
                             self.reprint_line(console);
                         }
+                        // Ctrl+C — отмена текущей строки/команды
+                        else if ch == '\x03' {
+                            crate::request_cancel();
+                            self.len = 0;
+                            self.cursor = 0;
+                            console.print_colored("^C\n", crate::framebuffer::COLOR_RED);
+                            return "";
+                        }
                         // Ctrl+Z (0x1A) — отмена текущей команды
                         else if ch == '\x1A' {
                             crate::request_cancel();
@@ -238,6 +248,35 @@ impl LineEditor {
         self.prompt_len = len;
     }
 
+    /// Цвет prompt для перерисовки после Tab/истории.
+    pub fn set_prompt_color(&mut self, color: u32) {
+        self.prompt_color = color;
+    }
+
+    fn print_prompt(&self, console: &mut Console) {
+        if let Ok(p) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
+            console.print_colored(p, self.prompt_color);
+        }
+    }
+
+    /// Стереть prompt + ввод и вернуть курсор в начало prompt.
+    fn clear_input_area(&self, console: &mut Console) {
+        // Сначала от текущей позиции курсора к началу строки ввода.
+        for _ in 0..self.cursor {
+            console.put_char('\x08');
+        }
+        let total = self.prompt_len + self.len;
+        for _ in 0..total {
+            console.put_char('\x08');
+        }
+        for _ in 0..total {
+            console.put_char(' ');
+        }
+        for _ in 0..total {
+            console.put_char('\x08');
+        }
+    }
+
     fn save_to_history(&mut self) {
         if self.len == 0 { return; }
         if self.history_count < HISTORY_SIZE {
@@ -262,25 +301,24 @@ impl LineEditor {
         self.cursor = src_len;
     }
 
-    // Перепечатывает текущую строку и позиционирует курсор
+    // Перепечатывает текущую строку и позиционирует курсор.
+    //
+    // Важно: курсор может стоять в середине строки (стрелки/Home/End), поэтому
+    // сначала возвращаемся к её началу на self.cursor символов, а не на len.
+    // Иначе backspace «съедал» prompt `vibra:/>` — именно это ломало историю.
     fn reprint_line(&self, console: &mut Console) {
-        // Возвращаемся в начало строки
-        for _ in 0..self.len {
+        for _ in 0..self.cursor {
             console.put_char('\x08');
         }
-        // Стираем
         for _ in 0..self.len {
             console.put_char(' ');
         }
-        // Возвращаемся
         for _ in 0..self.len {
             console.put_char('\x08');
         }
-        // Рисуем
         if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
             console.print(s);
         }
-        // Позиционируем курсор на self.cursor (от конца влево)
         for _ in self.cursor..self.len {
             console.put_char('\x08');
         }
@@ -288,11 +326,15 @@ impl LineEditor {
 
     fn tab_complete(&mut self, console: &mut Console) {
         let line = self.as_str();
-        let trimmed = line.trim();
 
-        // Автодополнение путей файлов: если начинается с / или содержит пробел
-        if trimmed.starts_with('/') || trimmed.contains(' ') {
+        // Есть пробел или путь — дополняем последнее слово как файл/каталог.
+        if line.contains(' ') || line.starts_with('/') {
             self.complete_path(console);
+            return;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             return;
         }
 
@@ -322,105 +364,66 @@ impl LineEditor {
 
         let selected = matches[self.tab_index as usize];
 
-        // Очищаем текущий ввод (учитывая длину prompt)
-        let total = self.prompt_len + self.len;
-        for _ in 0..total {
-            console.put_char('\x08');
-        }
-        for _ in 0..total {
-            console.put_char(' ');
-        }
-        for _ in 0..total {
-            console.put_char('\x08');
-        }
-
-        // Записываем выбранное совпадение
+        // Стираем prompt + ввод, сохраняя цвет prompt.
+        self.clear_input_area(console);
         self.len = 0;
         self.cursor = 0;
         self.append_str(selected);
         self.append_str(" ");
 
-        // Печатаем prompt + команду
-        if let Ok(prompt_str) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
-            console.print(prompt_str);
-        }
+        self.print_prompt(console);
         if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
             console.print(s);
         }
     }
 
-    /// Автодополнение пути к файлу/каталогу (с циклическим переключением)
+    /// Автодополнение последнего слова строки как пути.
+    ///
+    /// Работает и для `cat /tm`, и для `cp /a /b`, и для относительных путей:
+    /// дополняется только последний токен, предыдущие аргументы сохраняются.
     fn complete_path(&mut self, console: &mut Console) {
-        // Копируем данные в стековый буфер чтобы избежать borrow conflict
-        let mut line_buf = [0u8; 256];
-        let line_len = self.len;
-        let copy_len = line_len.min(255);
-        line_buf[..copy_len].copy_from_slice(&self.buffer[..copy_len]);
-        let line = core::str::from_utf8(&line_buf[..copy_len]).unwrap_or("");
-        let parts: alloc::vec::Vec<&str> = line.splitn(2, ' ').collect();
-
-        let (cmd_part, partial) = if parts.len() < 2 {
-            // Нет пробела — весь ввод это путь (начинается с /)
-            ("", line.trim())
-        } else {
-            (parts[0], parts[1])
+        let line = match core::str::from_utf8(&self.buffer[..self.len]) {
+            Ok(s) => String::from(s),
+            Err(_) => return,
         };
+        let line = line.as_str();
+
+        let split = line.rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let before = &line[..split];
+        let word = &line[split..];
+        if word.is_empty() {
+            return;
+        }
 
         let current_dir = crate::fs::get_current_dir();
-
-        // Определяем директорию для поиска
-        let (search_dir, prefix) = if partial.is_empty() || !partial.contains('/') {
-            if partial.starts_with('/') {
-                // Абсолютный путь — ищем в корне или по пути
-                if let Some(last_slash) = partial.rfind('/') {
-                    let dir_part = &partial[..last_slash];
-                    let name_part = &partial[last_slash + 1..];
-                    let full_dir = if dir_part.is_empty() {
-                        String::from("/")
-                    } else {
-                        String::from(dir_part)
-                    };
-                    (full_dir, String::from(name_part))
-                } else {
-                    (String::from("/"), String::from(partial))
-                }
+        let (search_dir, display_prefix, name_prefix) = if let Some(slash) = word.rfind('/') {
+            let dir_part = &word[..=slash]; // вместе с завершающим '/'
+            let name = &word[slash + 1..];
+            let search = if dir_part.starts_with('/') {
+                String::from(dir_part)
+            } else if current_dir == "/" {
+                format!("/{}", dir_part)
             } else {
-                (current_dir.clone(), String::from(partial))
-            }
+                format!("{}/{}", current_dir, dir_part)
+            };
+            (search, String::from(dir_part), String::from(name))
         } else {
-            if let Some(last_slash) = partial.rfind('/') {
-                let dir_part = &partial[..last_slash];
-                let name_part = &partial[last_slash + 1..];
-                let full_dir = if dir_part.starts_with('/') {
-                    String::from(dir_part)
-                } else if current_dir == "/" {
-                    format!("/{}", dir_part)
-                } else {
-                    format!("{}/{}", current_dir, dir_part)
-                };
-                (full_dir, String::from(name_part))
-            } else {
-                (current_dir.clone(), String::from(partial))
-            }
+            (current_dir.clone(), String::new(), String::from(word))
         };
 
-        // Ищем совпадения
         let entries = crate::fs::list_dir(&search_dir);
         let mut matches: alloc::vec::Vec<String> = alloc::vec::Vec::new();
 
         for entry in &entries {
-            if entry.name.starts_with(&prefix) {
-                let mut full = String::new();
-                if !search_dir.ends_with('/') {
-                    full.push_str(&search_dir);
-                }
-                full.push('/');
-                full.push_str(&entry.name);
-                if entry.file_type == crate::fs::FileType::Directory {
-                    full.push('/');
-                }
-                matches.push(full);
+            if !entry.name.starts_with(&name_prefix) {
+                continue;
             }
+            let mut full = display_prefix.clone();
+            full.push_str(&entry.name);
+            if entry.file_type == crate::fs::FileType::Directory {
+                full.push('/');
+            }
+            matches.push(full);
         }
 
         if matches.is_empty() {
@@ -437,30 +440,14 @@ impl LineEditor {
         }
 
         let completion = &matches[self.tab_index as usize];
-        let total = self.prompt_len + self.len;
-        for _ in 0..total {
-            console.put_char('\x08');
-        }
-        for _ in 0..total {
-            console.put_char(' ');
-        }
-        for _ in 0..total {
-            console.put_char('\x08');
-        }
 
-        // Очищаем буфер и записываем новую строку
+        self.clear_input_area(console);
         self.len = 0;
         self.cursor = 0;
-        if !cmd_part.is_empty() {
-            self.append_str(cmd_part);
-            self.append_str(" ");
-        }
+        self.append_str(before);
         self.append_str(completion);
 
-        // Печатаем prompt + строку
-        if let Ok(p) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
-            console.print(p);
-        }
+        self.print_prompt(console);
         if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
             console.print(s);
         }

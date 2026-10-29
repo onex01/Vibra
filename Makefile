@@ -3,6 +3,19 @@ TARGET := x86_64-unknown-none
 BUILD_DIR := build
 LIMINE_DIR := limine-bin
 
+# Загрузчик и прошивку можно закрепить на конкретной версии и SHA256.
+# По умолчанию поведение прежнее (latest), но для воспроизводимой сборки:
+#   make setup LIMINE_VERSION=v9.2.0 LIMINE_SHA256=<sha> OVMF_SHA256=<sha>
+LIMINE_VERSION ?= latest
+LIMINE_SHA256 ?=
+OVMF_SHA256 ?=
+ifeq ($(LIMINE_VERSION),latest)
+LIMINE_URL := https://github.com/limine-bootloader/limine/releases/latest/download/limine-binary.tar.xz
+else
+LIMINE_URL := https://github.com/limine-bootloader/limine/releases/download/$(LIMINE_VERSION)/limine-binary.tar.xz
+endif
+OVMF_URL ?= https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd
+
 # QEMU можно переопределить из окружения (например, qemu-system-x86_64 из PATH в CI).
 QEMU ?= /usr/bin/qemu-system-x86_64
 
@@ -24,8 +37,10 @@ endif
 
 ifeq ($(RELEASE),1)
 PROFILE := release
+CARGO_PROFILE := --release
 else
 PROFILE := debug
+CARGO_PROFILE :=
 endif
 
 # Путь к собранному ядру (без привязки к диску — нужен и для ISO, и для hdd.img).
@@ -64,13 +79,15 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build kernel smoke run clean setup install-kernel iso iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log
+.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test shell-test check boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log
 
 all: run
 
 # Только компиляция ядра — без диска. Нужна ISO/USB-сборкам.
+# $(CARGO_PROFILE) подставляет --release при RELEASE=1: без этого флаг
+# менял только путь KERNEL_ELF, а cargo собирал debug-профиль.
 kernel:
-	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
+	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) $(CARGO_PROFILE) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 
 # Сборка ядра И копирование его на диск
 build: kernel
@@ -98,6 +115,32 @@ keyboard-test: build
 clock-test: build
 	@QEMU="$(QEMU)" bash scripts/qemu-clock-test.sh
 
+# Корневой RamFS через VFS: ls, запись/чтение, hostname, /boot.log.
+ramfs-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-ramfs-test.sh
+
+# Read-only по умолчанию: запись на FAT32 запрещена без явного `rw`.
+ro-mount-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-ro-mount-test.sh
+
+# Повреждённые ФС не должны ронять ядро.
+bad-fs-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-bad-fs-test.sh
+
+# NVMe: Identify, I/O queues, block layer, mount auto.
+nvme-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-nvme-test.sh
+
+# Интерактивный shell: Tab, история, help, объединённый test.
+shell-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-shell-test.sh
+
+# Локальный quality gate: обе сборки + бюджет предупреждений.
+check:
+	@$(MAKE) kernel
+	@$(MAKE) kernel SERIAL_DEBUG=0
+	@python3 scripts/check-warning-budget.py
+
 # Проверка загрузки собранного ISO: UEFI (OVMF) и BIOS (SeaBIOS) через El Torito.
 iso-smoke: iso
 	@QEMU="$(QEMU)" bash scripts/qemu-iso-smoke.sh
@@ -108,14 +151,20 @@ setup:
 	@rm -rf $(LIMINE_DIR)
 	
 	@echo "==> Downloading Limine precompiled binaries..."
-	@wget -q https://github.com/limine-bootloader/limine/releases/latest/download/limine-binary.tar.xz
+	@wget -q "$(LIMINE_URL)"
+	@if [ -n "$(LIMINE_SHA256)" ]; then \
+		echo "$(LIMINE_SHA256)  limine-binary.tar.xz" | sha256sum -c -; \
+	fi
 	@tar -xf limine-binary.tar.xz
 	@mv limine-binary $(LIMINE_DIR)
 	@rm limine-binary.tar.xz
 
 	@if [ ! -f "OVMF.fd" ]; then \
 		echo "==> Downloading UEFI BIOS (OVMF)..."; \
-		wget -q https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd -O OVMF.fd; \
+		wget -q "$(OVMF_URL)" -O OVMF.fd; \
+		if [ -n "$(OVMF_SHA256)" ]; then \
+			echo "$(OVMF_SHA256)  OVMF.fd" | sha256sum -c -; \
+		fi; \
 	fi
 
 	@echo "==> Creating limine.conf..."
@@ -142,21 +191,20 @@ setup:
 # Быстрое обновление только ядра (без пересборки)
 install-kernel:
 	@echo "==> Installing kernel to disk image..."
-	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/release/$(KERNEL_NAME) ::/kernel.elf
+	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/$(KERNEL_ELF) ::/kernel.elf
 	@echo "==> Kernel installed!"
 
-# Target for optimized release builds without serial shell
+# Release-сборка: оптимизация + COM1 выключен.
+# Обёртки над build/kernel с RELEASE=1 SERIAL_DEBUG=0 — без дублирования
+# флагов cargo (раньше --release/--no-default-features были прописаны здесь
+# жёстко, а kernel: собирал debug-профиль при RELEASE=1).
 run-release: build-release
 	@echo "==> Starting QEMU (release, no serial shell)..."
-	@$(CARGO) build -p vibra-kernel --release --no-default-features -Z build-std=core,alloc,compiler_builtins -Z build-std-features
-	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/release/$(KERNEL_NAME) ::/kernel.elf
 	$(QEMU_ENV) $(QEMU) -m 256M -serial none -monitor none -drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
 	         -drive file=$(BUILD_DIR)/hdd.img,format=raw -M q35
 
 build-release:
-	@$(CARGO) build -p vibra-kernel --release --no-default-features -Z build-std=core,alloc,compiler_builtins -Z build-std-features
-	@echo "==> Copying release kernel to disk image..."
-	@mcopy -o -i $(BUILD_DIR)/hdd.img $(shell pwd)/target/$(TARGET)/release/$(KERNEL_NAME) ::/kernel.elf
+	@$(MAKE) RELEASE=1 SERIAL_DEBUG=0 build
 	@echo "==> Release kernel built and installed!"
 
 run: build
@@ -248,6 +296,12 @@ iso: kernel
 	@echo "==> Write to USB with Ventoy: just copy .iso to Ventoy USB drive"
 	@echo "==> Or burn: sudo dd if=$(BUILD_DIR)/vibra.iso of=/dev/sdX bs=4M status=progress"
 
+# ISO с release-ядром: оптимизация + COM1 полностью выключен.
+# Эквивалент `make RELEASE=1 SERIAL_DEBUG=0 iso`; отдельный таргет нужен,
+# чтобы release-ISO собиралась одной командой без запоминания переменных.
+iso-release:
+	@$(MAKE) RELEASE=1 SERIAL_DEBUG=0 iso
+
 run-iso: iso
 	@echo "==> Starting QEMU with ISO..."
 	$(QEMU_ENV) $(QEMU) -m 512M -serial stdio -monitor none \
@@ -308,7 +362,7 @@ usb: build
 
 # UEFI-only GPT image with a standards-compliant EFI System Partition.
 uefi-usb:
-	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
+	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) $(CARGO_PROFILE) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
 	@UEFI_USB_OVERWRITE="$(UEFI_USB_OVERWRITE)" USB_SIZE_MB="$(USB_SIZE_MB)" bash scripts/build-uefi-usb.sh
 
 
@@ -323,7 +377,7 @@ USB_DEBUG_ESP_MB ?= 64
 
 # Ядро с записью лога на USB (для образов usb-debug / iso-debug).
 boot-log-kernel:
-	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) --features boot-log-to-usb \
+	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) $(CARGO_PROFILE) --features boot-log-to-usb \
 		-Z build-std=core,alloc,compiler_builtins -Z build-std-features
 
 # End-to-end: USB-накопитель с разделом VIBRALOG, проверка содержимого лога.

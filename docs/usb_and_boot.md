@@ -1,5 +1,9 @@
 # USB и загрузка
 
+> Инженерные заметки о текущем состоянии xHCI — в
+> [usb_progress.md](usb_progress.md). Этот файл описывает образы и процедуры
+> проверки; при расхождении приоритет у `usb_progress.md` и кода.
+
 ## Реальный статус USB
 
 В `0.1.0` USB не был рабочим вводом или накопителем. Код xHCI умел находить
@@ -11,7 +15,7 @@ PCI-контроллер и выводить диагностические ре
 План: корректный reset и BIOS handoff → DCBAA/command/event rings → port reset
 → Address Device → descriptors/configuration → HID boot keyboard.
 
-В `0.2.0-rc.1` xHCI enumeration и HID boot keyboard уже работают в QEMU
+В `0.2.0-rc.2` xHCI enumeration и HID boot keyboard уже работают в QEMU
 (`make keyboard-test` проверяет PS/2 и USB-ввод через monitor `sendkey`), но на
 физическом железе это по-прежнему не подтверждено.
 

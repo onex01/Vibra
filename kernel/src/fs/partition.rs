@@ -101,26 +101,34 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 fn u32_at(buf: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+    match buf.get(off..off + 4) {
+        Some(s) => u32::from_le_bytes([s[0], s[1], s[2], s[3]]),
+        None => 0,
+    }
 }
 
 fn u64_at(buf: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes([
-        buf[off], buf[off + 1], buf[off + 2], buf[off + 3],
-        buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7],
-    ])
+    match buf.get(off..off + 8) {
+        Some(s) => u64::from_le_bytes([
+            s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+        ]),
+        None => 0,
+    }
 }
 
 /// Сравнить GPT GUID в записи с эталоном.
 fn guid_eq(buf: &[u8], off: usize, guid: &[u8; 16]) -> bool {
-    &buf[off..off + 16] == guid
+    matches!(buf.get(off..off + 16), Some(s) if s == guid)
 }
 
 /// GPT-имена хранятся в UTF-16LE.
 fn utf16_name(buf: &[u8], off: usize, max_chars: usize) -> String {
     let mut s = String::new();
     for i in 0..max_chars {
-        let c = u16::from_le_bytes([buf[off + i * 2], buf[off + i * 2 + 1]]);
+        let Some(raw) = buf.get(off + i * 2..off + i * 2 + 2) else {
+            break;
+        };
+        let c = u16::from_le_bytes([raw[0], raw[1]]);
         if c == 0 { break; }
         s.push(char::from_u32(c as u32).unwrap_or('?'));
     }
@@ -207,10 +215,14 @@ fn parse_gpt(disk: &mut dyn DiskIo) -> Option<Vec<Partition>> {
     let entries_lba = u64_at(&hdr, 72);
     let num_entries = u32_at(&hdr, 80) as usize;
     let entry_size = u32_at(&hdr, 84) as usize;
-    if entry_size < 128 || num_entries == 0 || num_entries > 1024 { return None; }
+    // 128 — минимальный размер записи по спецификации; верхний предел
+    // защищает от повреждённого заголовка, где entry_size = 0xFFFFFFFF.
+    if !(128..=4096).contains(&entry_size) || num_entries == 0 || num_entries > 1024 {
+        return None;
+    }
 
     // Читаем записи одним куском, чтобы не делать по сектору на запись.
-    let total = num_entries * entry_size;
+    let total = num_entries.checked_mul(entry_size)?;
     let sectors = (total + 511) / 512;
     let mut buf = alloc::vec![0u8; sectors * 512];
     disk.read(entries_lba, &mut buf).ok()?;

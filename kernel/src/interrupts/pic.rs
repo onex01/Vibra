@@ -60,12 +60,20 @@ pub fn init() {
         outb(PIC2_DATA, ICW4_8086);
         io_wait();
         
-        // Разрешаем IRQ0 (таймер), IRQ1 (клавиатура), IRQ4 (serial COM1)
+        // Разрешаем IRQ0 (таймер), IRQ1 (клавиатура), IRQ4 (serial COM1).
         // Бит = 1 означает "замаскировано".
-        outb(PIC1_DATA, 0b1110_1100);
+        // В release-сборке IRQ4 остаётся замаскированным: COM1 выключен.
+        #[cfg(feature = "serial-debug")]
+        const PIC1_MASK: u8 = 0b1110_1100;
+        #[cfg(not(feature = "serial-debug"))]
+        const PIC1_MASK: u8 = 0b1111_1100;
+        outb(PIC1_DATA, PIC1_MASK);
         outb(PIC2_DATA, 0xFF);
 
+        #[cfg(feature = "serial-debug")]
         println!("[PIC] PIC initialized. IRQ0 (timer) + IRQ1 (keyboard) + IRQ4 (serial) unmasked.");
+        #[cfg(not(feature = "serial-debug"))]
+        println!("[PIC] PIC initialized. IRQ0 (timer) + IRQ1 (keyboard) unmasked (serial off).");
     }
 }
 

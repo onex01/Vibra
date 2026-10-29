@@ -177,7 +177,7 @@ check() {
 }
 
 echo "==> Checking results"
-check "OK (fat32)"
+check "OK (fat32"
 check "hello from fat32"
 check "Long File Name.txt"
 check "long file name works"

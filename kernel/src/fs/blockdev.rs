@@ -20,7 +20,8 @@ use spin::Mutex;
 /// Возвращает количество добавленных записей (диски + разделы).
 pub fn probe(mgr: &mut DiskManager) -> usize {
     let (added, disks) = probe_ahci(mgr);
-    added + probe_usb(mgr, disks)
+    let (nvme_added, nvme_disks) = probe_nvme(mgr, disks);
+    added + nvme_added + probe_usb(mgr, disks + nvme_disks)
 }
 
 /// SATA-диски: `(число записей, число дисков)`.
@@ -54,13 +55,49 @@ fn probe_ahci(mgr: &mut DiskManager) -> (usize, usize) {
         );
 
         let shared: Arc<Mutex<Box<dyn DiskIo>>> =
-            Arc::new(Mutex::new(Box::new(crate::drivers::ahci::AhciDisk::new(*port))));
+            Arc::new(Mutex::new(Box::new(crate::drivers::ahci::AhciDisk::with_sector_size(
+                *port,
+                info.as_ref().map(|i| i.sector_size).unwrap_or(512),
+            ))));
 
         added += register(mgr, &disk_name, shared, sectors);
         disks += 1;
     }
 
     (added, disks)
+}
+
+/// NVMe-накопитель: один namespace, 512-байтные сектора для FS.
+fn probe_nvme(mgr: &mut DiskManager, first_index: usize) -> (usize, usize) {
+    let Some((blocks, block_size)) = crate::drivers::nvme::disk_info() else {
+        return (0, 0);
+    };
+    let Some(disk) = crate::drivers::nvme::create_disk() else {
+        return (0, 0);
+    };
+    if blocks == 0 || block_size == 0 {
+        return (0, 0);
+    }
+
+    // FS/partition layer считает сектора 512-байтными; адаптер в NvmeDisk
+    // переводит их в логические блоки устройства (в т.ч. 4Kn).
+    let sectors = blocks.saturating_mul(block_size as u64) / 512;
+    if sectors == 0 {
+        return (0, 0);
+    }
+
+    let letter = (b'a' + (first_index % 26) as u8) as char;
+    let disk_name = alloc::format!("sd{}", letter);
+    crate::println!(
+        "[BLK] {}: {} секторов ({} МиБ) [NVMe, {} B/block]",
+        disk_name,
+        sectors,
+        (sectors * 512) / (1024 * 1024),
+        block_size
+    );
+
+    let shared: Arc<Mutex<Box<dyn DiskIo>>> = Arc::new(Mutex::new(disk));
+    (register(mgr, &disk_name, shared, sectors), 1)
 }
 
 /// USB-накопители (mass storage). Нумерация продолжает SATA.

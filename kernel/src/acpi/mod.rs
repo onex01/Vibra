@@ -11,6 +11,7 @@ pub mod smbios;
 pub mod madt;
 pub mod mcfg;
 pub mod hpet;
+pub mod power;
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -27,6 +28,35 @@ pub struct AcpiInfo {
     pub boot_arch_flags: Option<u16>,
     /// FADT CENTURY (offset 108) — индекс регистра века в CMOS.
     pub rtc_century_index: Option<u8>,
+    /// FADT PM1a_CNT_BLK (offset 64) — порт управления питанием.
+    pub pm1a_cnt_blk: Option<u32>,
+    /// FADT PM1b_CNT_BLK (offset 68) — второй чипсет, если есть.
+    pub pm1b_cnt_blk: Option<u32>,
+    /// FADT DSDT (offset 40) — физический адрес таблицы с AML-кодом.
+    pub dsdt_phys: Option<u64>,
+    /// Значение SLP_TYP из пакета `_S5` в DSDT (обычно 5).
+    ///
+    /// Берётся из AML, а не из константы: на части платформ `_S5` объявлен
+    /// с другим типом сна, и жёстко зашитая пятёрка там просто не выключает
+    /// машину.
+    pub s5_slp_typ: Option<u16>,
+    /// FADT SMI_CMD (offset 48) — нужен для legacy SMI-выключения.
+    pub smi_cmd: Option<u32>,
+    /// FADT ACPI_ENABLE (offset 52) — значение, включающее ACPI через SMI.
+    pub acpi_enable: Option<u8>,
+    /// FADT RESET_REG (offset 116) — generic address для сброса машины.
+    pub reset_reg: Option<ResetRegister>,
+    /// FADT RESET_VALUE (offset 128).
+    pub reset_value: Option<u8>,
+}
+
+/// Generic Address Structure из FADT для RESET_REG.
+#[derive(Clone, Copy, Debug)]
+pub struct ResetRegister {
+    pub address_space: u8,
+    pub bit_width: u8,
+    pub bit_offset: u8,
+    pub address: u64,
 }
 
 pub static ACPI_INFO: Mutex<Option<AcpiInfo>> = Mutex::new(None);
@@ -98,6 +128,14 @@ pub fn init() {
         hpet_comparator_count: None,
         boot_arch_flags: None,
         rtc_century_index: None,
+        pm1a_cnt_blk: None,
+        pm1b_cnt_blk: None,
+        dsdt_phys: None,
+        s5_slp_typ: None,
+        smi_cmd: None,
+        acpi_enable: None,
+        reset_reg: None,
+        reset_value: None,
     };
 
     for &table_phys in &tables {
@@ -146,6 +184,77 @@ pub fn init() {
                         crate::println!("[ACPI] FADT RTC century register: {:#04x}", century);
                     }
                 }
+
+                // Поля, нужные для выключения питания (см. acpi/power.rs).
+                // Смещения фиксированы спецификацией ACPI и не зависят от
+                // длины таблицы, но читаем только то, что реально влезает:
+                // урезанный FADT встречается на старых машинах.
+                if header.length as usize >= 44 {
+                    let dsdt = unsafe {
+                        core::ptr::read_unaligned((table_virt + 40) as *const u32)
+                    } as u64;
+                    if dsdt != 0 {
+                        info.dsdt_phys = Some(dsdt);
+                    }
+                }
+                if header.length as usize >= 70 {
+                    let pm1a = unsafe {
+                        core::ptr::read_unaligned((table_virt + 64) as *const u32)
+                    };
+                    let pm1b = unsafe {
+                        core::ptr::read_unaligned((table_virt + 68) as *const u32)
+                    };
+                    if pm1a != 0 {
+                        info.pm1a_cnt_blk = Some(pm1a);
+                    }
+                    if pm1b != 0 {
+                        info.pm1b_cnt_blk = Some(pm1b);
+                    }
+                    crate::println!(
+                        "[ACPI] FADT PM1a_CNT={:#06x}, PM1b_CNT={}",
+                        pm1a,
+                        match pm1b {
+                            0 => alloc::string::String::from("none"),
+                            port => alloc::format!("{:#06x}", port),
+                        }
+                    );
+                }
+                // SMI_CMD (48) + ACPI_ENABLE (52): legacy-путь включения ACPI.
+                if header.length as usize >= 53 {
+                    let smi = unsafe {
+                        core::ptr::read_unaligned((table_virt + 48) as *const u32)
+                    };
+                    let enable = unsafe { core::ptr::read_unaligned((table_virt + 52) as *const u8) };
+                    if smi != 0 {
+                        info.smi_cmd = Some(smi);
+                        info.acpi_enable = Some(enable);
+                    }
+                }
+                // RESET_REG (116..128) + RESET_VALUE (128) — современный
+                // способ перезагрузки из FADT. На реальном железе он
+                // надёжнее захардкоженных портов 0x92/0xCF9.
+                if header.length as usize >= 129 {
+                    let space = unsafe { core::ptr::read_unaligned((table_virt + 116) as *const u8) };
+                    let width = unsafe { core::ptr::read_unaligned((table_virt + 117) as *const u8) };
+                    let offset = unsafe { core::ptr::read_unaligned((table_virt + 118) as *const u8) };
+                    let address = unsafe {
+                        core::ptr::read_unaligned((table_virt + 120) as *const u64)
+                    };
+                    let value = unsafe { core::ptr::read_unaligned((table_virt + 128) as *const u8) };
+                    if width != 0 && address != 0 {
+                        info.reset_reg = Some(ResetRegister {
+                            address_space: space,
+                            bit_width: width,
+                            bit_offset: offset,
+                            address,
+                        });
+                        info.reset_value = Some(value);
+                        crate::println!(
+                            "[ACPI] FADT reset_reg: space={}, width={}, addr={:#x}, value={:#x}",
+                            space, width, address, value
+                        );
+                    }
+                }
             }
             b"MCFG" => {
                 crate::println!("[ACPI] MCFG (PCIe) found");
@@ -168,6 +277,21 @@ pub fn init() {
             }
             _ => {
                 // Пропускаем неизвестные таблицы
+            }
+        }
+    }
+
+    // SLP_TYP для выключения берём из AML-пакета `_S5` в DSDT.
+    // Без этого приходится угадывать значение, и на платформах с другим
+    // SLP_TYP запись в PM1a_CNT просто игнорируется.
+    if let Some(dsdt) = info.dsdt_phys {
+        match power::parse_s5_slp_typ(dsdt) {
+            Some(slp_typ) => {
+                info.s5_slp_typ = Some(slp_typ);
+                crate::println!("[ACPI] DSDT _S5 SLP_TYP = {}", slp_typ);
+            }
+            None => {
+                crate::println!("[ACPI] DSDT _S5 not found; poweroff will fall back");
             }
         }
     }
