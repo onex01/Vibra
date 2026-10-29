@@ -3,7 +3,7 @@
 <p align="center"><b>Экспериментальное x86_64-ядро на Rust</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0--rc.3--Foundation-blue?style=flat-square" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-0.2.0--rc.4--Foundation-blue?style=flat-square" alt="Version"/>
   <img src="https://img.shields.io/badge/target-x86__64-orange?style=flat-square" alt="Target"/>
   <img src="https://img.shields.io/badge/Rust-no__std-red?style=flat-square" alt="Rust"/>
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License"/>
@@ -13,7 +13,7 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.3`
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.4`
 обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 

@@ -1,6 +1,6 @@
 # Roadmap — Vibra Kernel
 
-> Текущая версия: **0.2.0-rc.3 «Foundation RC3»**.
+> Текущая версия: **0.2.0-rc.4 «Foundation RC4»**.
 > Цель: стабильное диагностическое ядро на реальном x86_64-железе, не ОС.
 
 ## Принципы
@@ -22,7 +22,7 @@
 
 ## 0.2.0 «Foundation» — воспроизводимый x86_64 boot
 
-- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.3`.
+- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.4`.
 - [x] Runtime panic/page-fault checks в изолированной QEMU VM: panic screen,
   CR2, error code, access flags, RIP/RSP/RFLAGS и source location подтверждены.
 - [x] Безопасный runtime W^X check: `diag wxtest` подтвердил read-only `.rodata`
