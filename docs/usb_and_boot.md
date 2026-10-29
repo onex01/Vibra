@@ -15,7 +15,7 @@ PCI-контроллер и выводить диагностические ре
 План: корректный reset и BIOS handoff → DCBAA/command/event rings → port reset
 → Address Device → descriptors/configuration → HID boot keyboard.
 
-В `0.2.0-rc.2` xHCI enumeration и HID boot keyboard уже работают в QEMU
+В `0.2.0-rc.3` xHCI enumeration и HID boot keyboard уже работают в QEMU
 (`make keyboard-test` проверяет PS/2 и USB-ввод через monitor `sendkey`), но на
 физическом железе это по-прежнему не подтверждено.
 

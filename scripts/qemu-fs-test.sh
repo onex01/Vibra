@@ -61,7 +61,7 @@ mkfs.fat -F 32 -n FSTEST "$img_fat" >/dev/null
 mmd -i "$img_fat" ::/docs
 mcopy -i "$img_fat" "$tmp_dir/hello.txt" ::/hello.txt
 mcopy -i "$img_fat" "$tmp_dir/long.txt" "::/docs/Long File Name.txt"
-mcopy -i "$img_fat" "$tmp_dir/long.txt" ::/docs/lfn_test.txt
+mcopy -i "$img_fat" "$tmp_dir/long.txt" ::/docs/lfntest.txt
 
 # --- 2. ext2 (содержимое создаётся через mke2fs -d) ---
 mkdir -p "$tmp_dir/ext/sub"
@@ -90,18 +90,64 @@ dd if="$tmp_dir/part.img" of="$img_mbr" bs=512 seek=2048 conv=notrunc status=non
 echo "==> Booting QEMU and driving the shell over serial"
 rm -f "$log_file"
 
-# Команды подаём через FIFO: так QEMU не привязан к пайпу и мы можем
-# остановить его сразу после появления последнего ожидаемого маркера,
-# не дожидаясь таймаута.
-serial_in="$tmp_dir/serial.in"
-mkfifo "$serial_in"
-last_marker='hello from mbr partition'
+# Команды подаём через QEMU monitor (sendkey), как в clock/ramfs/keyboard
+# тестах. Старый вариант с FIFO + `-serial stdio` на GitHub Runner иногда
+# завершал QEMU с кодом 2 ещё до первой строки лога.
+qemu_key() {
+    case "$1" in
+        ' ') echo "spc" ;;
+        $'\n') echo "ret" ;;
+        '/') echo "slash" ;;
+        '.') echo "dot" ;;
+        '-') echo "minus" ;;
+        *) echo "$1" ;;
+    esac
+}
 
-"$qemu" \
+send_text() {
+    local text="$1" ch
+    for ((i = 0; i < ${#text}; i++)); do
+        ch="${text:i:1}"
+        echo "sendkey $(qemu_key "$ch")"
+        sleep 0.06
+    done
+}
+
+{
+    for _ in $(seq 1 "$ready_timeout"); do
+        if grep -Fq 'vibra:/>' "$log_file" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    sleep 2
+
+    send_text "mount /mnt fat32 sdb";        send_text $'\n'; sleep 2
+    send_text "ls /mnt";                     send_text $'\n'; sleep 2
+    send_text "cat /mnt/hello.txt";          send_text $'\n'; sleep 2
+    send_text "ls /mnt/docs";                send_text $'\n'; sleep 2
+    send_text "cat /mnt/docs/lfntest.txt";  send_text $'\n'; sleep 2
+
+    send_text "mount /mnt2 ext sdc";         send_text $'\n'; sleep 2
+    send_text "ls /mnt2";                    send_text $'\n'; sleep 2
+    send_text "cat /mnt2/hello.txt";         send_text $'\n'; sleep 2
+    send_text "ls /mnt2/sub";                send_text $'\n'; sleep 2
+    send_text "cat /mnt2/sub/nested.txt";    send_text $'\n'; sleep 2
+
+    send_text "mount /mnt3 ntfs sdd";        send_text $'\n'; sleep 2
+    send_text "ls /mnt3";                    send_text $'\n'; sleep 2
+    send_text "cat /mnt3/hello.txt";         send_text $'\n'; sleep 2
+
+    send_text "mount /mnt4 auto sde1";       send_text $'\n'; sleep 2
+    send_text "ls /mnt4/mbrdir";             send_text $'\n'; sleep 2
+    send_text "cat /mnt4/mbrdir/mbr.txt";    send_text $'\n'; sleep 3
+    echo "quit"
+} | timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+    "$qemu" \
     -m 256M \
-    -serial stdio \
+    -serial "file:$log_file" \
+    -monitor stdio \
     -display none \
-    -monitor none \
     -drive "if=pflash,format=raw,file=$repo_root/OVMF.fd,readonly=on" \
     -drive "file=$repo_root/build/hdd.img,format=raw" \
     -drive "file=$img_fat,format=raw" \
@@ -109,59 +155,7 @@ last_marker='hello from mbr partition'
     -drive "file=$img_ntfs,format=raw" \
     -drive "file=$img_mbr,format=raw" \
     -M q35 \
-    -no-reboot < "$serial_in" > "$log_file" 2>&1 &
-qemu_pid=$!
-
-{
-    exec 3> "$serial_in"
-    # Ждём prompt в serial-логе вместо фиксированной паузы: на медленных
-    # TCG-раннерах (CI без KVM) загрузка занимает заметно больше 12 секунд.
-    for _ in $(seq 1 "$ready_timeout"); do
-        grep -Fq 'vibra:/>' "$log_file" 2>/dev/null && break
-        sleep 1
-    done
-    printf 'mount /mnt fat32 sdb\r'        >&3; sleep 2
-    printf 'ls /mnt\r'                     >&3; sleep 2
-    printf 'cat /mnt/hello.txt\r'          >&3; sleep 2
-    printf 'ls /mnt/docs\r'                >&3; sleep 2
-    printf 'cat /mnt/docs/lfn_test.txt\r'  >&3; sleep 2
-
-    printf 'mount /mnt2 ext sdc\r'         >&3; sleep 2
-    printf 'ls /mnt2\r'                    >&3; sleep 2
-    printf 'cat /mnt2/hello.txt\r'         >&3; sleep 2
-    printf 'ls /mnt2/sub\r'                >&3; sleep 2
-    printf 'cat /mnt2/sub/nested.txt\r'    >&3; sleep 2
-
-    printf 'mount /mnt3 ntfs sdd\r'        >&3; sleep 2
-    printf 'ls /mnt3\r'                    >&3; sleep 2
-    printf 'cat /mnt3/hello.txt\r'         >&3; sleep 2
-
-    printf 'mount /mnt4 auto sde1\r'       >&3; sleep 2
-    printf 'ls /mnt4/mbrdir\r'             >&3; sleep 2
-    printf 'cat /mnt4/mbrdir/mbr.txt\r'    >&3; sleep 3
-
-    exec 3>&-
-} &
-writer_pid=$!
-
-deadline=$((SECONDS + timeout_seconds))
-while kill -0 "$qemu_pid" 2>/dev/null; do
-    if grep -Fq "$last_marker" "$log_file" 2>/dev/null; then
-        sleep 1
-        break
-    fi
-    if (( SECONDS >= deadline )); then
-        break
-    fi
-    sleep 1
-done
-
-kill -TERM "$qemu_pid" 2>/dev/null || true
-sleep 1
-kill -KILL "$qemu_pid" 2>/dev/null || true
-kill -KILL "$writer_pid" 2>/dev/null || true
-wait "$qemu_pid" 2>/dev/null || true
-wait "$writer_pid" 2>/dev/null || true
+    -no-reboot || true
 
 failed=0
 : > "$report"

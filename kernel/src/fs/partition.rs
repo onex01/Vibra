@@ -64,8 +64,12 @@ impl PartitionDisk {
 
     fn check(&self, sector: u64, buf: &[u8]) -> Result<(), FsError> {
         if buf.is_empty() || buf.len() % 512 != 0 { return Err(FsError::InvalidPath); }
-        let count = (buf.len() / 512) as u64;
-        if sector.checked_add(count).map_or(true, |end| end > self.sectors) {
+        let ss = self.inner.lock().sector_size() as u64;
+        let start_byte = sector.checked_mul(512).ok_or(FsError::IoError)?;
+        let end_byte = start_byte
+            .checked_add(buf.len() as u64)
+            .ok_or(FsError::IoError)?;
+        if end_byte > self.sectors.checked_mul(ss).ok_or(FsError::IoError)? {
             return Err(FsError::IoError);
         }
         Ok(())
@@ -75,12 +79,27 @@ impl PartitionDisk {
 impl DiskIo for PartitionDisk {
     fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), FsError> {
         self.check(sector, buf)?;
-        self.inner.lock().read(self.offset + sector, buf)
+        let ss = self.inner.lock().sector_size() as u64;
+        let byte_offset = self.offset.checked_mul(ss).ok_or(FsError::IoError)?
+            + sector.checked_mul(512).ok_or(FsError::IoError)?;
+        self.inner.lock().read(byte_offset / 512, buf)
     }
 
     fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), FsError> {
         self.check(sector, buf)?;
-        self.inner.lock().write(self.offset + sector, buf)
+        let ss = self.inner.lock().sector_size() as u64;
+        let byte_offset = self.offset.checked_mul(ss).ok_or(FsError::IoError)?
+            + sector.checked_mul(512).ok_or(FsError::IoError)?;
+        self.inner.lock().write(byte_offset / 512, buf)
+    }
+
+    fn sector_size(&self) -> usize {
+        self.inner.lock().sector_size()
+    }
+
+    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
+        let target = self.offset.checked_add(lba).ok_or(FsError::IoError)?;
+        self.inner.lock().read_lba(target, buf)
     }
 }
 
@@ -198,9 +217,10 @@ const GUID_LINUX_DATA: [u8; 16] = [
 
 /// Читает GPT-заголовок (LBA 1) и массив записей разделов.
 fn parse_gpt(disk: &mut dyn DiskIo) -> Option<Vec<Partition>> {
+    let ss = disk.sector_size().max(512);
     let mut hdr = [0u8; 512];
-    disk.read(1, &mut hdr).ok()?;
-    if &hdr[0..8] != GPT_SIG { return None; }
+    disk.read_lba(1, &mut hdr).ok()?;
+    if hdr.len() < 92 || &hdr[0..8] != GPT_SIG { return None; }
 
     let header_size = u32_at(&hdr, 12) as usize;
     if !(92..=512).contains(&header_size) { return None; }
@@ -215,33 +235,48 @@ fn parse_gpt(disk: &mut dyn DiskIo) -> Option<Vec<Partition>> {
     let entries_lba = u64_at(&hdr, 72);
     let num_entries = u32_at(&hdr, 80) as usize;
     let entry_size = u32_at(&hdr, 84) as usize;
-    // 128 — минимальный размер записи по спецификации; верхний предел
-    // защищает от повреждённого заголовка, где entry_size = 0xFFFFFFFF.
     if !(128..=4096).contains(&entry_size) || num_entries == 0 || num_entries > 1024 {
         return None;
     }
+    if entry_size > ss { return None; }
 
-    // Читаем записи одним куском, чтобы не делать по сектору на запись.
-    let total = num_entries.checked_mul(entry_size)?;
-    let sectors = (total + 511) / 512;
-    let mut buf = alloc::vec![0u8; sectors * 512];
-    disk.read(entries_lba, &mut buf).ok()?;
-
+    let mut part = [0u8; 4096];
     let mut parts = Vec::new();
-    for i in 0..num_entries {
-        let off = i * entry_size;
-        // Нулевой type GUID = неиспользуемая запись.
-        if buf[off..off + 16].iter().all(|&b| b == 0) { continue; }
 
-        let first = u64_at(&buf, off + 32);
-        let last = u64_at(&buf, off + 40);
+    // Записи GPT лежат подряд в LBA-секторах устройства. На 4Kn одна
+    // запись может занимать часть 4096-байтного сектора, поэтому читаем
+    // по Logical Block Address, а не байтовым смещением/512.
+    for i in 0..num_entries {
+        let byte_offset = i.checked_mul(entry_size)?;
+        let lba = entries_lba.checked_add((byte_offset / ss) as u64)?;
+        let in_sector = byte_offset % ss;
+        if in_sector + entry_size > ss {
+            // Запись на границе секторов — читаем два сектора подряд.
+            let mut two = alloc::vec![0u8; ss * 2];
+            disk.read_lba(lba, &mut two[..ss]).ok()?;
+            disk.read_lba(lba + 1, &mut two[ss..]).ok()?;
+            part[..entry_size]
+                .copy_from_slice(&two[in_sector..in_sector + entry_size]);
+        } else {
+            let mut sector = alloc::vec![0u8; ss];
+            disk.read_lba(lba, &mut sector).ok()?;
+            part[..entry_size]
+                .copy_from_slice(&sector[in_sector..in_sector + entry_size]);
+        }
+        let entry = &part[..entry_size];
+
+        // Нулевой type GUID = неиспользуемая запись.
+        if entry[..16].iter().all(|&b| b == 0) { continue; }
+
+        let first = u64_at(entry, 32);
+        let last = u64_at(entry, 40);
         if last < first { continue; }
 
-        let kind = if guid_eq(&buf, off, &GUID_EFI_SYSTEM) {
+        let kind = if guid_eq(entry, 0, &GUID_EFI_SYSTEM) {
             PartKind::Efi
-        } else if guid_eq(&buf, off, &GUID_LINUX_DATA) {
+        } else if guid_eq(entry, 0, &GUID_LINUX_DATA) {
             PartKind::Linux
-        } else if guid_eq(&buf, off, &GUID_MS_BASIC_DATA) {
+        } else if guid_eq(entry, 0, &GUID_MS_BASIC_DATA) {
             PartKind::Data
         } else {
             PartKind::Unknown
@@ -252,7 +287,7 @@ fn parse_gpt(disk: &mut dyn DiskIo) -> Option<Vec<Partition>> {
             start_lba: first,
             sectors: last - first + 1,
             kind,
-            label: utf16_name(&buf, off + 56, 36),
+            label: utf16_name(entry, 56, 36),
         });
     }
 
@@ -277,7 +312,11 @@ pub fn read_partitions(disk: &mut dyn DiskIo) -> Vec<Partition> {
 
 /// Определить тип ФС по первым секторам раздела.
 pub fn detect_fs_type(disk: &mut dyn DiskIo) -> &'static str {
-    let mut s = [0u8; 512];
+    // Читаем 2 КиБ: NTFS/FAT/exFAT signature находятся в первом секторе,
+    // ext2 superblock — по байтовому смещению 1024. На 4Kn-диске это
+    // внутри первого 4096-байтного блока, поэтому нельзя просто читать
+    // "сектор 2" как 512-байтный.
+    let mut s = [0u8; 2048];
     if disk.read(0, &mut s).is_err() { return "unknown"; }
 
     // NTFS: OEM ID "NTFS    " по смещению 3.
@@ -289,10 +328,8 @@ pub fn detect_fs_type(disk: &mut dyn DiskIo) -> &'static str {
     // FAT32: сигнатура 0x55AA + "FAT32" в поле типа ФС (offset 82).
     if s[510] == 0x55 && s[511] == 0xAA && &s[82..87] == b"FAT32" { return "fat32"; }
 
-    // ext2/3/4: магия 0xEF53 в суперблоке (смещение 1024 + 56 = 1080,
-    // то есть байт 56 в секторе 2).
-    let mut sb = [0u8; 512];
-    if disk.read(2, &mut sb).is_ok() && u16::from_le_bytes([sb[56], sb[57]]) == 0xEF53 {
+    // ext2/3/4: магия 0xEF53 в суперблоке (смещение 1024 + 56).
+    if u16::from_le_bytes([s[1024 + 56], s[1024 + 57]]) == 0xEF53 {
         return "ext2";
     }
 

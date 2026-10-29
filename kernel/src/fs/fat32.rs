@@ -724,7 +724,14 @@ impl Fat32Fs {
         // FAT32: fat_size_16 == 0 и root_entry_count == 0 (корневой каталог —
         // обычная цепочка кластеров, а не фиксированная область). Если это не
         // так, перед нами FAT12/16 и раскладка data-области другая.
-        if boot.bytes_per_sector != 512 || boot.fat_size_16 != 0 || boot.root_entry_count != 0 {
+        // bytes_per_sector может быть 512 или 4096 (4Kn): FS-слой работает
+        // в 512-байтных секторах, поэтому геометрию масштабируем.
+        let sector_shift = match boot.bytes_per_sector {
+            512 => 1u64,
+            4096 => 8u64,
+            _ => return Err(FsError::InvalidPath),
+        };
+        if boot.fat_size_16 != 0 || boot.root_entry_count != 0 {
             return Err(FsError::InvalidPath);
         }
         if boot.sectors_per_cluster == 0 || !boot.sectors_per_cluster.is_power_of_two() {
@@ -739,33 +746,52 @@ impl Fat32Fs {
             return Err(FsError::InvalidPath);
         }
 
-        let fat_start = boot.reserved_sectors as u64;
-        let fat_size = boot.fat_size_32 as u64;
+        let spc_512 = (boot.sectors_per_cluster as u64)
+            .checked_mul(sector_shift)
+            .ok_or(FsError::InvalidPath)?;
+        if spc_512 > u8::MAX as u64 {
+            return Err(FsError::InvalidPath);
+        }
+
+        let fat_start = (boot.reserved_sectors as u64)
+            .checked_mul(sector_shift)
+            .ok_or(FsError::InvalidPath)?;
+        let fat_size = (boot.fat_size_32 as u64)
+            .checked_mul(sector_shift)
+            .ok_or(FsError::InvalidPath)?;
         let data_start = fat_start + (boot.fat_count as u64 * fat_size)
             + ((boot.root_entry_count as u64 * 32 + 511) / 512);
-        let cluster_size = boot.bytes_per_sector as u32 * boot.sectors_per_cluster as u32;
+        let cluster_size = (512u64 * spc_512) as u32;
         let total_sectors = if boot.total_sectors_16 != 0 {
             boot.total_sectors_16 as u64
         } else {
             boot.total_sectors_32 as u64
-        };
+        }
+        .checked_mul(sector_shift)
+        .ok_or(FsError::InvalidPath)?;
         let data_sectors = total_sectors.saturating_sub(data_start);
-        let total_clusters = (data_sectors / boot.sectors_per_cluster as u64) as u32;
+        let total_clusters = (data_sectors / spc_512) as u32;
         if total_clusters < 2 {
             return Err(FsError::InvalidPath);
         }
+
+        let fs_info_sector = (boot.fs_info_sector as u64)
+            .checked_mul(sector_shift)
+            .filter(|v| *v <= u16::MAX as u64)
+            .map(|v| v as u16)
+            .unwrap_or(0);
 
         Ok(Self {
             disk: shared,
             geo: Fat32Geo {
                 fat_start_sector: fat_start,
                 fat_count: boot.fat_count,
-                fat_size: boot.fat_size_32,
+                fat_size: fat_size as u32,
                 data_start_sector: data_start,
-                sectors_per_cluster: boot.sectors_per_cluster,
+                sectors_per_cluster: spc_512 as u8,
                 cluster_size,
                 root_cluster: boot.root_cluster,
-                fs_info_sector: boot.fs_info_sector,
+                fs_info_sector,
                 total_clusters,
                 volume_label: boot.volume_label,
             },

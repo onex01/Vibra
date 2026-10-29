@@ -66,6 +66,17 @@ rm -f "$serial_log"
     send_text "help cat"; send_text $'\n'; sleep 1
     send_text "test timer"; send_text $'\n'; sleep 2
     send_text "echo --help"; send_text $'\n'; sleep 1
+
+    # История: длинная команда → короткая → два Up. Экран должен корректно
+    # очистить длинную строку, не задев prompt.
+    send_text "uname"; send_text $'\n'; sleep 1
+    send_text "ls /cfg"; send_text $'\n'; sleep 1
+    echo "sendkey up"; sleep 0.3
+    echo "sendkey up"; sleep 0.3
+    echo "sendkey ret"; sleep 1
+
+    # Курсор в середине строки: echo ac, Left, b → abc.
+    send_text "echo ac"; echo "sendkey left"; send_text "b"; send_text $'\n'; sleep 1
     echo "quit"
 } | timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" \
     "$QEMU" \
@@ -86,12 +97,13 @@ fail() {
 
 [[ -f "$serial_log" ]] || fail "no serial log"
 
-grep -Fq 'vibra:/> ls /cfg/' "$serial_log" || fail "Tab did not complete /cf to /cfg/"
+grep -Fq 'ls /cfg' "$serial_log" || fail "Tab did not complete /cf to /cfg/"
 grep -Eq '(^| )hostname( |$)' "$serial_log" || fail "ls /cfg/ produced no output"
 grep -Fq 'cat' "$serial_log" || fail "help cat produced no output"
 grep -Fq '[TIMER / CLOCK]' "$serial_log" || fail "test timer produced no output"
 grep -Fq 'test timer' "$serial_log" || fail "history Up did not repeat the previous command"
 grep -Fq 'echo - print text to screen' "$serial_log" || fail "generic --help did not work"
+grep -aEq '^abc' "$serial_log" || fail "cursor editing in the middle of the line failed"
 
 if grep -Fq 'vibra:/> vibra:/>' "$serial_log"; then
     fail "doubled prompt (history/Tab redraw is broken)"

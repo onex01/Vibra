@@ -74,6 +74,14 @@ impl DiskIo for DiskView {
     fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), FsError> {
         self.0.lock().write(sector, buf)
     }
+
+    fn sector_size(&self) -> usize {
+        self.0.lock().sector_size()
+    }
+
+    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
+        self.0.lock().read_lba(lba, buf)
+    }
 }
 
 /// Записи MBR: `(start_lba, sectors, type)`.

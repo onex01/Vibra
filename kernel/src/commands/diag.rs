@@ -1,4 +1,5 @@
 use crate::framebuffer::Console;
+use crate::fs::DiskIo;
 use super::CmdResult;
 
 pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
@@ -13,6 +14,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  hw         - SMBIOS + ACPI tables + FADT flags\n");
         console.print("  power      - ACPI poweroff path (PM1_CNT, _S5 SLP_TYP)\n");
         console.print("  usb        - xHCI controllers, devices, storage, log sink\n");
+        console.print("  disk       - block devices, sector size and FS signatures\n");
         console.print("  timer      - clock sources, IRQ tick rate, RTC/BIOS time\n");
         console.print("  heap-test  - full heap stress test (10k alloc/drop)\n");
         console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
@@ -35,6 +37,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
             console.print("\n");
         }
         "usb" => diag_usb(console),
+        "disk" | "blk" => diag_disk(console),
         "timer" => diag_timer(console),
         "heap-test" => diag_heap_test(console),
         "fault-test" => diag_fault_test(console),
@@ -427,6 +430,84 @@ fn diag_timer(console: &mut Console) {
 
 fn diag_hw(console: &mut Console) {
     super::diag_hw::diag_hw(console);
+}
+
+fn diag_disk(console: &mut Console) {
+    console.print_colored("[BLOCK DEVICES]\n", crate::framebuffer::COLOR_CYAN);
+
+    let infos = crate::drivers::ahci::get_disk_info();
+    for info in &infos {
+        console.print(&alloc::format!(
+            "  AHCI: {} {} sectors, {} B/sector, serial={}\n",
+            info.model, info.total_sectors, info.sector_size, info.serial
+        ));
+    }
+    if let Some((blocks, block_size)) = crate::drivers::nvme::disk_info() {
+        console.print(&alloc::format!(
+            "  NVMe: {} blocks, {} B/block\n",
+            blocks, block_size
+        ));
+    }
+
+    let mgr = crate::fs::get_disk_manager().lock();
+    if mgr.count() == 0 {
+        console.print_colored("  no registered block devices\n", crate::framebuffer::COLOR_YELLOW);
+        return;
+    }
+
+    for (index, entry) in mgr.entries().iter().enumerate() {
+        console.print(&alloc::format!(
+            "  [{}] {} ({}) {} sectors, fs={}\n",
+            index, entry.name, entry.kind, entry.sectors, entry.fs_type
+        ));
+
+        let Some(mut disk) = mgr.open(index) else {
+            console.print_colored("      open failed\n", crate::framebuffer::COLOR_RED);
+            continue;
+        };
+
+        let mut sector = [0u8; 512];
+        match disk.read(0, &mut sector) {
+            Ok(()) => {
+                let hex: alloc::string::String = sector[..16]
+                    .iter()
+                    .map(|b| alloc::format!("{:02x} ", b))
+                    .collect();
+                console.print(&alloc::format!("      sector0: {}\n", hex));
+
+                let mut kind = "unknown";
+                if &sector[3..11] == b"NTFS    " {
+                    kind = "NTFS";
+                } else if &sector[3..11] == b"EXFAT   " {
+                    kind = "exFAT";
+                } else if sector[510] == 0x55
+                    && sector[511] == 0xAA
+                    && &sector[82..87] == b"FAT32"
+                {
+                    kind = "FAT32";
+                } else if sector[446 + 4] == 0xEE {
+                    kind = "GPT protective MBR";
+                } else if sector[510] == 0x55 && sector[511] == 0xAA {
+                    kind = "MBR";
+                }
+
+                let mut sb = [0u8; 512];
+                if disk.read(2, &mut sb).is_ok()
+                    && sb[56] == 0x53
+                    && sb[57] == 0xEF
+                {
+                    kind = "ext2/3/4";
+                }
+                console.print(&alloc::format!("      signature: {}\n", kind));
+            }
+            Err(error) => {
+                console.print_colored(
+                    &alloc::format!("      read sector0 failed: {:?}\n", error),
+                    crate::framebuffer::COLOR_RED,
+                );
+            }
+        }
+    }
 }
 
 fn diag_usb(console: &mut Console) {

@@ -783,6 +783,25 @@ impl crate::fs::disk::DiskIo for NvmeDisk {
         let ctrl = guard.as_mut().ok_or(crate::fs::vfs::FsError::IoError)?;
         ctrl.write_bytes(sector.saturating_mul(512), buf)
     }
+
+    fn sector_size(&self) -> usize {
+        NVME_CONTROLLER
+            .lock()
+            .as_ref()
+            .map(|ctrl| ctrl.block_size as usize)
+            .unwrap_or(512)
+    }
+
+    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let mut guard = NVME_CONTROLLER.lock();
+        let ctrl = guard.as_mut().ok_or(crate::fs::vfs::FsError::IoError)?;
+        let ss = ctrl.block_size as usize;
+        let mut tmp = alloc::vec![0u8; ss];
+        unsafe { ctrl.read_dev(lba, 1, &mut tmp)? };
+        let count = buf.len().min(ss);
+        buf[..count].copy_from_slice(&tmp[..count]);
+        Ok(())
+    }
 }
 
 /// Реализация DiskIo для NVMe (оставлена для прямого доступа к контроллеру).
@@ -793,6 +812,19 @@ impl crate::fs::disk::DiskIo for NvmeController {
 
     fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
         self.write_bytes(sector.saturating_mul(512), buf)
+    }
+
+    fn sector_size(&self) -> usize {
+        self.block_size as usize
+    }
+
+    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let ss = self.block_size as usize;
+        let mut tmp = alloc::vec![0u8; ss];
+        unsafe { self.read_dev(lba, 1, &mut tmp)? };
+        let count = buf.len().min(ss);
+        buf[..count].copy_from_slice(&tmp[..count]);
+        Ok(())
     }
 }
 

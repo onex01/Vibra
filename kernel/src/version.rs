@@ -2,10 +2,10 @@
 /// Изменяй версии ТОЛЬКО здесь!
 
 /// Версия ядра
-pub const KERNEL_VERSION: &str = "0.2.0-rc.2";
+pub const KERNEL_VERSION: &str = "0.2.0-rc.3";
 
 /// Кодовое название ядра
-pub const KERNEL_CODENAME: &str = "Foundation RC2";
+pub const KERNEL_CODENAME: &str = "Foundation RC3";
 
 /// Автор проекта
 pub const AUTHOR: &str = "OneX01";

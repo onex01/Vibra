@@ -1,6 +1,6 @@
 # Roadmap — Vibra Kernel
 
-> Текущая версия: **0.2.0-rc.2 «Foundation RC2»**.
+> Текущая версия: **0.2.0-rc.3 «Foundation RC3»**.
 > Цель: стабильное диагностическое ядро на реальном x86_64-железе, не ОС.
 
 ## Принципы
@@ -22,7 +22,7 @@
 
 ## 0.2.0 «Foundation» — воспроизводимый x86_64 boot
 
-- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.2`.
+- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.3`.
 - [x] Runtime panic/page-fault checks в изолированной QEMU VM: panic screen,
   CR2, error code, access flags, RIP/RSP/RFLAGS и source location подтверждены.
 - [x] Безопасный runtime W^X check: `diag wxtest` подтвердил read-only `.rodata`
@@ -90,6 +90,12 @@
   сохраняется, курсор корректно перерисовывается; `Ctrl+C`/`Ctrl+Z`.
 - [x] `beep` использует монотонные часы и корректный делитель PIT; `test`
   объединяет системные проверки; `cmd --help` работает для всех команд.
+- [x] 4Kn/GPT: `DiskIo::read_lba` и `sector_size`; GPT-записи читаются по
+  логическим секторам, FAT32 масштабирует BPB 4096 → 512; `diag disk`
+  печатает размер сектора и сигнатуры ФС.
+- [x] Shell redraw: экранное состояние (`screen_len`/`screen_cursor`) вместо
+  нового буфера истории — prompt больше не стирается при Up/Down любой длины.
+- [x] `mount /dev/sdX1 /mnt [rw]` и `mount /mnt sdX1` — Linux-подобные формы.
 - [x] Запись логов: дисковый приёмник `VIBRALOG` собирается всегда (был под
   feature `boot-log-to-usb`); исправлен троттлинг `attach()` после boot;
   команды `log sink`/`log flush`/`log path`; `quit`/`reboot` сохраняют лог.

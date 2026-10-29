@@ -15,12 +15,15 @@ pub struct LineEditor {
     history_lens: [usize; HISTORY_SIZE],
     history_count: usize,
     history_idx: usize,
-    prompt_buf: [u8; 128], // буфер для prompt строки
+    prompt_buf: [u8; 128],
     prompt_len: usize,
     prompt_color: u32,
-    // Для циклического дополнения по Tab
-    tab_index: i32,        // -1 = нет активного дополнения, иначе индекс совпадения
-    tab_match_count: usize, // количество совпадений при последнем нажатии Tab
+    // Что реально нарисовано в строке ввода. Нужно для корректной очистки:
+    // нельзя опираться на новый len/cursor после загрузки истории.
+    screen_len: usize,
+    screen_cursor: usize,
+    tab_index: i32,
+    tab_match_count: usize,
 }
 
 impl LineEditor {
@@ -36,6 +39,8 @@ impl LineEditor {
             prompt_buf: [0; 128],
             prompt_len: 0,
             prompt_color: crate::framebuffer::COLOR_VIBRA_PROMPT,
+            screen_len: 0,
+            screen_cursor: 0,
             tab_index: -1,
             tab_match_count: 0,
         }
@@ -46,71 +51,55 @@ impl LineEditor {
         self.cursor = 0;
         self.history_idx = self.history_count;
         self.prompt_len = prompt_len;
+        self.screen_len = 0;
+        self.screen_cursor = 0;
         let mut last_heartbeat_ms = crate::timer::uptime_ms();
         let mut last_log_flush_ms = last_heartbeat_ms;
+
         loop {
-            // Boot-лог сбрасываем на USB раз в секунду, пока ждём ввода:
-            // shell простаивает, а лог после boot всё ещё может дописываться
-            // (например, при горячем подключении USB).
             let now_ms = crate::timer::uptime_ms();
             if now_ms.saturating_sub(last_log_flush_ms) >= 1000 {
                 last_log_flush_ms = now_ms;
                 crate::boot_log::checkpoint();
             }
 
-            // Serial (COM1) + PS/2 keyboard. Keyboard Unknown scancodes
-            // теперь возвращают None → не блокируют serial polling.
             let next_key = crate::serial::poll_key().or_else(keyboard::poll_key);
             if let Some(key) = next_key {
                 match key {
                     Key::Enter => {
                         console.put_char('\n');
+                        self.screen_len = 0;
+                        self.screen_cursor = 0;
                         self.save_to_history();
                         return self.as_str();
                     }
                     Key::Backspace => {
                         if self.cursor > 0 {
-                            // Сдвигаем всё влево
                             for i in self.cursor..self.len {
-                                self.buffer[i-1] = self.buffer[i];
+                                self.buffer[i - 1] = self.buffer[i];
                             }
                             self.len -= 1;
                             self.cursor -= 1;
-                            
-                            // Терминальный backspace: удаляем символ
-                            console.put_char('\x08');
-                            console.put_char(' ');
-                            console.put_char('\x08');
-                            
-                            // Перепечатываем остаток строки
-                            for i in self.cursor..self.len {
-                                console.put_char(self.buffer[i] as char);
-                            }
-                            // Возвращаем курсор на место
-                            for _ in self.cursor..self.len {
-                                console.put_char('\x08');
-                            }
+                            self.redraw_line(console);
                         }
                     }
                     Key::Left => {
                         if self.cursor > 0 {
                             self.cursor -= 1;
-                            console.put_char('\x08');
+                            self.redraw_line(console);
                         }
                     }
                     Key::Right => {
                         if self.cursor < self.len {
-                            let ch = self.buffer[self.cursor] as char;
-                            console.put_char(ch);
                             self.cursor += 1;
+                            self.redraw_line(console);
                         }
                     }
                     Key::Up => {
                         if self.history_count > 0 && self.history_idx > 0 {
                             self.history_idx -= 1;
                             self.load_from_history(self.history_idx);
-                            // Перепечатываем всю строку
-                            self.reprint_line(console);
+                            self.redraw_line(console);
                         }
                     }
                     Key::Down => {
@@ -122,98 +111,85 @@ impl LineEditor {
                             } else {
                                 self.load_from_history(self.history_idx);
                             }
-                            self.reprint_line(console);
+                            self.redraw_line(console);
                         }
                     }
                     Key::Tab => {
                         self.tab_complete(console);
                     }
                     Key::Char(ch) => {
-                        // Сброс циклического дополнения при нажатии любой клавиши
                         if ch != '\x01' && ch != '\x05' && ch != '\x0B'
                             && ch != '\x0C' && ch != '\x15' && ch != '\x1A'
+                            && ch != '\x03'
                         {
                             self.tab_index = -1;
                         }
-                        // Ctrl+A — начало строки
-                        if ch == '\x01' {
-                            self.cursor = 0;
-                            self.reprint_line(console);
-                        }
-                        // Ctrl+E — конец строки
-                        else if ch == '\x05' {
-                            self.cursor = self.len;
-                            self.reprint_line(console);
-                        }
-                        // Ctrl+K — удалить от курсора до конца
-                        else if ch == '\x0B' {
-                            self.len = self.cursor;
-                            self.reprint_line(console);
-                        }
-                        // Ctrl+U — удалить от начала до курсора
-                        else if ch == '\x15' {
-                            if self.cursor > 0 {
-                                for i in self.cursor..self.len {
-                                    self.buffer[i - self.cursor] = self.buffer[i];
-                                }
-                                self.len -= self.cursor;
+
+                        match ch {
+                            '\x01' => { // Ctrl+A
                                 self.cursor = 0;
-                                self.reprint_line(console);
+                                self.redraw_line(console);
                             }
-                        }
-                        // Ctrl+L — очистить экран и перерисовать prompt + строку
-                        else if ch == '\x0C' {
-                            console.clear();
-                            if let Ok(p) = core::str::from_utf8(&self.prompt_buf[..self.prompt_len]) {
-                                console.print(p);
+                            '\x05' => { // Ctrl+E
+                                self.cursor = self.len;
+                                self.redraw_line(console);
                             }
-                            self.reprint_line(console);
-                        }
-                        // Ctrl+C — отмена текущей строки/команды
-                        else if ch == '\x03' {
-                            crate::request_cancel();
-                            self.len = 0;
-                            self.cursor = 0;
-                            console.print_colored("^C\n", crate::framebuffer::COLOR_RED);
-                            return "";
-                        }
-                        // Ctrl+Z (0x1A) — отмена текущей команды
-                        else if ch == '\x1A' {
-                            crate::request_cancel();
-                            // Очищаем строку и возвращаем пустую
-                            self.len = 0;
-                            self.cursor = 0;
-                            console.put_char('\n');
-                            return "";
-                        }
-                        else if self.len < MAX_LINE - 1 {
-                            // Вставляем символ
-                            for i in (self.cursor..self.len).rev() {
-                                self.buffer[i+1] = self.buffer[i];
+                            '\x0B' => { // Ctrl+K
+                                self.len = self.cursor;
+                                self.redraw_line(console);
                             }
-                            self.buffer[self.cursor] = ch as u8;
-                            self.len += 1;
-                            self.cursor += 1;
-                            
-                            // Просто печатаем символ
-                            console.put_char(ch);
-                            
-                            // Перепечатываем остаток строки
-                            for i in self.cursor..self.len {
-                                console.put_char(self.buffer[i] as char);
+                            '\x15' => { // Ctrl+U
+                                if self.cursor > 0 {
+                                    for i in self.cursor..self.len {
+                                        self.buffer[i - self.cursor] = self.buffer[i];
+                                    }
+                                    self.len -= self.cursor;
+                                    self.cursor = 0;
+                                    self.redraw_line(console);
+                                }
                             }
-                            // Возвращаем курсор
-                            for _ in self.cursor..self.len {
-                                console.put_char('\x08');
+                            '\x0C' => { // Ctrl+L
+                                console.clear();
+                                self.print_prompt(console);
+                                self.screen_len = 0;
+                                self.screen_cursor = 0;
+                                self.redraw_line(console);
+                            }
+                            '\x03' => { // Ctrl+C
+                                crate::request_cancel();
+                                self.len = 0;
+                                self.cursor = 0;
+                                console.print_colored("^C\n", crate::framebuffer::COLOR_RED);
+                                self.screen_len = 0;
+                                self.screen_cursor = 0;
+                                return "";
+                            }
+                            '\x1A' => { // Ctrl+Z
+                                crate::request_cancel();
+                                self.len = 0;
+                                self.cursor = 0;
+                                console.put_char('\n');
+                                self.screen_len = 0;
+                                self.screen_cursor = 0;
+                                return "";
+                            }
+                            _ => {
+                                if self.len < MAX_LINE - 1 {
+                                    for i in (self.cursor..self.len).rev() {
+                                        self.buffer[i + 1] = self.buffer[i];
+                                    }
+                                    self.buffer[self.cursor] = ch as u8;
+                                    self.len += 1;
+                                    self.cursor += 1;
+                                    self.redraw_line(console);
+                                }
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            // Если ввода не было, спим до следующего прерывания вместо
-            // busy-loop. После принятого serial-байта не спим: так быстро
-            // разгружаем 16-байтный FIFO UART и не теряем длинные команды.
+
             if next_key.is_none() {
                 let now_ms = crate::timer::uptime_ms();
                 if now_ms.wrapping_sub(last_heartbeat_ms) >= 5_000 {
@@ -226,11 +202,7 @@ impl LineEditor {
                     last_heartbeat_ms = now_ms;
                 }
 
-                // Обновляем мигание курсора перед сном
                 console.update_cursor_blink();
-                // Если тиковый источник не работает, hlt может не вернуться
-                // (ввод идёт polling'ом и прерываний не генерирует) —
-                // timer::idle_wait в этом случае крутится в spin_loop.
                 crate::timer::idle_wait();
             }
         }
@@ -240,7 +212,6 @@ impl LineEditor {
         core::str::from_utf8(&self.buffer[..self.len]).unwrap_or("")
     }
 
-    /// Установить prompt строку (для tab completion)
     pub fn set_prompt(&mut self, prompt: &str) {
         let bytes = prompt.as_bytes();
         let len = bytes.len().min(self.prompt_buf.len());
@@ -248,7 +219,6 @@ impl LineEditor {
         self.prompt_len = len;
     }
 
-    /// Цвет prompt для перерисовки после Tab/истории.
     pub fn set_prompt_color(&mut self, color: u32) {
         self.prompt_color = color;
     }
@@ -259,37 +229,48 @@ impl LineEditor {
         }
     }
 
-    /// Стереть prompt + ввод и вернуть курсор в начало prompt.
-    fn clear_input_area(&self, console: &mut Console) {
-        // Сначала от текущей позиции курсора к началу строки ввода.
-        for _ in 0..self.cursor {
+    /// Перерисовать только строку ввода, не трогая prompt.
+    ///
+    /// Опирается на `screen_len`/`screen_cursor` — то, что реально на экране.
+    /// Иначе после загрузки истории новый `len` больше старого, и backspace
+    /// уезжает в prompt — ровно та проблема, из-за которой пропадал `vibra:/>`.
+    fn redraw_line(&mut self, console: &mut Console) {
+        for _ in 0..self.screen_cursor {
             console.put_char('\x08');
         }
-        let total = self.prompt_len + self.len;
-        for _ in 0..total {
-            console.put_char('\x08');
-        }
-        for _ in 0..total {
+        for _ in 0..self.screen_len {
             console.put_char(' ');
         }
-        for _ in 0..total {
+        for _ in 0..self.screen_len {
             console.put_char('\x08');
         }
+
+        if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
+            console.print(s);
+        }
+        for _ in self.cursor..self.len {
+            console.put_char('\x08');
+        }
+
+        self.screen_len = self.len;
+        self.screen_cursor = self.cursor;
     }
 
     fn save_to_history(&mut self) {
-        if self.len == 0 { return; }
+        if self.len == 0 {
+            return;
+        }
         if self.history_count < HISTORY_SIZE {
             self.history[self.history_count][..self.len].copy_from_slice(&self.buffer[..self.len]);
             self.history_lens[self.history_count] = self.len;
             self.history_count += 1;
         } else {
-            for i in 0..HISTORY_SIZE-1 {
-                self.history[i] = self.history[i+1];
-                self.history_lens[i] = self.history_lens[i+1];
+            for i in 0..HISTORY_SIZE - 1 {
+                self.history[i] = self.history[i + 1];
+                self.history_lens[i] = self.history_lens[i + 1];
             }
-            self.history[HISTORY_SIZE-1][..self.len].copy_from_slice(&self.buffer[..self.len]);
-            self.history_lens[HISTORY_SIZE-1] = self.len;
+            self.history[HISTORY_SIZE - 1][..self.len].copy_from_slice(&self.buffer[..self.len]);
+            self.history_lens[HISTORY_SIZE - 1] = self.len;
         }
         self.history_idx = self.history_count;
     }
@@ -301,86 +282,48 @@ impl LineEditor {
         self.cursor = src_len;
     }
 
-    // Перепечатывает текущую строку и позиционирует курсор.
-    //
-    // Важно: курсор может стоять в середине строки (стрелки/Home/End), поэтому
-    // сначала возвращаемся к её началу на self.cursor символов, а не на len.
-    // Иначе backspace «съедал» prompt `vibra:/>` — именно это ломало историю.
-    fn reprint_line(&self, console: &mut Console) {
-        for _ in 0..self.cursor {
-            console.put_char('\x08');
-        }
-        for _ in 0..self.len {
-            console.put_char(' ');
-        }
-        for _ in 0..self.len {
-            console.put_char('\x08');
-        }
-        if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
-            console.print(s);
-        }
-        for _ in self.cursor..self.len {
-            console.put_char('\x08');
-        }
-    }
-
     fn tab_complete(&mut self, console: &mut Console) {
-        let line = self.as_str();
+        let line = match core::str::from_utf8(&self.buffer[..self.len]) {
+            Ok(s) => String::from(s),
+            Err(_) => return,
+        };
 
-        // Есть пробел или путь — дополняем последнее слово как файл/каталог.
         if line.contains(' ') || line.starts_with('/') {
             self.complete_path(console);
             return;
         }
-
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return;
         }
 
-        // Автодополнение команд с циклическим переключением
         let mut matches: [&str; 32] = [""; 32];
         let mut n_matches = 0usize;
-
         for name in commands::command_names() {
             if name.starts_with(trimmed) && n_matches < 32 {
                 matches[n_matches] = name;
                 n_matches += 1;
             }
         }
-
         if n_matches == 0 {
             return;
         }
 
         self.tab_match_count = n_matches;
-
-        // Циклическое переключение совпадений
         if self.tab_index < 0 || self.tab_index >= n_matches as i32 {
             self.tab_index = 0;
         } else {
             self.tab_index = (self.tab_index + 1) % n_matches as i32;
         }
 
-        let selected = matches[self.tab_index as usize];
-
-        // Стираем prompt + ввод, сохраняя цвет prompt.
-        self.clear_input_area(console);
         self.len = 0;
         self.cursor = 0;
-        self.append_str(selected);
+        self.append_str(matches[self.tab_index as usize]);
         self.append_str(" ");
-
-        self.print_prompt(console);
-        if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
-            console.print(s);
-        }
+        self.redraw_line(console);
     }
 
-    /// Автодополнение последнего слова строки как пути.
-    ///
-    /// Работает и для `cat /tm`, и для `cp /a /b`, и для относительных путей:
-    /// дополняется только последний токен, предыдущие аргументы сохраняются.
+    /// Дополняет последнее слово строки как путь, сохраняя предыдущие аргументы.
     fn complete_path(&mut self, console: &mut Console) {
         let line = match core::str::from_utf8(&self.buffer[..self.len]) {
             Ok(s) => String::from(s),
@@ -397,7 +340,7 @@ impl LineEditor {
 
         let current_dir = crate::fs::get_current_dir();
         let (search_dir, display_prefix, name_prefix) = if let Some(slash) = word.rfind('/') {
-            let dir_part = &word[..=slash]; // вместе с завершающим '/'
+            let dir_part = &word[..=slash];
             let name = &word[slash + 1..];
             let search = if dir_part.starts_with('/') {
                 String::from(dir_part)
@@ -413,7 +356,6 @@ impl LineEditor {
 
         let entries = crate::fs::list_dir(&search_dir);
         let mut matches: alloc::vec::Vec<String> = alloc::vec::Vec::new();
-
         for entry in &entries {
             if !entry.name.starts_with(&name_prefix) {
                 continue;
@@ -425,32 +367,22 @@ impl LineEditor {
             }
             matches.push(full);
         }
-
         if matches.is_empty() {
             return;
         }
 
         self.tab_match_count = matches.len();
-
-        // Циклическое переключение совпадений
         if self.tab_index < 0 || self.tab_index >= matches.len() as i32 {
             self.tab_index = 0;
         } else {
             self.tab_index = (self.tab_index + 1) % matches.len() as i32;
         }
 
-        let completion = &matches[self.tab_index as usize];
-
-        self.clear_input_area(console);
         self.len = 0;
         self.cursor = 0;
         self.append_str(before);
-        self.append_str(completion);
-
-        self.print_prompt(console);
-        if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
-            console.print(s);
-        }
+        self.append_str(&matches[self.tab_index as usize]);
+        self.redraw_line(console);
     }
 
     fn append_str(&mut self, s: &str) {
@@ -463,12 +395,10 @@ impl LineEditor {
         }
     }
 
-    /// Количество записей в истории
     pub fn history_count(&self) -> usize {
         self.history_count
     }
 
-    /// Получить строку из истории по индексу
     pub fn history_entry(&self, idx: usize) -> Option<&str> {
         if idx >= self.history_count {
             return None;

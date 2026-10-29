@@ -54,18 +54,45 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  mount <path> ext <disk_id|name>      - mount EXT2/3/4 (read-only)\n");
         console.print("  mount <path> ntfs <disk_id|name>     - mount NTFS (read-only)\n");
         console.print("  mount <path> ramfs                   - mount RAMFS\n");
+        console.print("  mount /dev/sdX1 /mnt [rw]            - Linux-style alias\n");
         console.print("\n");
         console.print_colored("Write access to physical media is opt-in: pass 'rw' explicitly.\n", COLOR_YELLOW);
-    } else {
-        console.print_colored("Mounting filesystems...\n", COLOR_YELLOW);
-        
-        // Простая реализация для теста
-        let path = args.first().copied().unwrap_or("/");
-        
-        if args.len() >= 2 {
-            let fs_type = args[1];
+        return CmdResult::Ok;
+    }
 
-            // ramfs не требует диска.
+    // Принимаем и Linux-подобную форму: `mount /dev/sdb1 /mnt [rw]` и
+    // короткую `mount /mnt sdb1`. Раньше первый аргумент всегда считался
+    // путём, поэтому `/dev/sdb1 /mnt` давал «unknown filesystem /mnt».
+    let mut normalized: alloc::vec::Vec<&str> = args.to_vec();
+    let first_is_dev = args[0].starts_with("/dev/") || parse_disk_id(args[0]).is_some();
+    if first_is_dev && args.len() >= 2 && args[1].starts_with('/') {
+        let dev = args[0].trim_start_matches("/dev/");
+        let path = args[1];
+        let fs_type = args.get(2).copied().unwrap_or("auto");
+        normalized.clear();
+        normalized.push(path);
+        normalized.push(fs_type);
+        normalized.push(dev);
+        if args.iter().any(|a| *a == "rw") {
+            normalized.push("rw");
+        }
+    } else if args.len() == 2
+        && args[0].starts_with('/')
+        && !args[0].starts_with("/dev/")
+        && parse_disk_id(args[1]).is_some()
+    {
+        normalized.clear();
+        normalized.push(args[0]);
+        normalized.push("auto");
+        normalized.push(args[1]);
+    }
+    let args: &[&str] = &normalized;
+
+    if args.len() >= 2 {
+        let path = args[0];
+        let fs_type = args[1];
+
+        // ramfs не требует диска.
             if fs_type == "ramfs" {
                 console.print(&format!("  Mounting RAMFS at {}... ", path));
                 let mut ramfs = fs::RamFs::new();
@@ -151,11 +178,8 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 Ok(msg) => console.print_colored(&format!("{}\n", msg), COLOR_GREEN),
                 Err(e) => console.print_colored(&format!("FAILED: {}\n", e), COLOR_RED),
             }
-        } else {
-            console.print_colored("Usage: mount <path> <filesystem_type> [disk]\n", COLOR_RED);
-        }
     }
-    
+
     CmdResult::Ok
 }
 

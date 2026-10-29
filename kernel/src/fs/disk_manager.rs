@@ -130,5 +130,13 @@ impl DiskIo for WholeDisk {
     fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), super::vfs::FsError> {
         self.inner.lock().write(sector, buf)
     }
+
+    fn sector_size(&self) -> usize {
+        self.inner.lock().sector_size()
+    }
+
+    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), super::vfs::FsError> {
+        self.inner.lock().read_lba(lba, buf)
+    }
 }
 

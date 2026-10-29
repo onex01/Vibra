@@ -549,6 +549,21 @@ impl crate::fs::disk::DiskIo for AhciDisk {
     fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), crate::fs::vfs::FsError> {
         self.write_bytes(sector.saturating_mul(512), buf)
     }
+
+    fn sector_size(&self) -> usize {
+        self.sector_size as usize
+    }
+
+    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let ss = self.sector_size as usize;
+        let mut tmp = alloc::vec![0u8; ss];
+        if !read_sectors(self.port, lba, 1, &mut tmp) {
+            return Err(crate::fs::vfs::FsError::IoError);
+        }
+        let count = buf.len().min(ss);
+        buf[..count].copy_from_slice(&tmp[..count]);
+        Ok(())
+    }
 }
 
 impl AhciDisk {
