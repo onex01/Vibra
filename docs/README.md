@@ -53,6 +53,9 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | `BOOT_ITERATIONS=10 python3 scripts/qemu-boot-matrix.py` | повторяемость загрузки |
 | `python3 scripts/check-warning-budget.py` | бюджет предупреждений компилятора |
 
+Для ручной диагностики дисков есть `disks` и `disks -v`: имя, вид, размер,
+смещение и определённый тип ФС.
+
 `make fs-test` (`scripts/qemu-fs-test.sh`) сам создаёт тестовые образы
 (`mkfs.fat`, `mke2fs -t ext2`, `mke2fs -t ext4`, `mkntfs`, `sfdisk`) и
 прикладывает их к QEMU как `sdb`…`sdf`; результат пишется в

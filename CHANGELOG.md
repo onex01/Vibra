@@ -52,6 +52,10 @@
 - `vktst` (Vibra Kernel Tests): интерактивное меню, `vktst list`,
   `vktst run <id|all>`, `vktst report` с сохранением в
   `/var/log/vktst-<uptime>.log`.
+- `disks` / `disks -v`: блочные устройства, разделы, смещения и тип ФС —
+  быстрый ответ на «диск виден, но ФС unknown».
+- Консоль переводит Unicode-рамки в CP437, поэтому `tree`, `ps`, `tasks` и
+  таблицы снова рисуют `├──`, `│` и `─`, а не пустые ячейки.
 
 ### CI
 

@@ -228,7 +228,7 @@ fn draw(console: &mut Console, load: u32, rows: &[Row], interactive: bool) {
         COLOR_WHITE,
     );
     console.print_colored(
-        "─────  ───────  ─────  ────────  ────────────────────────\n",
+        "-----  -------  -----  --------  ------------------------\n",
         COLOR_DARK_GRAY,
     );
 

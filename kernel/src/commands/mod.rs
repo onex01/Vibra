@@ -52,6 +52,7 @@ pub mod systest;
 pub mod hidtest;
 pub mod test;
 pub mod vktst;
+pub mod disks;
 
 use crate::framebuffer::Console;
 
@@ -94,6 +95,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "uptime",  help: "show system uptime",         func: uptime::run },
     Command { name: "neofetch", help: "system info (logo + info)",  func: neofetch::run },
     Command { name: "mount",   help: "mount filesystems",          func: mount::run },
+    Command { name: "disks",   help: "list block devices/partitions", func: disks::run },
     Command { name: "kstat",    help: "show interrupt statistics", func: kstat::run },
     Command { name: "uname",    help: "system information",        func: uname::run },
     Command { name: "diag",     help: "run kernel diagnostics",    func: diag::run },

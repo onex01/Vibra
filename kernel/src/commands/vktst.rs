@@ -479,7 +479,7 @@ fn interactive(console: &mut Console) -> CmdResult {
     loop {
         console.clear();
         console.print_colored("Vibra Kernel Tests (vktst)\n", COLOR_CYAN);
-        console.print_colored("────────────────────────────\n", COLOR_DARK_GRAY);
+        console.print_colored("----------------------------\n", COLOR_DARK_GRAY);
         for (index, (id, description)) in TESTS.iter().enumerate() {
             console.print("  ");
             console.print_num(index + 1);
