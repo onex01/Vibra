@@ -2,7 +2,7 @@
 
 ## Область действия
 
-Vibra Kernel 0.2.0-rc.4 — экспериментальное модульное монолитное ядро для
+Vibra Kernel 0.2.0-rc.5 — экспериментальное модульное монолитное ядро для
 `x86_64-unknown-none`. Оно загружается Limine в UEFI и использует QEMU как
 основной тестовый стенд. Реальное оборудование пока не считается
 поддержанным; каждый драйвер должен получить отдельную hardware-валидацию.
@@ -80,21 +80,26 @@ CMOS), `kstat`, `uptime`.
 | `timer` | TSC/HPET/PIT часы, CMOS RTC, wall clock | TSC + HPET, RTC синхронизирован; IRQ-тики измеряются |
 | `drivers/pci`, `acpi` | обнаружение x86-оборудования | PCI + ACPI; BAR выше 4 ГБ переносятся в низкое MMIO-окно |
 | `drivers/usb` | xHCI lifecycle + HID boot keyboard | enumeration и HID-отчёты работают в QEMU |
-| `fs` | RamFS, VFS, block layer, FAT32/Ext2/NTFS (ro) | block layer + разделы + mount работают в QEMU |
+| `fs` | RamFS, VFS, block layer, FAT32 (rw для `VIBRALOG`), ext2/3/4 (ro), NTFS (ro) | block layer + MBR/EBR/GPT + ext4 extents работают в QEMU |
+| `drivers/ahci` | SATA + ATAPI CD | ATA read/write и ATAPI `PACKET`/`READ(10)` работают в QEMU |
+| `commands` | shell-команды | `top` (htop-like), `vktst`, `tree`, `free` |
 | `net` | Ethernet/ARP/IPv4/ICMP | QEMU-ориентированный, без DHCP/TCP |
 
 ## Ограничения архитектуры
 
 - ARM64-код является заглушкой и не входит в сборку/поддержку.
 - DMA-контракт и ownership страниц ещё не унифицированы.
-- Нет единого driver lifecycle: AHCI/NVMe/xHCI инициализируются разными путями,
-  а запись на диск пока не поддерживается ни одной ФС (только read-only).
+- Нет единого driver lifecycle: AHCI/NVMe/ATAPI/xHCI инициализируются разными
+  путями. Запись поддерживает только FAT32 (явный `rw`, используется для
+  `VIBRALOG`); ext2/3/4 и NTFS — read-only.
+- SMP не включён: работает только BSP, `top` показывает агрегированную
+  загрузку и помечает остальные логические CPU как неактивные.
 - GUI и `vibra/` не являются ядром release scope.
 - NX/XD опционален: `EFER.NXE` включается только при `CPUID.80000001H:EDX[20]`.
   Если в BIOS выключен «Execute Disable Bit», ядро не пишет MSR (иначе `#GP(0)`)
   и не ставит NX-биты в PTE — W^X деградирует, но boot продолжается.
 
 Следующие архитектурные шаги — PIC → LAPIC/IOAPIC и политика MSI/MSI-X, затем
-DMA-контракт для блочных драйверов и DHCP/ICMP. USB HID keyboard и xHCI
+SMP bring-up, DMA-контракт для блочных драйверов и DHCP/ICMP. USB HID keyboard и xHCI
 lifecycle реализованы (см. [usb_progress.md](usb_progress.md)), но ещё не
 подтверждены на физической машине. См. [roadmap.md](roadmap.md).

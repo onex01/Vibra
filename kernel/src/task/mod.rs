@@ -85,6 +85,9 @@ pub struct Task {
     pub cpu_ns: u64,
     /// Когда задача последний раз получала CPU (`timer::uptime_ns`).
     last_start_ns: u64,
+    /// Значение `timer::idle_ns()` на момент последнего входа в задачу.
+    /// Нужно, чтобы не засчитывать `hlt` как CPU-время задачи.
+    last_idle_ns: u64,
 }
 
 // SAFETY: kernel stack pointer used only by scheduler, single-threaded kernel
@@ -194,11 +197,13 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
     sched.tasks[cur].saved_rsp = ctx_ptr;
     // Per-task CPU time: сколько задача реально держала CPU между тиками.
     let now_ns = crate::timer::uptime_ns();
+    let idle_now = crate::timer::idle_ns();
     if sched.tasks[cur].last_start_ns != 0 {
-        sched.tasks[cur].cpu_ns = sched
-            .tasks[cur]
+        let wall = now_ns.saturating_sub(sched.tasks[cur].last_start_ns);
+        let idle = idle_now.saturating_sub(sched.tasks[cur].last_idle_ns);
+        sched.tasks[cur].cpu_ns = sched.tasks[cur]
             .cpu_ns
-            .saturating_add(now_ns.saturating_sub(sched.tasks[cur].last_start_ns));
+            .saturating_add(wall.saturating_sub(idle));
     }
     // Zombie не воскрешаем: задача, завершившаяся в обработчике (например,
     // page fault в ring 3), не должна снова стать Ready на следующем тике.
@@ -224,6 +229,7 @@ pub extern "sysv64" fn tick_and_switch(ctx_ptr: u64) -> u64 {
 
     sched.tasks[next].state = TaskState::Running;
     sched.tasks[next].last_start_ns = now_ns;
+    sched.tasks[next].last_idle_ns = idle_now;
     sched.current = Some(next);
     sched.switches += 1;
 
@@ -265,11 +271,13 @@ pub extern "sysv64" fn softirq_handler(ctx_ptr: u64) -> u64 {
 
     sched.tasks[cur].saved_rsp = ctx_ptr;
     let now_ns = crate::timer::uptime_ns();
+    let idle_now = crate::timer::idle_ns();
     if sched.tasks[cur].last_start_ns != 0 {
-        sched.tasks[cur].cpu_ns = sched
-            .tasks[cur]
+        let wall = now_ns.saturating_sub(sched.tasks[cur].last_start_ns);
+        let idle = idle_now.saturating_sub(sched.tasks[cur].last_idle_ns);
+        sched.tasks[cur].cpu_ns = sched.tasks[cur]
             .cpu_ns
-            .saturating_add(now_ns.saturating_sub(sched.tasks[cur].last_start_ns));
+            .saturating_add(wall.saturating_sub(idle));
     }
     if sched.tasks[cur].state == TaskState::Running {
         sched.tasks[cur].state = TaskState::Ready;
@@ -290,6 +298,7 @@ pub extern "sysv64" fn softirq_handler(ctx_ptr: u64) -> u64 {
 
     sched.tasks[next].state = TaskState::Running;
     sched.tasks[next].last_start_ns = now_ns;
+    sched.tasks[next].last_idle_ns = idle_now;
     sched.current = Some(next);
     sched.switches += 1;
 
@@ -341,6 +350,7 @@ pub fn init() {
         user_rflags: 0x200,
         cpu_ns: 0,
         last_start_ns: 0,
+        last_idle_ns: 0,
     });
     scheduler.current = Some(0);
 
@@ -367,6 +377,7 @@ pub fn init() {
         user_rflags: 0x200,
         cpu_ns: 0,
         last_start_ns: 0,
+        last_idle_ns: 0,
     });
 
     scheduler.next_id = 2;
@@ -407,6 +418,7 @@ pub fn spawn(name: &str, entry: fn(), priority: Priority) -> Option<u32> {
         user_rflags: 0x200,
         cpu_ns: 0,
         last_start_ns: 0,
+        last_idle_ns: 0,
     });
 
     crate::println!("[SCHED] Task '{}' (id={}) spawned", name, id);
@@ -506,7 +518,9 @@ pub fn list_tasks_detail() -> Vec<(u32, String, &'static str, u64, u64)> {
             if sched.current.map(|i| sched.tasks[i].id) == Some(task.id)
                 && task.last_start_ns != 0
             {
-                cpu = cpu.saturating_add(now.saturating_sub(task.last_start_ns));
+                let wall = now.saturating_sub(task.last_start_ns);
+                let idle = crate::timer::idle_ns().saturating_sub(task.last_idle_ns);
+                cpu = cpu.saturating_add(wall.saturating_sub(idle));
             }
             result.push((task.id, task.name.clone(), task.state.as_str(), cpu, task.time_slices));
         }
@@ -538,7 +552,9 @@ fn idle_task_entry() {
         core::arch::asm!("sti", options(nomem, nostack));
     }
     loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        // `idle_wait` аккумулирует время в `timer::idle_ns`, поэтому top
+        // не засчитывает простой idle-задачи как загрузку CPU.
+        crate::timer::idle_wait();
     }
 }
 

@@ -95,7 +95,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test shell-test check boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log
+.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test shell-test check boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
 
 all: run
 
@@ -458,6 +458,18 @@ iso-debug: boot-log-kernel
 	@echo "    partition 2 = VIBRA (kernel, $(KERNEL_PARTITION_MB)MB)"
 	@echo "    partition 3 = VIBRALOG ($(LOG_PARTITION_MB)MB)"
 	@ls -lh $(DEBUG_ISO_IMAGE)
+
+# Проверка vktst/top/free/tree через serial.
+vktst-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-vktst-test.sh
+
+# Три раздела debug-образа + запись boot-лога в VIBRALOG.
+debug-image-test: usb-debug
+	@bash scripts/qemu-debug-image-test.sh "$(USB_DEBUG_IMG)"
+
+# То же для debug ISO, записанного на USB (QEMU подключает его как диск).
+iso-debug-test: iso-debug
+	@bash scripts/qemu-debug-image-test.sh "$(DEBUG_ISO_IMAGE)"
 
 # Прочитать лог с образа/флешки без монтирования: make read-boot-log LOG_DEVICE=/dev/sdX
 read-boot-log:

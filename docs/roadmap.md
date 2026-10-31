@@ -1,6 +1,6 @@
 # Roadmap — Vibra Kernel
 
-> Текущая версия: **0.2.0-rc.4 «Foundation RC4»**.
+> Текущая версия: **0.2.0-rc.5 «Foundation RC5»**.
 > Цель: стабильное диагностическое ядро на реальном x86_64-железе, не ОС.
 
 ## Принципы
@@ -22,7 +22,7 @@
 
 ## 0.2.0 «Foundation» — воспроизводимый x86_64 boot
 
-- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.4`.
+- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.5`.
 - [x] Runtime panic/page-fault checks в изолированной QEMU VM: panic screen,
   CR2, error code, access flags, RIP/RSP/RFLAGS и source location подтверждены.
 - [x] Безопасный runtime W^X check: `diag wxtest` подтвердил read-only `.rodata`
@@ -96,6 +96,20 @@
 - [x] Shell redraw: экранное состояние (`screen_len`/`screen_cursor`) вместо
   нового буфера истории — prompt больше не стирается при Up/Down любой длины.
 - [x] `mount /dev/sdX1 /mnt [rw]` и `mount /mnt sdX1` — Linux-подобные формы.
+- [x] ext4 read: extents, 64bit GDT, flex_bg, dir_index, metadata_csum;
+  неподдерживаемые incompat-фичи дают `NotSupported`; `make fs-test`
+  проверяет `mke2fs -t ext4`.
+- [x] ATAPI/CD поверх AHCI (`PACKET`, `READ CAPACITY(10)`, `READ(10)`);
+  debug-образы имеют три раздела: ESP, VIBRA (kernel), VIBRALOG.
+- [x] MBR extended (EBR) и hybrid protective MBR; GPT/разделы в 512-байтных
+  единицах для 4Kn.
+- [x] CPU topology через CPUID 0x1F/0x0B, AMD 0x80000008/0x8000001E и MADT:
+  12C/24T вместо 32.
+- [x] Реальная загрузка CPU по idle-времени; htop-like `top`; `free` в GiB/MiB.
+- [x] `tree` от текущего каталога; Ctrl+C/Ctrl+Z отменяют длинные команды.
+- [x] `vktst` — единое интерактивное меню системных тестов и отчёт в
+  `/var/log/vktst-*.log`.
+- [x] Версионированные имена артефактов и release workflow GitHub Actions.
 - [x] Запись логов: дисковый приёмник `VIBRALOG` собирается всегда (был под
   feature `boot-log-to-usb`); исправлен троттлинг `attach()` после boot;
   команды `log sink`/`log flush`/`log path`; `quit`/`reboot` сохраняют лог.

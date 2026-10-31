@@ -16,7 +16,10 @@
 | `make bad-fs-test` | битые FAT32/ext2/NTFS/MBR не роняют ядро | qemu, python3 |
 | `make nvme-test` | NVMe Identify/queues, block layer, `mount auto`, 4Kn | qemu, mtools |
 | `make shell-test` | Tab, история, `help`, `test`, отсутствие битого prompt | qemu, mtools |
-| `make fs-test` | FAT32/ext2/NTFS read-only и MBR-раздел | qemu, mtools, e2fsprogs, ntfs-3g, util-linux |
+| `make fs-test` | FAT32/ext2/ext4/NTFS read-only и MBR-раздел | qemu, mtools, e2fsprogs, ntfs-3g, util-linux |
+| `make vktst-test` | `vktst run all`, `free`, `top -b`, `tree` из `/proc` | qemu, mtools |
+| `make debug-image-test` | три раздела USB debug-образа и запись `/VIBRA.LOG` | qemu, mtools, util-linux |
+| `make iso-debug-test` | debug ISO на USB: разделы и запись лога | qemu, mtools, util-linux, xorriso |
 | `make keyboard-test` | PS/2 и USB HID через monitor `sendkey` | qemu, python3 |
 | `make iso-smoke` | загрузка гибридного ISO в UEFI и BIOS | qemu, xorriso, OVMF, SeaBIOS |
 | `BOOT_ITERATIONS=10 python3 scripts/qemu-boot-matrix.py` | повторяемость загрузки | qemu, python3 |
@@ -35,6 +38,9 @@ make check
 ./build.sh nvme-test
 ./build.sh shell-test
 ./build.sh fs-test
+./build.sh vktst-test
+./build.sh debug-image-test
+./build.sh iso-debug-test
 ./build.sh keyboard-test
 ./build.sh iso
 make iso-smoke
@@ -54,7 +60,10 @@ BOOT_ITERATIONS=100 python3 scripts/qemu-boot-matrix.py
 - монтирование FAT32 без `rw` пропускает запись;
 - повреждённый образ ФС приводит к `KERNEL PANIC` или `[FATAL]`;
 - `diag fault-test` не печатает CR2/error code/RIP;
-- `diag heap-test` показывает утечку.
+- `diag heap-test` показывает утечку;
+- `vktst run all` показывает `failed`;
+- debug-образ не находит `VIBRALOG` или `/VIBRA.LOG` пуст;
+- `tree` без аргумента начинает с `/` вместо текущего каталога.
 
 ## Ручная проверка на реальном железе
 

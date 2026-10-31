@@ -1,6 +1,6 @@
 # Vibra Kernel — статус проекта
 
-**Версия:** `0.2.0-rc.4` «Foundation RC4»
+**Версия:** `0.2.0-rc.5` «Foundation RC5»
 **Поддерживаемая архитектура:** только `x86_64-unknown-none`  
 **Загрузка:** Limine через UEFI; QEMU — основная тестовая среда
 
@@ -16,13 +16,13 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 Подтверждено только прохождение компиляции и QEMU-путь, когда он явно
 зафиксирован тестом. Наличие исходного файла не является поддержкой железа.
 
-| Подсистема | Состояние 0.2.0-rc.4 |
+| Подсистема | Состояние 0.2.0-rc.5 |
 |---|---|
 | Limine, serial, framebuffer | базовый x86_64 boot path |
 | PMM, heap, paging/VMM | экспериментально, требуется стресс на железе |
 | PS/2, PIC/PIT, GDT/IDT | базовый диагностический путь |
 | PCI/ACPI | инвентаризация и частичная инициализация |
-| AHCI/NVMe, FAT32/Ext2/NTFS | AHCI + NVMe + block layer + MBR/GPT + mount (read-only по умолчанию) в QEMU |
+| AHCI/NVMe/ATAPI, FAT32/ext2/3/4/NTFS | AHCI + NVMe + ATAPI CD + block layer + MBR/EBR/GPT + mount; FAT32 rw для `VIBRALOG`, ext/NTFS ro (ext4: extents/64bit) в QEMU |
 | xHCI/HID | enumeration и HID boot keyboard в QEMU; на реальном железе не подтверждено |
 | e1000/RTL8139, IPv4/ICMP | QEMU-ориентированный прототип, без DHCP/TCP |
 | ARM64 / Orange Pi Zero 3 | не поддерживается |
@@ -44,15 +44,19 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | `make ramfs-test` | корневой RamFS через VFS: `ls`, запись, `hostname`, `/var/log/boot.log` |
 | `make ro-mount-test` | FAT32 read-only по умолчанию; запись только с `rw` |
 | `make bad-fs-test` | повреждённые ФС не роняют ядро |
-| `make fs-test` | FAT32/ext2/NTFS read-only + MBR-раздел через shell по serial |
+| `make fs-test` | FAT32/ext2/ext4/NTFS read-only + MBR-раздел через shell по serial |
+| `make vktst-test` | `vktst run all`, `free`, `top -b`, `tree` из `/proc` |
+| `make debug-image-test` | 3 раздела USB debug-образа и запись `/VIBRA.LOG` |
+| `make iso-debug-test` | debug ISO, записанный на USB: разделы и лог |
 | `make keyboard-test` | ввод PS/2 и USB HID клавиатуры через monitor `sendkey` |
 | `make iso-smoke` | загрузка гибридного ISO в UEFI (OVMF) и BIOS (SeaBIOS) |
 | `BOOT_ITERATIONS=10 python3 scripts/qemu-boot-matrix.py` | повторяемость загрузки |
 | `python3 scripts/check-warning-budget.py` | бюджет предупреждений компилятора |
 
 `make fs-test` (`scripts/qemu-fs-test.sh`) сам создаёт тестовые образы
-(`mkfs.fat`, `mke2fs`, `mkntfs`, `sfdisk`) и прикладывает их к QEMU как
-`sdb`…`sde`; результат пишется в `build/fs-test-status.txt`.
+(`mkfs.fat`, `mke2fs -t ext2`, `mke2fs -t ext4`, `mkntfs`, `sfdisk`) и
+прикладывает их к QEMU как `sdb`…`sdf`; результат пишется в
+`build/fs-test-status.txt`.
 
 ## CI
 
@@ -65,14 +69,22 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 
 В CI выполняются `doctor`, `setup`, бюджеты предупреждений, `smoke`,
 `clock-test`, `ramfs-test`, `ro-mount-test`, `bad-fs-test`, `keyboard-test`,
-`fs-test`, сборка ISO и его загрузка в UEFI/BIOS, сборка GPT/ESP-образа и его
-загрузка в QEMU/OVMF, panic/page-fault отчёты и матрица последовательных
-загрузок (10 по умолчанию, `workflow_dispatch` → `boot_iterations`). Логи QEMU
+`fs-test`, `vktst-test`, сборка и загрузка debug-образов с тремя разделами,
+сборка ISO и его загрузка в UEFI/BIOS, сборка GPT/ESP-образа и его загрузка в
+QEMU/OVMF, panic/page-fault отчёты и матрица последовательных загрузок
+(10 по умолчанию, `workflow_dispatch` → `boot_iterations`). Логи QEMU
 выкладываются артефактом `qemu-logs` даже при падении.
+
+Релиз собирается `.github/workflows/release.yml` по тегу `v*`: release/debug
+ISO, UEFI/USB образы, `SHA256SUMS` и GitHub Release. Подробности —
+в [release.md](release.md).
 
 ## Документы
 
 - `architecture.md` — фактическая архитектура и ограничения.
+- `ext4.md` — чтение ext2/3/4: extents, 64bit, ограничения.
+- `vktst.md` — Vibra Kernel Tests: группы, режимы, отчёт.
+- `release.md` — версии, имена образов, release workflow.
 - `framebuffer.md` — консоль, прокрутка и стоимость отрисовки, debug-only COM1.
 - `storage_and_power.md` — ACPI poweroff, каталоги FAT32, приёмники логов.
 - `memory.md` — модель памяти и известные риски.

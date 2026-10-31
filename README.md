@@ -3,7 +3,7 @@
 <p align="center"><b>Экспериментальное x86_64-ядро на Rust</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0--rc.4--Foundation-blue?style=flat-square" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-0.2.0--rc.5--Foundation-blue?style=flat-square" alt="Version"/>
   <img src="https://img.shields.io/badge/target-x86__64-orange?style=flat-square" alt="Target"/>
   <img src="https://img.shields.io/badge/Rust-no__std-red?style=flat-square" alt="Rust"/>
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License"/>
@@ -13,7 +13,7 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.4`
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.5`
 обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 
@@ -32,8 +32,9 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 - serial COM1, framebuffer-консоль, GDT/TSS/IDT, PIC и задел APIC;
 - PMM, heap и экспериментальный VMM;
 - PS/2-клавиатура, ACPI и PCI-инвентаризация;
-- прототипы AHCI, NVMe, e1000/RTL8139, xHCI и файловых систем;
-- RAM-файловая система и встроенная shell для диагностики.
+- AHCI/NVMe/ATAPI (CD), e1000/RTL8139, xHCI;
+- FAT32 (rw для `VIBRALOG`), ext2/3/4 (ro, включая extents и 64bit) и NTFS (ro);
+- RAM-файловая система, встроенная shell и `vktst` для диагностики.
 
 Это не подтверждает работу соответствующих драйверов на реальном железе.
 В частности, USB-накопители, автомонтирование дисков, DHCP/TCP и ARM64 не
@@ -48,6 +49,10 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 ./build.sh setup
 ./build.sh smoke
 ./build.sh clock-test
+./build.sh fs-test
+./build.sh vktst-test
+./build.sh debug-image-test
+./build.sh iso-debug-test
 ./build.sh uefi-usb
 ./build.sh debug
 ```
@@ -113,7 +118,10 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh ramfs-test     проверить корневой RamFS, запись файлов и /var/log/boot.log
 ./build.sh ro-mount-test  проверить read-only монтирование FAT32
 ./build.sh bad-fs-test    проверить устойчивость к повреждённым ФС
-./build.sh fs-test        проверить FAT32/ext2/NTFS и MBR-раздел
+./build.sh fs-test        проверить FAT32/ext2/ext4/NTFS и MBR-раздел
+./build.sh vktst-test     проверить vktst, top, free и tree
+./build.sh debug-image-test  проверить 3 раздела USB debug-образа и запись лога
+./build.sh iso-debug-test проверить debug ISO, записанный на USB
 ./build.sh keyboard-test  проверить ввод PS/2 и USB HID
 ./build.sh iso            собрать гибридный BIOS/UEFI ISO
 ./build.sh iso-smoke      загрузить ISO в UEFI (OVMF) и BIOS (SeaBIOS)
@@ -128,8 +136,13 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 данными и не тестируйте операции записи драйверов на ценных дисках.
 
 Монтирование дисков по умолчанию **read-only**. Запись включается только явным
-аргументом: `mount /mnt fat32 sda1 rw`. Это правило одинаково для shell и
-автомонтирования.
+аргументом: `mount /mnt fat32 sda1 rw`. ext2/3/4 и NTFS остаются read-only:
+драйверы не поддерживают запись. Boot-лог пишется на FAT32-раздел `VIBRALOG`.
+
+Имена образов содержат дату и версию, например
+`vibra_2026-10-31_0.2.0-rc.5.iso` и
+`vibra-debug_2026-10-31_0.2.0-rc.5.iso`; для совместимости создаются
+симлинки `build/vibra.iso` и `build/vibra-debug.iso`.
 
 ## CI
 
@@ -141,8 +154,9 @@ Workflow `.github/workflows/kernel.yml` запускается на `push`, `pul
 `nightly --component rust-src` + target `x86_64-unknown-none`.
 
 Проверки: `doctor`, `setup`, бюджеты предупреждений, `smoke`, `clock-test`,
-`keyboard-test`, `fs-test`, сборка ISO и его загрузка в UEFI/BIOS, сборка
-GPT/ESP-образа, panic/page-fault отчёты и последовательная матрица загрузок.
+`keyboard-test`, `fs-test`, `vktst-test`, debug-образы с тремя разделами,
+сборка ISO и его загрузка в UEFI/BIOS, сборка GPT/ESP-образа,
+panic/page-fault отчёты и последовательная матрица загрузок.
 На раннерах нет KVM, поэтому QEMU работает через TCG, а таймауты тестов заданы
 с запасом через переменные окружения (`SMOKE_TIMEOUT`, `BOOT_TIMEOUT` и т.д.).
 Логи QEMU выкладываются артефактом `qemu-logs` даже при падении.
@@ -160,8 +174,12 @@ docs/      актуальные ограничения, архитектура �
 - [Статус и границы проекта](docs/README.md)
 - [Архитектура](docs/architecture.md)
 - [Память](docs/memory.md)
+- [ext2/3/4](docs/ext4.md)
+- [vktst](docs/vktst.md)
+- [Сборка и релиз](docs/release.md)
 - [USB и загрузка](docs/usb_and_boot.md)
 - [Дорожная карта](docs/roadmap.md)
+- [Changelog](CHANGELOG.md)
 
 ## Лицензия
 

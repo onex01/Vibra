@@ -37,6 +37,26 @@ UEFI-only теста x86_64 используйте `./build.sh uefi-usb`: он �
 с FAT32 EFI System Partition и fallback loader
 `EFI/BOOT/BOOTX64.EFI`. На тестовой машине отключите Secure Boot.
 
+Имена образов версионированы: `vibra_<DATE>_<VERSION>.iso`,
+`vibra-debug_<DATE>_<VERSION>.iso`, `vibra-uefi_<DATE>_<VERSION>.img`,
+`vibra-usb_<DATE>_<VERSION>.img`,
+`vibra-usb-debug_<DATE>_<VERSION>.img`. Симлинки без даты
+(`build/vibra.iso` и т.д.) сохранены для скриптов.
+
+### Debug-образ с тремя разделами
+
+`make usb-debug` создаёт GPT-образ:
+
+1. `VIBRA-ESP` — FAT32 с Limine;
+2. `VIBRA` — FAT32 с `kernel.elf`; Limine грузит его по метке
+   (`fslabel(VIBRA):/kernel.elf`);
+3. `VIBRALOG` — FAT32 с предвыделенным `/VIBRA.LOG`.
+
+`make iso-debug` добавляет те же `VIBRA` и `VIBRALOG` к гибридному ISO через
+`xorriso -append_partition`. Такой ISO нужно записать на USB: с CD/DVD лог
+физически не записать, и ядро честно сообщает об этом. Проверка —
+`make debug-image-test` и `make iso-debug-test`.
+
 `./build.sh iso-smoke` проверяет сам гибридный ISO: загружает его через
 `-cdrom` в UEFI (OVMF) и BIOS (SeaBIOS) и требует boot-маркеры и prompt
 `vibra:/>` в serial-логе. Это проверка именно съёмочного образа, а не

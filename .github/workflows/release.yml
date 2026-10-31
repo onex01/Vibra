@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (например v0.2.0-rc.5)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build release artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.ci/cargo
+      RUSTUP_HOME: ${{ github.workspace }}/.ci/rustup
+      SMOKE_TIMEOUT: 180
+      SMOKE_MIN_HEARTBEATS: 12
+      FS_TEST_TIMEOUT: 300
+      BOOT_READY_TIMEOUT: 120
+      DEBUG_IMAGE_TIMEOUT: 150
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            make qemu-system-x86 seabios mtools dosfstools wget tar xz-utils \
+            xorriso fdisk ntfs-3g e2fsprogs gcc python3
+
+      - name: Install Rust toolchain (rustup)
+        run: |
+          set -euo pipefail
+          if [[ ! -x "$CARGO_HOME/bin/rustup" ]]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+          fi
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup target add x86_64-unknown-none --toolchain nightly
+          cargo +nightly -V
+
+      - name: Check build environment
+        run: ./build.sh doctor
+
+      - name: Create boot image
+        run: ./build.sh setup
+
+      - name: Check warning budgets
+        run: python3 scripts/check-warning-budget.py
+
+      - name: Build kernel
+        run: make build
+
+      - name: Smoke-test UEFI boot
+        run: ./build.sh smoke
+
+      - name: Test filesystem drivers
+        run: ./build.sh fs-test
+
+      - name: Build release ISO
+        run: ./build.sh iso-release
+
+      - name: Build debug ISO
+        run: make iso-debug
+
+      - name: Build GPT/ESP UEFI image
+        run: ./build.sh uefi-usb
+
+      - name: Build USB image
+        run: ./build.sh usb
+
+      - name: Build 3-partition USB debug image
+        run: make usb-debug
+
+      - name: Test 3-partition USB debug image
+        run: |
+          version="$(sed -n 's/^pub const KERNEL_VERSION: &str = "\(.*\)";/\1/p' kernel/src/version.rs)"
+          date="$(date -u +%Y-%m-%d)"
+          bash scripts/qemu-debug-image-test.sh "build/vibra-usb-debug_${date}_${version}.img"
+
+      - name: Test debug ISO written to USB
+        run: |
+          version="$(sed -n 's/^pub const KERNEL_VERSION: &str = "\(.*\)";/\1/p' kernel/src/version.rs)"
+          date="$(date -u +%Y-%m-%d)"
+          bash scripts/qemu-debug-image-test.sh "build/vibra-debug_${date}_${version}.iso"
+
+      - name: Collect artifacts and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find build -maxdepth 1 -type f \
+            \( -name 'vibra_*.iso' -o -name 'vibra-*_*.iso' -o -name 'vibra-*_*.img' \) \
+            -exec cp {} dist/ \;
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -lh dist
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibra-release
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Upload QEMU logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-logs
+          path: build/*.log
+          if-no-files-found: ignore
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* \
+              --title "Vibra $tag" \
+              --generate-notes
+          fi

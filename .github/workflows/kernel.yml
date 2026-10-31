@@ -107,6 +107,15 @@ jobs:
       - name: Test filesystem drivers
         run: ./build.sh fs-test
 
+      - name: Test vktst, top, free and tree
+        run: ./build.sh vktst-test
+
+      - name: Build and test 3-partition USB debug image
+        run: ./build.sh debug-image-test
+
+      - name: Build and test 3-partition debug ISO (as USB)
+        run: ./build.sh iso-debug-test
+
       - name: Build hybrid BIOS/UEFI ISO
         run: ./build.sh iso
 
@@ -145,4 +154,7 @@ jobs:
           path: |
             build/*.log
             build/fs-test-status.txt
+            build/vktst-test-status.txt
+            build/debug-image-status.txt
+            build/debug-image-boot.log
           if-no-files-found: ignore
