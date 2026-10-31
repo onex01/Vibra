@@ -29,12 +29,17 @@ for file in "$image" "$repo_root/OVMF.fd"; do
     fi
 done
 
-echo "==> Preparing NVMe image (64 MiB FAT32)"
+echo "==> Preparing NVMe image (64 MiB FAT32, 32 KiB clusters)"
 rm -f "$nvme_img"
 dd if=/dev/zero of="$nvme_img" bs=1M count=64 status=none
-mkfs.fat -F 32 -n NVMEVOL "$nvme_img" >/dev/null
+# -s 64 = 32 KiB на кластер: чтение каталога/файла больше страницы.
+# Раньше NVMe-драйвер отдавал один PRP1 на весь запрос, и контроллер
+# дописывал данные за пределы DMA-буфера — это и портило кучу.
+mkfs.fat -F 32 -s 64 -n NVMEVOL "$nvme_img" >/dev/null
 printf 'hello nvme\n' > "$log_dir/nvme-hello.txt"
 mcopy -i "$nvme_img" "$log_dir/nvme-hello.txt" ::/HELLO.TXT
+head -c 200000 /dev/zero | tr '\0' '\377' > "$log_dir/nvme-big.bin"
+mcopy -i "$nvme_img" "$log_dir/nvme-big.bin" ::/BIG.BIN
 
 qemu_key() {
     case "$1" in
@@ -67,6 +72,8 @@ rm -f "$serial_log"
     send_text "mount /mnt auto sdb"; send_text $'\n'; sleep 4
     send_text "ls /mnt"; send_text $'\n'; sleep 2
     send_text "cat /mnt/hello.txt"; send_text $'\n'; sleep 2
+    send_text "cat /mnt/big.bin"; send_text $'\n'; sleep 4
+    send_text "diag heap-check"; send_text $'\n'; sleep 2
     echo "quit"
 } | timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" \
     "$QEMU" \
@@ -94,6 +101,11 @@ grep -Fq '[NVMe, ' "$serial_log" || fail "NVMe disk was not registered in block 
 grep -Fq 'OK (fat32, ro)' "$serial_log" || fail "mount auto did not mount the NVMe FAT32 volume"
 grep -Fq 'hello nvme' "$serial_log" || fail "file on NVMe volume could not be read"
 grep -Fq 'HELLO.TXT' "$serial_log" || fail "ls /mnt did not show the file"
+grep -Fq 'BIG.BIN' "$serial_log" || fail "large file is not visible"
+grep -Fq '(binary data, 200000 bytes)' "$serial_log" \
+    || fail "large file was not read completely"
+grep -Fq 'OK: all free-list headers valid' "$serial_log" \
+    || fail "heap free-list corrupted after multi-page NVMe I/O"
 
 if grep -Fq '[FATAL]' "$serial_log"; then
     fail "fatal message in NVMe boot log"

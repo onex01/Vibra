@@ -23,7 +23,7 @@ vktst help            краткая справка
 | id | Что проверяет |
 |---|---|
 | `cpu` | топология (physical/logical/threads), vendor, family/model, частоты, флаги |
-| `mem` | PMM/heap инварианты и короткий heap-стресс (128 итераций) |
+| `mem` | PMM/heap инварианты, короткий heap-стресс (128 итераций) и `heap-check` |
 | `timer` | монотонные часы идут, источник (TSC/HPET/PIT), IRQ-тики, RTC |
 | `fs` | корневой RamFS, `/proc`, запись/чтение `/tmp/vktst-probe.txt`, список монтирований |
 | `disk` | блочные устройства, разделы, `fs_type`, счётчики I/O |

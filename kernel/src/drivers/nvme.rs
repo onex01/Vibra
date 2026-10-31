@@ -614,6 +614,50 @@ pub fn init() {
 }
 
 impl NvmeController {
+    /// Одна NVMe-команда I/O с одним PRP1.
+    ///
+    /// PRP1 описывает только одну страницу. Передачи больше страницы без
+    /// PRP2/PRP-list контроллер трактует неопределённо: часть данных может
+    /// уйти в физическую память за буфером и повредить кучу. Поэтому все
+    /// чтения/записи режутся на куски не больше 4096 байт (см. `read_dev` /
+    /// `write_dev`).
+    unsafe fn submit_io(
+        &mut self,
+        opcode: u8,
+        cid: u16,
+        lba: u64,
+        blocks: u32,
+        dma_phys: u64,
+    ) -> Result<(), crate::fs::vfs::FsError> {
+        let mut cmd = NvmeSubQueueEntry {
+            opcode,
+            flags: 0,
+            cid,
+            nsid: self.ns_id,
+            _reserved: 0,
+            mptr: 0,
+            prp1: dma_phys,
+            prp2: 0,
+            _reserved2: [0; 6],
+        };
+
+        cmd._reserved2[0] = lba as u32;
+        cmd._reserved2[1] = (lba >> 32) as u32;
+        cmd._reserved2[2] = blocks - 1;
+
+        match self.io_submit(&cmd) {
+            Some(comp) => {
+                let sc = (comp.status >> 1) & 0x7F;
+                if sc == 0 {
+                    Ok(())
+                } else {
+                    Err(crate::fs::vfs::FsError::IoError)
+                }
+            }
+            None => Err(crate::fs::vfs::FsError::IoError),
+        }
+    }
+
     /// Читает `blocks` логических блоков устройства начиная с `lba`.
     ///
     /// `crate::fs` работает в 512-байтных секторах. На NVMe с 4Kn
@@ -624,49 +668,44 @@ impl NvmeController {
             return Ok(());
         }
 
-        let buf_size = blocks as usize * self.block_size as usize;
-        if buf.len() < buf_size {
+        let bs = self.block_size as usize;
+        let buf_size = blocks as usize * bs;
+        if bs == 0 || buf.len() < buf_size {
             return Err(crate::fs::vfs::FsError::IoError);
         }
-        let dma_layout = core::alloc::Layout::from_size_align(buf_size, 4096)
-            .map_err(|_| crate::fs::vfs::FsError::IoError)?;
-        let dma_buf = alloc::alloc::alloc_zeroed(dma_layout);
-        if dma_buf.is_null() {
-            return Err(crate::fs::vfs::FsError::IoError);
-        }
-        let dma_phys = virt_to_phys(dma_buf as u64);
 
-        let mut cmd = NvmeSubQueueEntry {
-            opcode: NVME_IO_READ,
-            flags: 0,
-            cid: 10,
-            nsid: self.ns_id,
-            _reserved: 0,
-            mptr: 0,
-            prp1: dma_phys,
-            prp2: 0,
-            _reserved2: [0; 6],
-        };
+        // PRP1-only: не больше одной страницы на команду.
+        const MAX_XFER: usize = 4096;
+        let mut done = 0usize;
+        let mut current_lba = lba;
 
-        cmd._reserved2[0] = lba as u32;
-        cmd._reserved2[1] = (lba >> 32) as u32;
-        cmd._reserved2[2] = blocks - 1;
-
-        let result = match self.io_submit(&cmd) {
-            Some(comp) => {
-                let sc = (comp.status >> 1) & 0x7F;
-                if sc == 0 {
-                    core::ptr::copy_nonoverlapping(dma_buf, buf.as_mut_ptr(), buf_size);
-                    Ok(())
-                } else {
-                    Err(crate::fs::vfs::FsError::IoError)
-                }
+        while done < buf_size {
+            let chunk = (buf_size - done).min(MAX_XFER);
+            let chunk = (chunk / bs) * bs;
+            if chunk == 0 {
+                return Err(crate::fs::vfs::FsError::IoError);
             }
-            None => Err(crate::fs::vfs::FsError::IoError),
-        };
+            let chunk_blocks = (chunk / bs) as u32;
 
-        alloc::alloc::dealloc(dma_buf, dma_layout);
-        result
+            let dma_layout = core::alloc::Layout::from_size_align(chunk, 4096)
+                .map_err(|_| crate::fs::vfs::FsError::IoError)?;
+            let dma_buf = alloc::alloc::alloc_zeroed(dma_layout);
+            if dma_buf.is_null() {
+                return Err(crate::fs::vfs::FsError::IoError);
+            }
+            let dma_phys = virt_to_phys(dma_buf as u64);
+
+            let result = self.submit_io(NVME_IO_READ, 10, current_lba, chunk_blocks, dma_phys);
+            if result.is_ok() {
+                core::ptr::copy_nonoverlapping(dma_buf, buf[done..].as_mut_ptr(), chunk);
+            }
+            alloc::alloc::dealloc(dma_buf, dma_layout);
+            result?;
+
+            done += chunk;
+            current_lba += chunk_blocks as u64;
+        }
+        Ok(())
     }
 
     /// Записывает `blocks` логических блоков устройства начиная с `lba`.
@@ -675,50 +714,41 @@ impl NvmeController {
             return Ok(());
         }
 
-        let buf_size = blocks as usize * self.block_size as usize;
-        if buf.len() < buf_size {
+        let bs = self.block_size as usize;
+        let buf_size = blocks as usize * bs;
+        if bs == 0 || buf.len() < buf_size {
             return Err(crate::fs::vfs::FsError::IoError);
         }
-        let dma_layout = core::alloc::Layout::from_size_align(buf_size, 4096)
-            .map_err(|_| crate::fs::vfs::FsError::IoError)?;
-        let dma_buf = alloc::alloc::alloc_zeroed(dma_layout);
-        if dma_buf.is_null() {
-            return Err(crate::fs::vfs::FsError::IoError);
-        }
-        let dma_phys = virt_to_phys(dma_buf as u64);
 
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), dma_buf, buf_size);
+        const MAX_XFER: usize = 4096;
+        let mut done = 0usize;
+        let mut current_lba = lba;
 
-        let mut cmd = NvmeSubQueueEntry {
-            opcode: NVME_IO_WRITE,
-            flags: 0,
-            cid: 11,
-            nsid: self.ns_id,
-            _reserved: 0,
-            mptr: 0,
-            prp1: dma_phys,
-            prp2: 0,
-            _reserved2: [0; 6],
-        };
-
-        cmd._reserved2[0] = lba as u32;
-        cmd._reserved2[1] = (lba >> 32) as u32;
-        cmd._reserved2[2] = blocks - 1;
-
-        let result = match self.io_submit(&cmd) {
-            Some(comp) => {
-                let sc = (comp.status >> 1) & 0x7F;
-                if sc == 0 {
-                    Ok(())
-                } else {
-                    Err(crate::fs::vfs::FsError::IoError)
-                }
+        while done < buf_size {
+            let chunk = (buf_size - done).min(MAX_XFER);
+            let chunk = (chunk / bs) * bs;
+            if chunk == 0 {
+                return Err(crate::fs::vfs::FsError::IoError);
             }
-            None => Err(crate::fs::vfs::FsError::IoError),
-        };
+            let chunk_blocks = (chunk / bs) as u32;
 
-        alloc::alloc::dealloc(dma_buf, dma_layout);
-        result
+            let dma_layout = core::alloc::Layout::from_size_align(chunk, 4096)
+                .map_err(|_| crate::fs::vfs::FsError::IoError)?;
+            let dma_buf = alloc::alloc::alloc_zeroed(dma_layout);
+            if dma_buf.is_null() {
+                return Err(crate::fs::vfs::FsError::IoError);
+            }
+            core::ptr::copy_nonoverlapping(buf[done..].as_ptr(), dma_buf, chunk);
+            let dma_phys = virt_to_phys(dma_buf as u64);
+
+            let result = self.submit_io(NVME_IO_WRITE, 11, current_lba, chunk_blocks, dma_phys);
+            alloc::alloc::dealloc(dma_buf, dma_layout);
+            result?;
+
+            done += chunk;
+            current_lba += chunk_blocks as u64;
+        }
+        Ok(())
     }
 
     /// Чтение с произвольным байтовым смещением (адаптер 512 → block_size).

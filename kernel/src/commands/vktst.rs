@@ -241,6 +241,10 @@ fn test_memory() -> TestResult {
     if !stress_ok {
         ok = false;
     }
+    let (free_blocks, free_bytes, corrupt) = crate::memory::heap::check();
+    if corrupt.is_some() {
+        ok = false;
+    }
 
     TestResult::new("mem", ok)
         .line(format!(
@@ -261,6 +265,13 @@ fn test_memory() -> TestResult {
             if stress_ok { "OK" } else { "FAILED" },
             drift
         ))
+        .line(match corrupt {
+            Some(addr) => format!("free-list: CORRUPT at {:#x}", addr),
+            None => format!(
+                "free-list: {} blocks, {} free bytes, headers OK",
+                free_blocks, free_bytes
+            ),
+        })
 }
 
 fn test_timer() -> TestResult {

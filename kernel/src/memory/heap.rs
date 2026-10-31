@@ -23,18 +23,43 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 use spin::Mutex;
 
+// Узел свободного списка. Overlay: живёт в первых байтах свободного блока.
+//
+// Размер и магия упакованы в одно слово, чтобы FreeNode оставался 16 байт:
+// иначе MIN_BLOCK пришлось бы поднять до 32, и блоки с выравниванием 256
+// нельзя было бы использовать (маленький prefix/suffix отбрасывался —
+// `mount ... fat32` падал с OOM при 3% занятой кучи).
+const SIZE_MAGIC_BITS: usize = 0x5649_0000_0000_0000; // "VI" в старших 16 битах
+const SIZE_MASK: usize = 0x0000_FFFF_FFFF_FFFF;
+
 // Минимальный размер блока: FreeNode должен помещаться в любой свободный блок.
-// На x86_64 size_of::<FreeNode>() = 24 (usize size + usize-поле Option<NonNull>),
-// округляем до 16-байтной границы — получаем 32.
+// size_of::<FreeNode>() = 16 (usize + Option<NonNull>), выравнивание 16.
 const MIN_BLOCK: usize = align_up(core::mem::size_of::<FreeNode>(), 16);
 // Все размеры/смещения выравниваются под это.
 const ALIGN_GRANULE: usize = 16;
 
-// Узел свободного списка. Overlay: живёт в первых байтах свободного блока.
-// Поле size — полный размер блока (включая заголовок).
 struct FreeNode {
-    size: usize,
+    /// Старшие 16 бит — магия, младшие 48 — полный размер блока.
+    size_magic: usize,
     next: Option<NonNull<FreeNode>>,
+}
+
+impl FreeNode {
+    unsafe fn size(ptr: NonNull<FreeNode>) -> usize {
+        (*ptr.as_ptr()).size_magic & SIZE_MASK
+    }
+
+    unsafe fn set_size(ptr: NonNull<FreeNode>, size: usize) {
+        (*ptr.as_ptr()).size_magic = SIZE_MAGIC_BITS | (size & SIZE_MASK);
+    }
+
+    unsafe fn next(ptr: NonNull<FreeNode>) -> Option<NonNull<FreeNode>> {
+        (*ptr.as_ptr()).next
+    }
+
+    unsafe fn set_next(ptr: NonNull<FreeNode>, next: Option<NonNull<FreeNode>>) {
+        (*ptr.as_ptr()).next = next;
+    }
 }
 
 struct FreeList {
@@ -51,12 +76,12 @@ impl FreeList {
     // Инициализация одним свободным блоком на весь регион.
     unsafe fn init(&mut self, start: usize, size: usize) {
         self.start = start;
-        self.end = start + size;
+        self.end = start.saturating_add(size);
         if size >= MIN_BLOCK {
-            let node = start as *mut FreeNode;
-            core::ptr::addr_of_mut!((*node).size).write(size);
-            core::ptr::addr_of_mut!((*node).next).write(None);
-            self.head = NonNull::new(node);
+            let node = NonNull::new_unchecked(start as *mut FreeNode);
+            FreeNode::set_size(node, size);
+            FreeNode::set_next(node, None);
+            self.head = Some(node);
         } else {
             self.head = None;
         }
@@ -72,17 +97,75 @@ impl FreeList {
         (self.start, self.end)
     }
 
-    // Сумма свободных байт — обход списка.
+    /// Проверить, что узел лежит в регионе и его заголовок не испорчен.
+    fn node_ok(&self, ptr: NonNull<FreeNode>) -> bool {
+        let addr = ptr.as_ptr() as usize;
+        if addr < self.start || addr >= self.end {
+            return false;
+        }
+        if addr
+            .checked_add(core::mem::size_of::<FreeNode>())
+            .map_or(true, |end| end > self.end)
+        {
+            return false;
+        }
+        let word = unsafe { (*ptr.as_ptr()).size_magic };
+        if word & !SIZE_MASK != SIZE_MAGIC_BITS {
+            return false;
+        }
+        let size = word & SIZE_MASK;
+        size >= MIN_BLOCK
+            && addr.checked_add(size).map_or(false, |end| end <= self.end)
+    }
+
+    /// Обрезать список перед битым узлом. Возвращает false, если головной
+    /// узел уже битый (куча недоступна).
+    fn truncate_before(&mut self, prev: Option<NonNull<FreeNode>>) -> bool {
+        match prev {
+            Some(p) => {
+                unsafe { FreeNode::set_next(p, None) };
+                true
+            }
+            None => {
+                self.head = None;
+                false
+            }
+        }
+    }
+
+    // Сумма свободных байт — обход списка с проверкой заголовков.
     fn free_bytes(&self) -> usize {
         let mut sum = 0usize;
         let mut cur = self.head;
         while let Some(node_ptr) = cur {
-            // Безопасно: узлы в нашем регионе, под локом.
-            let node = unsafe { node_ptr.as_ref() };
-            sum += node.size;
-            cur = node.next;
+            if !self.node_ok(node_ptr) {
+                break;
+            }
+            unsafe {
+                sum = sum.saturating_add(FreeNode::size(node_ptr));
+                cur = FreeNode::next(node_ptr);
+            }
         }
         sum
+    }
+
+    /// Диагностика для `diag heap-check`: (блоков, свободных байт, первый
+    /// битый адрес).
+    fn check(&self) -> (usize, usize, Option<usize>) {
+        let mut blocks = 0usize;
+        let mut bytes = 0usize;
+        let mut cur = self.head;
+        while let Some(node_ptr) = cur {
+            if !self.node_ok(node_ptr) {
+                return (blocks, bytes, Some(node_ptr.as_ptr() as usize));
+            }
+            unsafe {
+                blocks += 1;
+                bytes = bytes.saturating_add(FreeNode::size(node_ptr));
+                cur = FreeNode::next(node_ptr);
+            }
+        }
+        (blocks, bytes, None)
     }
 
     // Выделить блок под layout. Возвращает пользовательский указатель
@@ -95,60 +178,61 @@ impl FreeList {
         // выделить выровненный регион размером `size`.
         let mut prev: Option<NonNull<FreeNode>> = None;
         let mut cur = self.head;
-        while let Some(mut node_ptr) = cur {
-            let node = node_ptr.as_mut();
-            let block_start = node_ptr.as_ptr() as usize;
-            let block_end = block_start + node.size;
-
-            // Выровненный пользовательский адрес внутри блока. Левый
-            // префикс и правый хвост обязаны либо стать FreeNode, либо
-            // отсутствовать: иначе `dealloc(ptr, layout)` не сможет узнать
-            // об этих байтах и они будут потеряны навсегда.
-            let alloc_start = align_up(block_start, align);
-            let alloc_end = alloc_start.checked_add(size);
-            if let Some(ae) = alloc_end {
-                if ae <= block_end {
-                    let prefix = alloc_start - block_start;
-                    let suffix = block_end - ae;
-                    if (prefix != 0 && prefix < MIN_BLOCK)
-                        || (suffix != 0 && suffix < MIN_BLOCK)
-                    {
-                        // Этот блок технически помещает запрос, но его
-                        // неразмещаемые остатки нельзя корректно вернуть при
-                        // освобождении. Ищем следующий подходящий блок.
-                        prev = cur;
-                        cur = node.next;
-                        continue;
-                    }
-
-                    let next = node.next;
-                    let right = if suffix >= MIN_BLOCK {
-                        // Хвост уходит обратно в список как новый узел.
-                        let new_node = ae as *mut FreeNode;
-                        core::ptr::addr_of_mut!((*new_node).size).write(suffix);
-                        core::ptr::addr_of_mut!((*new_node).next).write(next);
-                        NonNull::new(new_node)
-                    } else {
-                        next
-                    };
-
-                    if prefix >= MIN_BLOCK {
-                        // Сохраняем левый выровненный отступ в уже
-                        // существующем узле — он остаётся перед выдаваемым
-                        // пользователю адресом.
-                        node.size = prefix;
-                        node.next = right;
-                    } else if let Some(p) = prev {
-                        (*p.as_ptr()).next = right;
-                    } else {
-                        self.head = right;
-                    }
-
-                    return alloc_start as *mut u8;
-                }
+        while let Some(node_ptr) = cur {
+            if !self.node_ok(node_ptr) {
+                // Список испорчен. Не падаем с overflow, а отрезаем хвост:
+                // ядро продолжит работу с оставшейся частью кучи, а
+                // сообщение укажет адрес повреждения.
+                crate::println!(
+                    "[HEAP] CORRUPT free node {:#x} (alloc size {}); truncating list",
+                    node_ptr.as_ptr() as usize,
+                    size
+                );
+                self.truncate_before(prev);
+                return core::ptr::null_mut();
             }
+
+            let block_start = node_ptr.as_ptr() as usize;
+            let block_size = FreeNode::size(node_ptr);
+            let block_end = block_start + block_size; // границы проверены node_ok
+            let alloc_start = align_up(block_start, align);
+            let alloc_end = match alloc_start.checked_add(size) {
+                Some(end) => end,
+                None => return core::ptr::null_mut(),
+            };
+
+            if alloc_end <= block_end {
+                let prefix = alloc_start - block_start;
+                let suffix = block_end - alloc_end;
+                let next = FreeNode::next(node_ptr);
+
+                // Хвост уходит обратно в список, если в нём помещается узел.
+                let right = if suffix >= MIN_BLOCK {
+                    let new_node = NonNull::new_unchecked(alloc_end as *mut FreeNode);
+                    FreeNode::set_size(new_node, suffix);
+                    FreeNode::set_next(new_node, next);
+                    Some(new_node)
+                } else {
+                    next
+                };
+
+                if prefix >= MIN_BLOCK {
+                    // Левый отступ остаётся отдельным свободным блоком.
+                    FreeNode::set_size(node_ptr, prefix);
+                    FreeNode::set_next(node_ptr, right);
+                } else if let Some(p) = prev {
+                    FreeNode::set_next(p, right);
+                } else {
+                    self.head = right;
+                }
+                // prefix/suffix меньше MIN_BLOCK (0..15 байт) поглощаются
+                // выделением: вернуть их в список нельзя — узел не поместится.
+
+                return alloc_start as *mut u8;
+            }
+
             prev = cur;
-            cur = node.next;
+            cur = FreeNode::next(node_ptr);
         }
         core::ptr::null_mut()
     }
@@ -157,31 +241,45 @@ impl FreeList {
     unsafe fn deallocate(&mut self, ptr: *mut u8, layout: Layout) {
         let size = align_up(layout.size().max(1), ALIGN_GRANULE);
         let start = ptr as usize;
-        let end = start + size;
+        let end = match start.checked_add(size) {
+            Some(end) => end,
+            None => return,
+        };
+        if start < self.start || end > self.end {
+            crate::println!(
+                "[HEAP] dealloc outside heap: ptr={:#x} size={} (heap {:#x}..{:#x})",
+                start, size, self.start, self.end
+            );
+            return;
+        }
 
         // Список отсортирован по адресу. Найдём позицию вставки.
         let mut prev: Option<NonNull<FreeNode>> = None;
         let mut cur = self.head;
         while let Some(node_ptr) = cur {
+            if !self.node_ok(node_ptr) {
+                self.truncate_before(prev);
+                cur = None;
+                break;
+            }
             let n_addr = node_ptr.as_ptr() as usize;
             if n_addr >= end {
                 break;
             }
-            // Безопасно: узел в нашем регионе, под локом.
-            let next = unsafe { node_ptr.as_ref().next };
             prev = cur;
-            cur = next;
+            cur = FreeNode::next(node_ptr);
         }
 
         // Коалесценция с правым соседом (cur), если он примыкает вплотную.
+        let mut merge_right = false;
+        let mut right_next = None;
         let merged_end = if let Some(node_ptr) = cur {
-            let node = node_ptr.as_ref();
-            let n_addr = node_ptr.as_ptr() as usize;
-            if n_addr == end {
-                // Сольёмся: расширим освобождаемый блок, выкинем соседа.
-                end + node.size
+            let node_size = FreeNode::size(node_ptr);
+            if node_ptr.as_ptr() as usize == end {
+                merge_right = true;
+                right_next = FreeNode::next(node_ptr);
+                end.saturating_add(node_size)
             } else {
-                // Не слился — правый сосед останется как есть.
                 end
             }
         } else {
@@ -190,49 +288,25 @@ impl FreeList {
 
         // Коалесценция с левым соседом (prev), если он примыкает вплотную.
         if let Some(prev_ptr) = prev {
-            let p = prev_ptr.as_ref();
             let p_addr = prev_ptr.as_ptr() as usize;
-            let p_end = p_addr + p.size;
-            if p_end == start {
-                // Левый сосед поглощает освобождаемый блок (+правого, если был).
-                core::ptr::addr_of_mut!((*prev_ptr.as_ptr()).size).write(merged_end - p_addr);
-                // Если правый сосед слился — выкинуть его из списка.
-                if let Some(node_ptr) = cur {
-                    let node = node_ptr.as_ref();
-                    let n_addr = node_ptr.as_ptr() as usize;
-                    if n_addr == end {
-                        (*prev_ptr.as_ptr()).next = node.next;
-                    }
+            let p_size = FreeNode::size(prev_ptr);
+            if p_addr.saturating_add(p_size) == start {
+                FreeNode::set_size(prev_ptr, merged_end - p_addr);
+                if merge_right {
+                    FreeNode::set_next(prev_ptr, right_next);
                 }
                 return;
             }
         }
 
-        // Никакой коалесценции слева — создаём новый узел на [start, merged_end).
-        // Если правый сосед слился, он «впитан» в новый узел и выбывает из списка.
-        let new_node = start as *mut FreeNode;
-        core::ptr::addr_of_mut!((*new_node).size).write(merged_end - start);
+        // Новый узел на [start, merged_end); правый сосед «впитан».
+        let new_node = NonNull::new_unchecked(start as *mut FreeNode);
+        FreeNode::set_size(new_node, merged_end - start);
+        FreeNode::set_next(new_node, if merge_right { right_next } else { cur });
         if let Some(prev_ptr) = prev {
-            // next нового узла = cur, но если cur слился — его next
-            let next_after = if let Some(node_ptr) = cur {
-                let node = node_ptr.as_ref();
-                let n_addr = node_ptr.as_ptr() as usize;
-                if n_addr == end { node.next } else { cur }
-            } else {
-                None
-            };
-            core::ptr::addr_of_mut!((*new_node).next).write(next_after);
-            (*prev_ptr.as_ptr()).next = NonNull::new(new_node);
+            FreeNode::set_next(prev_ptr, Some(new_node));
         } else {
-            let next_after = if let Some(node_ptr) = cur {
-                let node = node_ptr.as_ref();
-                let n_addr = node_ptr.as_ptr() as usize;
-                if n_addr == end { node.next } else { cur }
-            } else {
-                None
-            };
-            core::ptr::addr_of_mut!((*new_node).next).write(next_after);
-            self.head = NonNull::new(new_node);
+            self.head = Some(new_node);
         }
     }
 }
@@ -266,6 +340,11 @@ impl LockedHeap {
     // (start, end) виртуальных адресов региона кучи.
     pub fn region(&self) -> (usize, usize) {
         without_interrupts(|| self.0.lock().region())
+    }
+
+    /// Проверка целостности free-list: (блоков, свободных байт, битый адрес).
+    pub fn check(&self) -> (usize, usize, Option<usize>) {
+        without_interrupts(|| self.0.lock().check())
     }
 }
 
@@ -334,6 +413,11 @@ pub unsafe fn init(hhdm: u64) {
 /// Статистика кучи: (used, total) в байтах.
 pub fn stats() -> (usize, usize) {
     ALLOCATOR.stats()
+}
+
+/// Проверка целостности кучи: (блоков, свободных байт, первый битый адрес).
+pub fn check() -> (usize, usize, Option<usize>) {
+    ALLOCATOR.check()
 }
 
 /// Регион кучи: (виртуальное начало, виртуальный конец).

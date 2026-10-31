@@ -98,9 +98,12 @@ pub fn parse(madt_phys: usize) -> Option<MadtInfo> {
                     enabled_cpus += 1;
                 }
             }
-            // Processor Local x2APIC: flags bit 0 = Enabled.
+            // Processor Local x2APIC: type@0, len@1, reserved@2,
+            // x2APIC ID@4, flags@8, ACPI UID@12. Флаги именно на 8, а не 12:
+            // на 12 лежит UID, и проверка «enabled» по нему давала случайное
+            // число CPU.
             9 if record_len >= 16 => {
-                let flags = unsafe { core::ptr::read_unaligned((ptr + 12) as *const u32) };
+                let flags = unsafe { core::ptr::read_unaligned((ptr + 8) as *const u32) };
                 if flags & 1 != 0 {
                     enabled_cpus += 1;
                 }

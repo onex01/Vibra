@@ -18,6 +18,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  apic       - LAPIC/IOAPIC state and interrupt routing\n");
         console.print("  display    - display backends, pixel format, console geometry\n");
         console.print("  heap-test  - full heap stress test (10k alloc/drop)\n");
+        console.print("  heap-check - validate free-list headers (magic/size/bounds)\n");
         console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
         console.print("  panic-test - test fatal error screen (halts VM)\n");
         return CmdResult::Ok;
@@ -43,6 +44,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "apic" => diag_apic(console),
         "display" => diag_display(console),
         "heap-test" => diag_heap_test(console),
+        "heap-check" => diag_heap_check(console),
         "fault-test" => diag_fault_test(console),
         "panic-test" => panic!("diagnostic panic screen test"),
         _ => {
@@ -114,6 +116,29 @@ fn diag_display(console: &mut Console) {
     console.print("  pitch ");
     console.print_num(console.fb_pitch());
     console.print(" words\n");
+}
+
+/// Проверка заголовков free-list: ищем перезапись магии/размера.
+fn diag_heap_check(console: &mut Console) {
+    let (blocks, free, bad) = crate::memory::heap::check();
+    let (used, total) = crate::memory::heap::stats();
+    console.print_colored("[HEAP CHECK]\n", crate::framebuffer::COLOR_YELLOW);
+    console.print("  region: ");
+    console.print_num(total);
+    console.print(" bytes, used ");
+    console.print_num(used);
+    console.print("\n  free blocks: ");
+    console.print_num(blocks);
+    console.print(", free bytes: ");
+    console.print_num(free);
+    console.print("\n");
+    match bad {
+        Some(addr) => {
+            console.print_colored("  CORRUPT node at ", crate::framebuffer::COLOR_RED);
+            console.print(&alloc::format!("{:#x}\n", addr));
+        }
+        None => console.print_colored("  OK: all free-list headers valid\n", crate::framebuffer::COLOR_GREEN),
+    }
 }
 
 fn diag_pmm(console: &mut Console) {
