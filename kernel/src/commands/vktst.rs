@@ -1,8 +1,8 @@
 // vktst — Vibra Kernel Tests.
 //
 // Единая точка входа для системных проверок: CPU, память, таймер/RTC, ФС,
-// блочные устройства, сеть, ядро и boot-лог. Заменяет разрозненные
-// `diag`/`test`/`systest` для повседневной диагностики.
+// блочные устройства, сеть, ядро и boot-лог. Заменяет удалённые `test`,
+// `systest` и `heap`; глубокая диагностика подсистем остаётся в `diag`.
 //
 // Режимы:
 //   vktst                 интерактивное меню
@@ -16,7 +16,7 @@ use crate::framebuffer::{
     COLOR_YELLOW,
 };
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 struct TestResult {

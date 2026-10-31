@@ -42,7 +42,6 @@ fn info_lines() -> alloc::vec::Vec<String> {
     let free_mb = total_mb - used_mb;
 
     let used_kb = (pmm_used * crate::memory::pmm::FRAME_SIZE) / 1024;
-    let total_kb = (pmm_total * crate::memory::pmm::FRAME_SIZE) / 1024;
 
     let cpu_info = crate::cpu_info::detect();
     let cpu_brand = crate::cpu_info::brand_str(&cpu_info);

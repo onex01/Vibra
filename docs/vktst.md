@@ -1,8 +1,9 @@
 # vktst — Vibra Kernel Tests
 
-`vktst` — единая точка входа для системных проверок. Заменяет повседневное
-использование `diag`/`test`/`systest`, оставляя их как алиасы для старых
-сценариев и CI.
+`vktst` — единая точка входа для системных проверок. Команды `test`,
+`systest`, `heap`, `hidtest`, `usertest` и `test-disk` удалены в 0.2.0-rc.5:
+их функции либо дублировались `vktst`/`diag`/`free`, либо были
+разработческими заглушками.
 
 ## Режимы
 
@@ -49,9 +50,12 @@ vktst help            краткая справка
 `vktst run all`, `free`, `top -b` и `tree` из `/proc`, затем проверяет
 маркеры в serial-логе. Тест входит в `.github/workflows/kernel.yml`.
 
-## Отношение к старым командам
+## Отношение к `diag`
 
-- `diag` остаётся для глубокой диагностики подсистем (`diag timer`,
-  `diag pmm`, `diag heap-test`, `diag fault-test`, ...).
-- `test` и `systest` не удалены, чтобы не ломать существующие скрипты, но
-  для интерактивной проверки используйте `vktst`.
+- `vktst` — быстрый обзор и интерактивные проверки.
+- `diag` — глубокая диагностика конкретной подсистемы: `diag pmm`,
+  `diag paging`, `diag vmm`, `diag wxtest`, `diag timer`, `diag apic`,
+  `diag display`, `diag disk`, `diag keyboard`, `diag hw`, `diag usb`,
+  `diag power`, `diag heap-test`, `diag fault-test`, `diag panic-test`.
+- Дубли (`test`, `systest`, `kstat`, `apic`, `display`, `tasks`) удалены;
+  `apic` и `display` переехали в `diag apic` / `diag display`.

@@ -7,8 +7,8 @@ import sys
 
 WARNING_SUMMARY = re.compile(r"`vibra-kernel` \(lib\) generated (\d+) warnings?")
 BUILDS = (
-    ("debug", [], int(os.environ.get("DEBUG_WARNING_BUDGET", "107"))),
-    ("no-default-features", ["--no-default-features"], int(os.environ.get("NO_DEFAULT_WARNING_BUDGET", "110"))),
+    ("debug", [], int(os.environ.get("DEBUG_WARNING_BUDGET", "85"))),
+    ("no-default-features", ["--no-default-features"], int(os.environ.get("NO_DEFAULT_WARNING_BUDGET", "88"))),
 )
 
 

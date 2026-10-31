@@ -15,7 +15,7 @@
 | `make ro-mount-test` | FAT32 read-only по умолчанию, запись только с `rw` | qemu, mtools, dosfstools |
 | `make bad-fs-test` | битые FAT32/ext2/NTFS/MBR не роняют ядро | qemu, python3 |
 | `make nvme-test` | NVMe Identify/queues, block layer, `mount auto`, 4Kn | qemu, mtools |
-| `make shell-test` | Tab, история, `help`, `test`, отсутствие битого prompt | qemu, mtools |
+| `make shell-test` | Tab, история, `help`, `diag timer`, отсутствие битого prompt | qemu, mtools |
 | `make fs-test` | FAT32/ext2/ext4/NTFS read-only и MBR-раздел | qemu, mtools, e2fsprogs, ntfs-3g, util-linux |
 | `make vktst-test` | `vktst run all`, `free`, `top -b`, `tree` из `/proc` | qemu, mtools |
 | `make debug-image-test` | три раздела USB debug-образа и запись `/VIBRA.LOG` | qemu, mtools, util-linux |

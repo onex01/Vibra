@@ -126,6 +126,14 @@ impl MountTable {
         self.mounts.iter().map(|m| format!("{}", m)).collect()
     }
 
+    /// Структурированный список для `df`: (путь, имя ФС, readonly).
+    pub fn list_entries(&self) -> Vec<(String, String, bool)> {
+        self.mounts
+            .iter()
+            .map(|m| (m.path.clone(), String::from(m.fs.name()), m.readonly))
+            .collect()
+    }
+
     /// Проверить, смонтирован ли путь
     pub fn is_mounted(&self, path: &str) -> bool {
         let path = normalize_path(path);

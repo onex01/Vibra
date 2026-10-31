@@ -11,7 +11,7 @@ use crate::println;
 use alloc::vec::Vec;
 use alloc::string::String;
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::Ordering;
 
 /// AHCI HBA Registers (offsets от ABAR)
 const HBA_CAP: u64 = 0x00;      // Host Capabilities

@@ -19,7 +19,6 @@
 //   TSAD0    (0x10) — Transmit Status of Address
 
 use crate::println;
-use alloc::vec::Vec;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, Ordering};
 

@@ -1,54 +1,77 @@
 use super::CmdResult;
-use crate::framebuffer::{Console, COLOR_YELLOW, COLOR_CYAN, COLOR_GREEN};
+use crate::framebuffer::{Console, COLOR_CYAN, COLOR_DARK_GRAY, COLOR_GREEN, COLOR_RED, COLOR_WHITE, COLOR_YELLOW};
+use alloc::format;
 
+/// df — использование смонтированных файловых систем.
+///
+/// Раньше команда печатала выдуманные размеры: размер ramfs брался из
+/// статистики heap, а procfs/sysfs/devtmpfs всегда показывали 0. Теперь
+/// источник — реальная таблица монтирования; размер известен только для
+/// ramfs (он живёт в heap), у остальных стоит `-`.
 pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
-    console.print_colored("Filesystem      Size     Used    Avail   Mount\n", COLOR_CYAN);
-    console.print_colored("-----------     ------   ------  ------  -------\n", COLOR_CYAN);
+    let mem = crate::memory::meminfo();
 
-    // Root filesystem (RamFS)
-    let (used, total) = crate::memory::heap::stats();
-    let used_kb = used / 1024;
-    let total_kb = total / 1024;
-    let free_kb = total_kb - used_kb;
+    console.print_colored(
+        "FILESYSTEM   SIZE        USED        AVAIL       USE%  MODE  MOUNT\n",
+        COLOR_CYAN,
+    );
+    console.print_colored(
+        "----------   ----------  ----------  ----------  ----  ----  ----------\n",
+        COLOR_DARK_GRAY,
+    );
 
-    console.print_colored("ramfs           ", COLOR_GREEN);
-    console.print_num(total_kb);
-    console.print("KB   ");
-    console.print_num(used_kb);
-    console.print("KB   ");
-    console.print_num(free_kb);
-    console.print("KB   /\n");
+    let entries = crate::fs::mount_entries();
+    if entries.is_empty() {
+        console.print_colored("  No filesystems mounted\n", COLOR_RED);
+        return CmdResult::Ok;
+    }
 
-    // /proc (virtual)
-    console.print_colored("procfs          ", COLOR_GREEN);
-    console.print("0KB     0KB     0KB     /proc\n");
+    for (path, fs_name, readonly) in entries {
+        // Размер есть только у ramfs: остальные ФС не отдают статистику.
+        let (size, used, avail) = if fs_name == "ramfs" {
+            (
+                crate::memory::format_bytes(mem.heap_total),
+                crate::memory::format_bytes(mem.heap_used),
+                crate::memory::format_bytes(mem.heap_total.saturating_sub(mem.heap_used)),
+            )
+        } else {
+            (
+                alloc::string::String::from("-"),
+                alloc::string::String::from("-"),
+                alloc::string::String::from("-"),
+            )
+        };
 
-    // /sys (virtual)
-    console.print_colored("sysfs           ", COLOR_GREEN);
-    console.print("0KB     0KB     0KB     /sys\n");
+        let pct = if fs_name == "ramfs" && mem.heap_total > 0 {
+            format!("{}%", (mem.heap_used * 100) / mem.heap_total)
+        } else {
+            alloc::string::String::from("-")
+        };
 
-    // /dev (virtual)
-    console.print_colored("devtmpfs        ", COLOR_GREEN);
-    console.print("0KB     0KB     0KB     /dev\n");
+        console.print(&format!("{:<12} ", fs_name));
+        console.print(&format!("{:<11} ", size));
+        console.print(&format!("{:<11} ", used));
+        console.print(&format!("{:<11} ", avail));
+        console.print(&format!("{:<5} ", pct));
+        if readonly {
+            console.print_colored("ro    ", COLOR_YELLOW);
+        } else {
+            console.print_colored("rw    ", COLOR_GREEN);
+        }
+        console.print(&path);
+        console.put_char('\n');
+    }
 
-    console.print("\n");
-    console.print_colored("Heap: ", COLOR_YELLOW);
-    console.print("used=");
-    console.print_num(used);
-    console.print(" total=");
-    console.print_num(total);
-    console.print("\n");
-
-    // PMM stats
-    let (used_frames, total_frames) = crate::memory::pmm::stats();
-    let used_mb = (used_frames * 4096) / (1024 * 1024);
-    let total_mb = (total_frames * 4096) / (1024 * 1024);
-
-    console.print_colored("RAM:  ", COLOR_YELLOW);
-    console.print_num(used_mb);
-    console.print("MB / ");
-    console.print_num(total_mb);
-    console.print("MB used\n");
+    console.put_char('\n');
+    console.print_colored("Physical RAM: ", COLOR_WHITE);
+    console.print(&crate::memory::format_pair(mem.used_bytes, mem.total_bytes));
+    console.print(" (");
+    console.print_num(mem.used_percent() as usize);
+    console.print("%)\n");
+    console.print_colored(
+        "Block devices: `disks`. Mount: `mount <path> auto <dev>`.\n",
+        COLOR_DARK_GRAY,
+    );
 
     CmdResult::Ok
 }

@@ -2,7 +2,6 @@ use super::CmdResult;
 use alloc::format;
 use crate::framebuffer::{Console, COLOR_GREEN, COLOR_RED, COLOR_YELLOW};
 use crate::fs;
-use crate::fs::File as _;
 
 pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     if args.len() < 2 {

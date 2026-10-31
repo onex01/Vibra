@@ -64,7 +64,7 @@ rm -f "$serial_log"
 
     # Tab для команды: hel<TAB><ENTER> (циклически может дать help)
     send_text "help cat"; send_text $'\n'; sleep 1
-    send_text "test timer"; send_text $'\n'; sleep 2
+    send_text "diag timer"; send_text $'\n'; sleep 2
     send_text "echo --help"; send_text $'\n'; sleep 1
 
     # История: длинная команда → короткая → два Up. Экран должен корректно
@@ -100,8 +100,8 @@ fail() {
 grep -Fq 'ls /cfg' "$serial_log" || fail "Tab did not complete /cf to /cfg/"
 grep -Eq '(^| )hostname( |$)' "$serial_log" || fail "ls /cfg/ produced no output"
 grep -Fq 'cat' "$serial_log" || fail "help cat produced no output"
-grep -Fq '[TIMER / CLOCK]' "$serial_log" || fail "test timer produced no output"
-grep -Fq 'test timer' "$serial_log" || fail "history Up did not repeat the previous command"
+grep -Fq '[TIMER / CLOCK]' "$serial_log" || fail "diag timer produced no output"
+grep -Fq 'diag timer' "$serial_log" || fail "history Up did not repeat the previous command"
 grep -Fq 'echo - print text to screen' "$serial_log" || fail "generic --help did not work"
 grep -aEq '^abc' "$serial_log" || fail "cursor editing in the middle of the line failed"
 

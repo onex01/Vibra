@@ -1,5 +1,5 @@
 use super::CmdResult;
-use crate::framebuffer::{Console, COLOR_YELLOW, COLOR_GREEN};
+use crate::framebuffer::{Console, COLOR_GREEN};
 use crate::fs;
 use alloc::format;
 

@@ -183,7 +183,7 @@ static ICMP_REPLY_AVAIL: core::sync::atomic::AtomicBool = core::sync::atomic::At
 /// Публичный флаг для сброса перед каждым запросом
 pub static REPLY_RECEIVED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::Ordering;
 
 /// Проверить, получен ли ответ
 pub fn icmp_pending_reply(id: u16, seq: u16) -> bool {

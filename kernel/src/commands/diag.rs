@@ -1,5 +1,4 @@
 use crate::framebuffer::Console;
-use crate::fs::DiskIo;
 use super::CmdResult;
 
 pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
@@ -16,6 +15,8 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  usb        - xHCI controllers, devices, storage, log sink\n");
         console.print("  disk       - block devices, sector size and FS signatures\n");
         console.print("  timer      - clock sources, IRQ tick rate, RTC/BIOS time\n");
+        console.print("  apic       - LAPIC/IOAPIC state and interrupt routing\n");
+        console.print("  display    - display backends, pixel format, console geometry\n");
         console.print("  heap-test  - full heap stress test (10k alloc/drop)\n");
         console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
         console.print("  panic-test - test fatal error screen (halts VM)\n");
@@ -39,6 +40,8 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "usb" => diag_usb(console),
         "disk" | "blk" => diag_disk(console),
         "timer" => diag_timer(console),
+        "apic" => diag_apic(console),
+        "display" => diag_display(console),
         "heap-test" => diag_heap_test(console),
         "fault-test" => diag_fault_test(console),
         "panic-test" => panic!("diagnostic panic screen test"),
@@ -49,6 +52,68 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         }
     }
     CmdResult::Ok
+}
+
+/// APIC/LAPIC состояние (бывшая команда `apic`).
+fn diag_apic(console: &mut Console) {
+    let active = crate::interrupts::apic::is_active();
+    let has_apic = crate::interrupts::apic::has_apic();
+
+    console.print_colored("[APIC]\n", crate::framebuffer::COLOR_YELLOW);
+    console.print("  detected: ");
+    console.print(if has_apic { "yes" } else { "no" });
+    console.print("\n  active:   ");
+    console.print(if active {
+        "yes (full APIC, PIC offline)"
+    } else {
+        "no (PIC primary)"
+    });
+    console.print("\n");
+
+    if active {
+        console.print("  timer:    LAPIC periodic, vector 32\n");
+        console.print("  keyboard: IOAPIC GSI1 -> vector 33\n");
+        console.print("  serial:   polling (no IOAPIC redirect)\n");
+    }
+}
+
+/// Дисплей: бэкенды, формат пикселя и геометрия консоли (бывшая `display`).
+fn diag_display(console: &mut Console) {
+    let format = crate::display::get_active_format();
+    let count = crate::display::backend_count();
+
+    console.print_colored("[DISPLAY]\n", crate::framebuffer::COLOR_YELLOW);
+    console.print("  format:   ");
+    console.print(format.name());
+    console.print("\n  backends: ");
+    console.print_num(count);
+    console.print("\n");
+
+    for i in 0..count {
+        if let Some((name, w, h, bpp, fmt)) = crate::display::get_backend_info(i) {
+            console.print("    [");
+            console.print_num(i);
+            console.print("] ");
+            console.print(&name);
+            console.print("  ");
+            console.print_num(w as usize);
+            console.print("x");
+            console.print_num(h as usize);
+            console.print("  ");
+            console.print_num(bpp as usize);
+            console.print("bpp  ");
+            console.print(fmt.name());
+            console.print("\n");
+        }
+    }
+
+    console.print("  console:  ");
+    console.print_num(console.fb_width());
+    console.print("x");
+    console.print_num(console.fb_height());
+    console.print("  pitch ");
+    console.print_num(console.fb_pitch());
+    console.print(" words\n");
 }
 
 fn diag_pmm(console: &mut Console) {

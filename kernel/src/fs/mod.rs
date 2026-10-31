@@ -17,14 +17,13 @@ pub use ramfs::RamFs;
 pub use fat32::Fat32Fs;
 pub use ext2::Ext2Fs;
 pub use ntfs::NtfsFs;
-pub use disk::{DiskIo, RamDisk};
+pub use disk::DiskIo;
 pub use disk_manager::DiskManager;
 
 use spin::{Lazy, Mutex};
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use alloc::format;
 
 /// Единственный корневой RamFS. Раньше в VFS монтировался второй, пустой
 /// экземпляр, из-за чего `ls /` был пуст, а `write_file` писал в копию `Vec`.
@@ -170,14 +169,6 @@ fn read_all(file: &mut dyn File) -> Result<Vec<u8>, FsError> {
         file.read(&mut buf)?;
     }
     Ok(buf)
-}
-
-pub fn fs_count() -> usize {
-    list_dir("/").len()
-}
-
-pub fn list_entries() -> Vec<DirEntry> {
-    list_dir(&get_current_dir())
 }
 
 /// Привести путь к абсолютному виду относительно `base`.
@@ -507,6 +498,11 @@ fn mount_auto_mode(path: &str, disk_id: usize, write: bool) -> Result<&'static s
 /// Список смонтированных ФС
 pub fn list_mounts() -> Vec<String> {
     VFS_MANAGER.mount_table.lock().list()
+}
+
+/// Структурированный список монтирований: (путь, ФС, readonly).
+pub fn mount_entries() -> Vec<(String, String, bool)> {
+    VFS_MANAGER.mount_table.lock().list_entries()
 }
 
 /// Проверить, смонтирована ли ФС

@@ -47,7 +47,7 @@ pub fn internet_checksum(data: &[u8]) -> u16 {
     }
 
     // Инвертируем
-    (!sum as u16)
+    !sum as u16
 }
 
 /// Разобрать IP адрес из строки "10.0.2.2"

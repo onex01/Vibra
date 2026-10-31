@@ -69,7 +69,7 @@ PS/2 и USB HID и число HID-отчётов.
 
 Диагностика: `diag timer` (источник и частота, HPET/TSC, измеренная частота
 IRQ, RTC, расхождение IRQ-времени с аппаратным), `date hw` (сырые регистры
-CMOS), `kstat`, `uptime`.
+CMOS), `diag apic`, `uptime`.
 
 ## Подсистемы
 

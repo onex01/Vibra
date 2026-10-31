@@ -13,7 +13,6 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use alloc::format;
 use spin::Mutex;
 
 /// Запись реестра: диск или раздел.
@@ -43,30 +42,11 @@ impl DiskEntry {
 /// Менеджер дисков для монтирования
 pub struct DiskManager {
     disks: Vec<DiskEntry>,
-    next_ram: u32,
 }
 
 impl DiskManager {
     pub fn new() -> Self {
-        Self { disks: Vec::new(), next_ram: 0 }
-    }
-
-    /// Добавить «безымянный» диск (используется командой `test-disk ram`).
-    ///
-    /// Размер неизвестен, поэтому ставим 0 — такой диск нельзя разбить на
-    /// разделы, но можно смонтировать целиком.
-    pub fn add_disk(&mut self, disk: Box<dyn DiskIo>) -> usize {
-        let name = format!("ram{}", self.next_ram);
-        self.next_ram += 1;
-        self.disks.push(DiskEntry {
-            name,
-            kind: "disk",
-            sectors: 0,
-            offset: 0,
-            fs_type: "unknown",
-            disk: Arc::new(Mutex::new(disk)),
-        });
-        self.disks.len() - 1
+        Self { disks: Vec::new() }
     }
 
     /// Зарегистрировать устройство с известными параметрами.

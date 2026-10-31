@@ -12,7 +12,6 @@ pub mod rm;
 pub mod edit;
 pub mod echo;
 pub mod clear;
-pub mod tasks;
 pub mod pwd;
 pub mod uptime;
 pub mod quit;
@@ -20,12 +19,9 @@ pub mod diag;
 pub mod diag_hw;
 pub mod diag_usb;
 pub mod log;
-pub mod heap;
 pub mod neofetch;
 pub mod mount;
-pub mod test_disk;
 pub mod df;
-pub mod kstat;
 pub mod uname;
 pub mod reboot;
 pub mod tree;
@@ -33,24 +29,16 @@ pub mod top;
 pub mod whoami;
 pub mod su;
 pub mod id;
-pub mod passwd;
 pub mod free;
 pub mod ps;
-pub mod chmod;
 pub mod hostname;
 pub mod date;
 pub mod lspci;
-pub mod usertest;
-pub mod apic;
 pub mod beep;
 pub mod kill;
 pub mod run;
-pub mod display;
 pub mod history;
 pub mod net;
-pub mod systest;
-pub mod hidtest;
-pub mod test;
 pub mod vktst;
 pub mod disks;
 
@@ -90,13 +78,11 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "edit",    help: "edit/create file contents",  func: edit::run },
     Command { name: "echo",    help: "print text to screen",       func: echo::run },
     Command { name: "rm",      help: "remove file or directory",   func: rm::run },
-    Command { name: "tasks",   help: "show running processes",     func: tasks::run },
     Command { name: "df",      help: "show disk/filesystem usage", func: df::run },
     Command { name: "uptime",  help: "show system uptime",         func: uptime::run },
     Command { name: "neofetch", help: "system info (logo + info)",  func: neofetch::run },
     Command { name: "mount",   help: "mount filesystems",          func: mount::run },
     Command { name: "disks",   help: "list block devices/partitions", func: disks::run },
-    Command { name: "kstat",    help: "show interrupt statistics", func: kstat::run },
     Command { name: "uname",    help: "system information",        func: uname::run },
     Command { name: "diag",     help: "run kernel diagnostics",    func: diag::run },
     Command { name: "log",      help: "show boot log (log [lines])", func: log::run },
@@ -106,20 +92,12 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "whoami",   help: "show current user",         func: whoami::run },
     Command { name: "id",       help: "show user/group ids",       func: id::run },
     Command { name: "su",       help: "switch user",               func: su::run },
-    Command { name: "passwd",   help: "change password",           func: passwd::run },
     Command { name: "free",     help: "show memory usage",         func: free::run },
     Command { name: "ps",       help: "show running processes",    func: ps::run },
-    Command { name: "chmod",    help: "change file permissions",   func: chmod::run },
     Command { name: "hostname", help: "show/set system hostname",  func: hostname::run },
     Command { name: "date",     help: "show current time",        func: date::run },
-    Command { name: "apic",    help: "APIC management/status",    func: apic::run },
     Command { name: "lspci",   help: "list PCI devices",          func: lspci::run },
-    Command { name: "usertest", help: "run user-space process",  func: usertest::run },
-    Command { name: "systest",  help: "interactive system test",   func: systest::run },
-    Command { name: "test",     help: "run system checks (test all|cpu|mem|disk|net...)", func: test::run },
-    Command { name: "hidtest",  help: "inject test keys from HID subsystem", func: hidtest::run },
     Command { name: "quit",    help: "halt the system",            func: quit::run },
-    Command { name: "display", help: "show display info",          func: display::run },
     Command { name: "history", help: "show command history",       func: history::run },
     Command { name: "ping",    help: "ICMP ping to IP address",    func: net::ping },
     Command { name: "ifconfig", help: "show network interface",    func: net::ifconfig },
