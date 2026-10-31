@@ -390,8 +390,9 @@ uefi-usb:
 # Ядро пишет кольцевой boot-лог в /VIBRA.LOG на FAT32-раздел с меткой
 # VIBRALOG. Двойное согласие: feature при сборке + метка тома.
 
-LOG_PARTITION_MB ?= 64
-KERNEL_PARTITION_MB ?= 64
+# Минимальный FAT32 — 33 МиБ; держим запас, но не раздуваем ISO.
+LOG_PARTITION_MB ?= 48
+KERNEL_PARTITION_MB ?= 40
 USB_DEBUG_SIZE_MB ?= 256
 USB_DEBUG_ESP_MB ?= 64
 USB_DEBUG_KERNEL_MB ?= 64
