@@ -28,6 +28,13 @@ if [[ ! -f "$repo_root/OVMF.fd" || ! -f "$hdd" ]]; then
     exit 1
 fi
 
+# Понятная ошибка вместо "Failed to get write lock": забытый интерактивный
+# QEMU (`./build.sh` без аргументов) держит hdd.img и блокирует тесты.
+if pgrep -f "file=.*hdd.img" >/dev/null 2>&1; then
+    echo "another QEMU is using build/hdd.img; stop it first (pgrep -af qemu-system)" >&2
+    exit 1
+fi
+
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
     make -C "$repo_root" build >/dev/null
 fi
@@ -77,7 +84,7 @@ rm -f "$log_file"
 } | timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$qemu" \
     -m 256M -serial "file:$log_file" -monitor stdio -display none \
     -drive if=pflash,format=raw,file="$repo_root/OVMF.fd",readonly=on \
-    -drive "file=$hdd",format=raw -M q35 -no-reboot \
+    -drive "file=$hdd",format=raw,snapshot=on -M q35 -no-reboot \
     -device e1000,netdev=net0 -netdev user,id=net0 \
     >/dev/null 2>"$repo_root/build/qemu-vktst-stderr.log" || true
 
