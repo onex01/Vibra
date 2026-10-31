@@ -21,7 +21,39 @@ use spin::Mutex;
 pub fn probe(mgr: &mut DiskManager) -> usize {
     let (added, disks) = probe_ahci(mgr);
     let (nvme_added, nvme_disks) = probe_nvme(mgr, disks);
-    added + nvme_added + probe_usb(mgr, disks + nvme_disks)
+    let (atapi_added, atapi_count) = probe_atapi(mgr, disks + nvme_disks);
+    added + nvme_added + atapi_added + probe_usb(mgr, disks + nvme_disks + atapi_count)
+}
+
+/// ATAPI CD/DVD: `sr0`, `sr1`, ... (логические блоки 2048 байт).
+fn probe_atapi(mgr: &mut DiskManager, _first_index: usize) -> (usize, usize) {
+    let ports = crate::drivers::ahci::atapi_ports();
+    let mut added = 0usize;
+    let mut count = 0usize;
+
+    for (index, port) in ports.iter().enumerate() {
+        let Some(disk) = crate::drivers::ahci::AtapiDisk::new(*port) else {
+            continue;
+        };
+        let sectors = disk.sectors_512();
+        if sectors == 0 {
+            continue;
+        }
+
+        let name = alloc::format!("sr{}", index);
+        crate::println!(
+            "[BLK] {}: {} МиБ [ATAPI CD, {} B/block]",
+            name,
+            (sectors * 512) / (1024 * 1024),
+            disk.sector_size()
+        );
+
+        let shared: Arc<Mutex<Box<dyn DiskIo>>> = Arc::new(Mutex::new(Box::new(disk)));
+        added += register(mgr, &name, shared, sectors);
+        count += 1;
+    }
+
+    (added, count)
 }
 
 /// SATA-диски: `(число записей, число дисков)`.
@@ -215,6 +247,10 @@ impl DiskIo for SharedDisk {
 
     fn sector_size(&self) -> usize {
         self.inner.lock().sector_size()
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.inner.lock().is_read_only()
     }
 
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), super::vfs::FsError> {

@@ -805,6 +805,12 @@ impl Fat32Fs {
     }
 
     /// Метка тома из BPB (11 байт, выровнена пробелами).
+    /// Физический носитель только для чтения (CD/DVD). FAT32-слой может
+    /// быть открыт rw, но запись всё равно невозможна.
+    pub fn device_is_read_only(&self) -> bool {
+        self.disk.lock().is_read_only()
+    }
+
     pub fn label(&self) -> [u8; 11] {
         self.geo.volume_label
     }

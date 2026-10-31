@@ -79,6 +79,10 @@ impl DiskIo for DiskView {
         self.0.lock().sector_size()
     }
 
+    fn is_read_only(&self) -> bool {
+        self.0.lock().is_read_only()
+    }
+
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
         self.0.lock().read_lba(lba, buf)
     }
@@ -175,6 +179,13 @@ fn candidate_windows() -> Vec<Box<dyn DiskIo>> {
     // раньше boot-log вообще не сканировал его — VIBRALOG не находился.
     if let Some(disk) = crate::drivers::nvme::create_disk() {
         disks.push(disk);
+    }
+    // ATAPI CD/DVD: debug ISO держит VIBRALOG на appended-разделе, и без
+    // этого цикла ядро физически не могло найти лог-раздел на CD.
+    for port in crate::drivers::ahci::atapi_ports() {
+        if let Some(disk) = crate::drivers::ahci::AtapiDisk::new(port) {
+            disks.push(Box::new(disk));
+        }
     }
     for port in crate::drivers::ahci::active_ports() {
         disks.push(Box::new(crate::drivers::ahci::AhciDisk::new(port)));
@@ -289,6 +300,13 @@ pub fn attach() -> bool {
                     core::str::from_utf8(&VOLUME_LABEL).unwrap_or("?")
                 );
             }
+            continue;
+        }
+
+        if fs.device_is_read_only() {
+            println!(
+                "[LOG] VIBRALOG is on read-only media (CD/DVD); flash the ISO to USB to persist logs"
+            );
             continue;
         }
 

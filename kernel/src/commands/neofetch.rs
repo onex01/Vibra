@@ -82,7 +82,16 @@ fn info_lines() -> alloc::vec::Vec<String> {
 
     alloc::vec![
         format!("{}{}Kernel{}    Vibra v{} \"{}\"", CYL, BOLD, RST, version::KERNEL_VERSION, version::KERNEL_CODENAME),
-        format!("{}{}CPU{}       {} ({}, {})", CYL, BOLD, RST, cpu_brand, cpu_info.cores, cpu_freq),
+        format!(
+            "{}{}CPU{}       {} ({}, {}, {})",
+            CYL,
+            BOLD,
+            RST,
+            cpu_brand,
+            crate::cpu_info::topology_str(&cpu_info),
+            cpu_info.cores,
+            cpu_freq
+        ),
         format!("{}{}Arch{}       {}", CYL, BOLD, RST, version::ARCHITECTURE),
         format!("{}{}Uptime{}     {}", CYL, BOLD, RST, uptime_str),
         format!("{}{}Memory{}     {} MB / {} MB ({} KB used, {} free)", CYL, BOLD, RST, used_mb, total_mb, used_kb, free_mb),

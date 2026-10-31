@@ -82,9 +82,13 @@ impl DiskManager {
     pub fn open(&self, index: usize) -> Option<Box<dyn DiskIo>> {
         let e = self.disks.get(index)?;
         if e.sectors == 0 {
-            return Some(Box::new(WholeDisk::new(e.disk.clone())));
+            return Some(Box::new(super::disk::CountingDisk::new(Box::new(
+                WholeDisk::new(e.disk.clone()),
+            ))));
         }
-        Some(Box::new(PartitionDisk::new(e.disk.clone(), e.offset, e.sectors)))
+        Some(Box::new(super::disk::CountingDisk::new(Box::new(
+            PartitionDisk::new(e.disk.clone(), e.offset, e.sectors),
+        ))))
     }
 
     /// Информация для `mount`/`df`: (имя, вид, сектора, тип ФС).
@@ -133,6 +137,10 @@ impl DiskIo for WholeDisk {
 
     fn sector_size(&self) -> usize {
         self.inner.lock().sector_size()
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.inner.lock().is_read_only()
     }
 
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), super::vfs::FsError> {

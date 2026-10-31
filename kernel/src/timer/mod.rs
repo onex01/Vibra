@@ -23,6 +23,9 @@ use crate::interrupts::idt::TIMER_HZ;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 
+/// Аккумулированное время в idle. См. `idle_wait`.
+static IDLE_NS: AtomicU64 = AtomicU64::new(0);
+
 /// PIT: 1.193182 МГц, канал 2 используется только для калибровки.
 const PIT_FREQ: u64 = 1_193_182;
 
@@ -443,11 +446,22 @@ pub fn irq_ticks_healthy() -> bool {
 /// нет, `hlt` может усыпить машину навсегда (клавиатура при polling fallback
 /// прерываний не генерирует). В этом случае крутимся в `spin_loop`.
 pub fn idle_wait() {
+    let start = now_ns();
     if irq_ticks_healthy() {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
     } else {
         core::hint::spin_loop();
     }
+    let elapsed = now_ns().saturating_sub(start);
+    IDLE_NS.fetch_add(elapsed, Ordering::Relaxed);
+}
+
+/// Сколько наносекунд CPU провёл в idle (`hlt`/`spin_loop`).
+///
+/// Нужно для честной загрузки CPU: старый `top` считал `context switches per
+/// second` и на простаивающем shell показывал 24%.
+pub fn idle_ns() -> u64 {
+    IDLE_NS.load(Ordering::Relaxed)
 }
 
 /// Текущее время BIOS + монотонных часов.

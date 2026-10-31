@@ -8,7 +8,23 @@ pub mod icmp;
 
 use crate::println;
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Счётчики для `top`: пакеты и байты на уровне Ethernet.
+static RX_PACKETS: AtomicU64 = AtomicU64::new(0);
+static RX_BYTES: AtomicU64 = AtomicU64::new(0);
+static TX_PACKETS: AtomicU64 = AtomicU64::new(0);
+static TX_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// (rx_packets, rx_bytes, tx_packets, tx_bytes).
+pub fn stats() -> (u64, u64, u64, u64) {
+    (
+        RX_PACKETS.load(Ordering::Relaxed),
+        RX_BYTES.load(Ordering::Relaxed),
+        TX_PACKETS.load(Ordering::Relaxed),
+        TX_BYTES.load(Ordering::Relaxed),
+    )
+}
 
 /// Сетевой интерфейс
 pub struct NetInterface {
@@ -94,7 +110,10 @@ pub fn send_ethernet(dst: [u8; 6], ether_type: u16, payload: &[u8]) {
     frame[12..14].copy_from_slice(&ether_type.to_be_bytes());
     frame[14..].copy_from_slice(payload);
 
-    crate::drivers::e1000::send_packet(&frame);
+    if crate::drivers::e1000::send_packet(&frame) {
+        TX_PACKETS.fetch_add(1, Ordering::Relaxed);
+        TX_BYTES.fetch_add(frame.len() as u64, Ordering::Relaxed);
+    }
 }
 
 /// Получить данные из ARP таблицы (для ifconfig)
@@ -108,6 +127,8 @@ pub fn handle_ethernet(frame: &[u8]) {
     if frame.len() < 14 {
         return;
     }
+    RX_PACKETS.fetch_add(1, Ordering::Relaxed);
+    RX_BYTES.fetch_add(frame.len() as u64, Ordering::Relaxed);
 
     let dst_mac = [frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]];
     let src_mac = [frame[6], frame[7], frame[8], frame[9], frame[10], frame[11]];

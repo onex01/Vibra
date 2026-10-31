@@ -155,8 +155,16 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                     None => Err(fs::FsError::NotFound),
                 },
                 "ext" | "ext2" | "ext3" | "ext4" => {
+                    if write {
+                        console.print_colored(
+                            "FAILED: ext2/3/4 driver is read-only (write is not implemented)\n",
+                            COLOR_RED,
+                        );
+                        return CmdResult::Ok;
+                    }
                     match fs::get_disk_manager().lock().open(disk_id) {
-                        Some(disk) => fs::mount_ext(path, disk, true).map(|_| format!("OK (ext, ro)")),
+                        Some(disk) => fs::mount_ext(path, disk, true)
+                            .map(|name| format!("OK ({}, ro)", name)),
                         None => Err(fs::FsError::NotFound),
                     }
                 }

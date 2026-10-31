@@ -52,10 +52,12 @@ impl FileSystem for ProcFs {
                 let info = crate::cpu_info::detect();
                 data.extend_from_slice(
                     alloc::format!(
-                        "processor: 0\nvendor_id: {}\nmodel name: {}\ncores: {}\ncpu MHz: {}\n",
+                        "processor: 0\nvendor_id: {}\nmodel name: {}\nphysical cores: {}\nlogical cores: {}\nthreads per core: {}\ncpu MHz: {}\n",
                         crate::cpu_info::vendor_str(&info),
                         crate::cpu_info::brand_str(&info),
-                        info.cores,
+                        info.topology.physical_cores,
+                        info.topology.logical_cores,
+                        info.topology.threads_per_core,
                         crate::cpu_info::freq_str(&info)
                     )
                     .as_bytes(),

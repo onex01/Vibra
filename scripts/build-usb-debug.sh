@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# build-usb-debug.sh — загрузочная флешка с отдельным разделом для boot-лога.
+# build-usb-debug.sh — загрузочная флешка с отдельными разделами для ядра и лога.
 #
 # Раскладка (GPT, UEFI):
-#   1. VIBRA-ESP  — FAT32, 64 МиБ: Limine + kernel.elf + limine.conf
-#   2. VIBRALOG   — FAT32, остальное: пустой /VIBRA.LOG (ядро допишет)
+#   1. VIBRA-ESP  — FAT32: Limine (BOOTX64.EFI) + limine.conf
+#   2. VIBRA      — FAT32: kernel.elf (Limine грузит его как boot(2):/kernel.elf)
+#   3. VIBRALOG   — FAT32: пустой /VIBRA.LOG (ядро допишет)
 #
 # Ядро ищет раздел по метке тома (BPB 0x47), а не по номеру: метка VIBRALOG
 # и есть второе «согласие» на запись (первое — feature boot-log-to-usb).
@@ -18,6 +19,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="$repo_root/build"
 size_mb="${USB_DEBUG_SIZE_MB:-256}"
 esp_mb="${USB_DEBUG_ESP_MB:-64}"
+kernel_mb="${USB_DEBUG_KERNEL_MB:-64}"
 image="${USB_DEBUG_IMAGE:-$build_dir/vibra-usb-debug.img}"
 limine_dir="${LIMINE_DIR:-$repo_root/limine-bin}"
 kernel="${KERNEL_ELF:-$repo_root/target/x86_64-unknown-none/debug/vibra}"
@@ -35,7 +37,7 @@ for tool in truncate sfdisk dd mkfs.fat mmd mcopy mdir; do
     fi
 done
 
-for file in "$kernel" "$repo_root/limine.conf" "$limine_dir/BOOTX64.EFI"; do
+for file in "$kernel" "$repo_root/limine-debug.conf" "$limine_dir/BOOTX64.EFI"; do
     if [[ ! -f "$file" ]]; then
         echo "missing required file: $file (run make kernel && ./build.sh setup first)" >&2
         exit 1
@@ -46,8 +48,12 @@ if (( esp_mb < 33 )); then
     echo "USB_DEBUG_ESP_MB must be >= 33 (FAT32 minimum)" >&2
     exit 2
 fi
-if (( size_mb < esp_mb + 64 )); then
-    echo "USB_DEBUG_SIZE_MB must be at least ESP + 64 MiB" >&2
+if (( kernel_mb < 33 )); then
+    echo "USB_DEBUG_KERNEL_MB must be >= 33 (FAT32 minimum)" >&2
+    exit 2
+fi
+if (( size_mb < esp_mb + kernel_mb + 64 )); then
+    echo "USB_DEBUG_SIZE_MB must be at least ESP + VIBRA + 64 MiB" >&2
     exit 2
 fi
 
@@ -55,27 +61,36 @@ mkdir -p "$build_dir" "$(dirname "$image")"
 rm -f "$image"
 
 esp_sectors=$((esp_mb * 2048))
-log_start=$((esp_start + esp_sectors))
+kernel_start=$((esp_start + esp_sectors))
+kernel_sectors=$((kernel_mb * 2048))
+log_start=$((kernel_start + kernel_sectors))
 log_sectors=$((size_mb * 2048 - log_start - 34))
 
 esp_image="$(mktemp "$build_dir/usb-debug-esp.XXXXXX.img")"
+kernel_image="$(mktemp "$build_dir/usb-debug-kernel.XXXXXX.img")"
 log_image="$(mktemp "$build_dir/usb-debug-log.XXXXXX.img")"
-trap 'rm -f "$esp_image" "$log_image"' EXIT
+trap 'rm -f "$esp_image" "$kernel_image" "$log_image"' EXIT
 
-echo "==> Creating GPT image ($size_mb MiB: ESP ${esp_mb} MiB + VIBRALOG)"
+echo "==> Creating GPT image ($size_mb MiB: ESP ${esp_mb} + VIBRA ${kernel_mb} + VIBRALOG)"
 truncate -s "${size_mb}M" "$image"
-printf 'label: gpt\nunit: sectors\nfirst-lba: %s\n\nstart=%s, size=%s, type=U, name="VIBRA-ESP"\nstart=%s, size=%s, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name="VIBRALOG"\n' \
-    "$esp_start" "$esp_start" "$esp_sectors" "$log_start" "$log_sectors" \
+printf 'label: gpt\nunit: sectors\nfirst-lba: %s\n\nstart=%s, size=%s, type=U, name="VIBRA-ESP"\nstart=%s, size=%s, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name="VIBRA"\nstart=%s, size=%s, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name="VIBRALOG"\n' \
+    "$esp_start" "$esp_start" "$esp_sectors" "$kernel_start" "$kernel_sectors" "$log_start" "$log_sectors" \
     | sfdisk --wipe always "$image" >/dev/null
 
-echo "==> Building EFI System Partition"
+echo "==> Building EFI System Partition (Limine)"
 dd if=/dev/zero of="$esp_image" bs=512 count="$esp_sectors" status=none
 mkfs.fat -F 32 -n VIBRA-ESP "$esp_image" >/dev/null
 mmd -i "$esp_image" ::/EFI ::/EFI/BOOT ::/limine
 mcopy -o -i "$esp_image" "$limine_dir/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
-mcopy -o -i "$esp_image" "$kernel" ::/kernel.elf
-mcopy -o -i "$esp_image" "$repo_root/limine.conf" ::/limine/limine.conf
+mcopy -o -i "$esp_image" "$repo_root/limine-debug.conf" ::/limine/limine.conf
 dd if="$esp_image" of="$image" bs=512 seek="$esp_start" conv=notrunc status=none
+
+echo "==> Building VIBRA partition (kernel)"
+dd if=/dev/zero of="$kernel_image" bs=512 count="$kernel_sectors" status=none
+mkfs.fat -F 32 -n VIBRA "$kernel_image" >/dev/null
+mcopy -o -i "$kernel_image" "$kernel" ::/kernel.elf
+mcopy -o -i "$kernel_image" "$repo_root/limine-debug.conf" ::/limine.conf
+dd if="$kernel_image" of="$image" bs=512 seek="$kernel_start" conv=notrunc status=none
 
 echo "==> Building VIBRALOG partition"
 dd if=/dev/zero of="$log_image" bs=512 count="$log_sectors" status=none
@@ -88,11 +103,13 @@ dd if="$log_image" of="$image" bs=512 seek="$log_start" conv=notrunc status=none
 
 sfdisk --verify "$image"
 mdir -i "$image@@$((esp_start * 512))" ::/limine >/dev/null
+mdir -i "$image@@$((kernel_start * 512))" ::/ >/dev/null
 mdir -i "$image@@$((log_start * 512))" ::/ | sed 's/^/    /'
 
 echo
 echo "USB debug image ready: $image"
-echo "  ESP:     offset $((esp_start * 512)) bytes, label VIBRA-ESP"
+echo "  ESP:      offset $((esp_start * 512)) bytes, label VIBRA-ESP"
+echo "  VIBRA:    offset $((kernel_start * 512)) bytes, label VIBRA"
 echo "  VIBRALOG: offset $((log_start * 512)) bytes, label VIBRALOG"
 echo "Flash: sudo dd if=$image of=/dev/sdX bs=4M status=progress"
 echo "Read the log afterwards: scripts/read-boot-log.sh /dev/sdX"

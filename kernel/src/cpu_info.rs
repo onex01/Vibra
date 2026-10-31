@@ -72,8 +72,12 @@ pub enum CpuVendor {
 /// Topology ядра (cores/threads)
 #[derive(Clone, Copy, Debug)]
 pub struct CpuTopology {
+    /// Физические ядра (без SMT-потоков).
     pub physical_cores: u32,
+    /// Логические процессоры (то, что видит ОС: 12C/24T → 24).
     pub logical_cores: u32,
+    /// Потоков на ядро (SMT): 2 для 12C/24T, 1 без SMT.
+    pub threads_per_core: u32,
     pub apic_id: u32,
     pub smt: bool,
 }
@@ -154,6 +158,79 @@ fn detect_family_model_stepping(eax: u32) -> (u32, u32, u32) {
     (family, model, stepping)
 }
 
+
+/// Разбор topology-листа CPUID (0x1F — предпочтительно, 0x0B — старый).
+///
+/// Возвращает `(threads_per_core, logical_cores, apic_id)`.
+///
+/// CPUID.1.EBX[23:16] — это НЕ число ядер, а максимальное адресуемое число
+/// ID в пакете, округлённое до степени двойки: на 12C/24T оно равно 32, из-за
+/// чего `top` показывал «32 ядра». Реальное число даёт только перечисление
+/// уровней SMT/Core.
+fn cpuid_topology_leaf(leaf: u32) -> Option<(u32, u32, u32)> {
+    let mut threads_per_core = 0u32;
+    let mut logical_cores = 0u32;
+    let mut apic_id = 0u32;
+
+    for sub in 0..32u32 {
+        let (_, ebx, ecx, edx) = unsafe { cpuid_raw(leaf, sub) };
+        let count = ebx & 0xFFFF;
+        if count == 0 {
+            break;
+        }
+        let level_type = (ecx >> 8) & 0xFF;
+        apic_id = edx;
+        match level_type {
+            1 => threads_per_core = count, // SMT
+            2 => {
+                logical_cores = count; // Core
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    if logical_cores == 0 && threads_per_core > 0 {
+        logical_cores = threads_per_core;
+    }
+    if logical_cores == 0 {
+        return None;
+    }
+    Some((threads_per_core.max(1), logical_cores, apic_id))
+}
+
+/// AMD: 0x80000008 ECX[7:0] = число физических ядер − 1,
+/// 0x8000001E EBX[15:8] = потоков на ядро.
+fn amd_topology(max_ext_leaf: u32) -> Option<(u32, u32, u32)> {
+    if max_ext_leaf < 0x80000008 {
+        return None;
+    }
+    let (_, _, ecx, _) = unsafe { cpuid_raw(0x80000008, 0) };
+    let physical = (ecx & 0xFF) + 1;
+    let mut threads = 1u32;
+    let mut apic_id = 0u32;
+    if max_ext_leaf >= 0x8000001E {
+        let (eax, ebx, _, _) = unsafe { cpuid_raw(0x8000001E, 0) };
+        apic_id = eax;
+        threads = ((ebx >> 8) & 0xFF).max(1);
+    }
+    Some((threads, physical.saturating_mul(threads), apic_id))
+}
+
+/// Последний fallback: MADT (сколько процессоров включила прошивка), затем
+/// CPUID.1.EBX[23:16]. Число потоков на ядро неизвестно → 1.
+fn fallback_topology(max_leaf: u32, apic_id: u32) -> (u32, u32, u32) {
+    let cpuid_ids = if max_leaf >= 1 {
+        let (_, ebx, _, _) = unsafe { cpuid_raw(1, 0) };
+        ((ebx >> 16) & 0xFF).max(1)
+    } else {
+        1
+    };
+    let madt = crate::acpi::madt::enabled_cpu_count();
+    let logical = if madt > 0 { madt } else { cpuid_ids };
+    (1, logical, apic_id)
+}
+
 pub fn detect() -> CpuInfo {
     let mut info = CpuInfo {
         brand: [0u8; 48],
@@ -167,6 +244,7 @@ pub fn detect() -> CpuInfo {
         topology: CpuTopology {
             physical_cores: 1,
             logical_cores: 1,
+            threads_per_core: 1,
             apic_id: 0,
             smt: false,
         },
@@ -184,17 +262,15 @@ pub fn detect() -> CpuInfo {
         // === Leaf 0x01: family/model/stepping + feature flags ===
         if max_leaf >= 1 {
             let (eax, ebx, ecx, edx) = cpuid_raw(1, 0);
-            info.cores = ((ebx >> 16) & 0xFF) as u32;
-            if info.cores == 0 { info.cores = 1; }
 
             let (family, model, stepping) = detect_family_model_stepping(eax);
             info.family = family;
             info.model = model;
             info.stepping = stepping;
 
-            // Topology
+            // Только начальный APIC ID. Реальное число ядер считается ниже:
+            // EBX[23:16] здесь — max addressable IDs, а не core count.
             info.topology.apic_id = (ebx >> 24) & 0xFF;
-            info.topology.logical_cores = info.cores;
 
             // Feature flags — EDX
             let f = &mut info.features;
@@ -265,23 +341,36 @@ pub fn detect() -> CpuInfo {
             info.brand_len = info.brand.iter().position(|&b| b == 0).unwrap_or(48);
         }
 
-        // === Leaf 0x0B: topology (Intel) ===
-        if max_leaf >= 0x0B {
-            let (eax, ebx, _, _) = cpuid_raw(0x0B, 0);
-            let level_cores = (ebx & 0xFF) as u32;
-            let level_type = (eax >> 8) & 0xF;
-            if level_type == 1 { // SMT level
-                info.topology.smt = level_cores > 1;
-            }
-            // Sub-leaf 1 for core count
-            let (_, ebx2, _, _) = cpuid_raw(0x0B, 1);
-            let core_apic_id = (ebx2 & 0xFF) as u32;
-            info.topology.apic_id = core_apic_id;
-            let logical_at_level = (ebx2 & 0xFFFF) as u32;
-            if logical_at_level > 0 {
-                info.topology.logical_cores = logical_at_level;
-            }
+        // === Topology: 0x1F (новый) → 0x0B (старый) → AMD → MADT ===
+        //
+        // 0x1F/0x0B перечисляют уровни (SMT, Core) и дают реальное число
+        // логических процессоров. Старый код читал только subleaf 1 и брал
+        // EBX[15:0], что для 12C/24T давало 32 (округление max addressable ID).
+        let mut topology = if max_leaf >= 0x1F {
+            cpuid_topology_leaf(0x1F)
+        } else {
+            None
+        };
+        if topology.is_none() && max_leaf >= 0x0B {
+            topology = cpuid_topology_leaf(0x0B);
         }
+        if topology.is_none() && info.vendor == CpuVendor::Amd {
+            topology = amd_topology(max_ext_leaf);
+        }
+        let (threads, logical, apic_id) = topology
+            .unwrap_or_else(|| fallback_topology(max_leaf, info.topology.apic_id));
+
+        info.topology.threads_per_core = threads.max(1);
+        info.topology.logical_cores = logical.max(1);
+        info.topology.physical_cores = if logical % threads.max(1) == 0 {
+            (logical / threads.max(1)).max(1)
+        } else {
+            logical.max(1)
+        };
+        info.topology.apic_id = apic_id;
+        info.topology.smt = info.topology.threads_per_core > 1;
+        // `cores` исторически означает «сколько логических CPU видит ОС».
+        info.cores = info.topology.logical_cores;
 
         // TSC frequency.
         // MSR 0xCE (MSR_PLATFORM_INFO) существует ТОЛЬКО у Intel: на AMD чтение
@@ -320,6 +409,16 @@ pub fn freq_str(info: &CpuInfo) -> alloc::string::String {
         alloc::format!("{}.{:02} GHz", whole, frac)
     } else {
         alloc::format!("{} MHz", info.tsc_freq_mhz)
+    }
+}
+
+/// Строка топологии: `12C / 24T` для SMT, `8C` без SMT.
+pub fn topology_str(info: &CpuInfo) -> alloc::string::String {
+    let t = &info.topology;
+    if t.threads_per_core > 1 {
+        alloc::format!("{}C / {}T", t.physical_cores, t.logical_cores)
+    } else {
+        alloc::format!("{}C", t.physical_cores)
     }
 }
 

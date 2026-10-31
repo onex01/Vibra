@@ -6,12 +6,12 @@ use alloc::string::String;
 use alloc::format;
 
 pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
+    // Без аргумента — текущий каталог, а не всегда корень. Раньше `tree`
+    // из /mnt показывал дерево всего диска, потому что путь жёстко был "/".
     let path = if args.is_empty() {
-        String::from("/")
+        fs::get_current_dir()
     } else {
-        let mut s = String::new();
-        s.push_str(args[0]);
-        s
+        fs::resolve_path(&fs::get_current_dir(), args[0])
     };
 
     console.print_colored(&path, COLOR_CYAN);
@@ -20,22 +20,40 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     let mut dirs = 0usize;
     let mut files = 0usize;
 
-    print_tree(console, &path, "", &mut dirs, &mut files);
+    let completed = print_tree(console, &path, "", &mut dirs, &mut files);
 
     console.print("\n");
     console.print_num(dirs);
     console.print(" directories, ");
     console.print_num(files);
     console.print(" files\n");
+    if !completed {
+        console.print_colored("[cancelled]\n", COLOR_YELLOW);
+    }
 
     CmdResult::Ok
 }
 
-fn print_tree(console: &mut Console, path: &str, prefix: &str, dirs: &mut usize, files: &mut usize) {
+fn print_tree(
+    console: &mut Console,
+    path: &str,
+    prefix: &str,
+    dirs: &mut usize,
+    files: &mut usize,
+) -> bool {
+    // Ctrl+C / Ctrl+Z должны прерывать обход: на большом разделе `tree`
+    // иначе нельзя остановить.
+    if crate::poll_cancel() {
+        return false;
+    }
+
     let entries = fs::list_dir(path);
     let count = entries.len();
 
     for (i, entry) in entries.iter().enumerate() {
+        if crate::poll_cancel() {
+            return false;
+        }
         let is_last = i == count - 1;
         let connector = if is_last { "└── " } else { "├── " };
         let new_prefix = if is_last { "    " } else { "│   " };
@@ -55,7 +73,15 @@ fn print_tree(console: &mut Console, path: &str, prefix: &str, dirs: &mut usize,
                     sub_path.push('/');
                 }
                 sub_path.push_str(&entry.name);
-                print_tree(console, &sub_path, &format!("{}{}", prefix, new_prefix), dirs, files);
+                if !print_tree(
+                    console,
+                    &sub_path,
+                    &format!("{}{}", prefix, new_prefix),
+                    dirs,
+                    files,
+                ) {
+                    return false;
+                }
             }
             fs::FileType::File | fs::FileType::Symlink | fs::FileType::Device => {
                 *files += 1;
@@ -71,4 +97,6 @@ fn print_tree(console: &mut Console, path: &str, prefix: &str, dirs: &mut usize,
             }
         }
     }
+
+    true
 }

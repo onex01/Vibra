@@ -109,6 +109,8 @@ pub fn spawn_user_process(name: &str, code: &[u8]) {
             kstack_top: Some(kstack_top),
             user_rsp: stack_top,
             user_rflags: 0x200, // IF=1
+            cpu_ns: 0,
+            last_start_ns: 0,
         });
         println!("[USER] User process '{}' spawned (PID={})", name, id);
     }

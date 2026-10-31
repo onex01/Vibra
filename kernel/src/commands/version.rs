@@ -12,5 +12,12 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     console.print(version::ARCHITECTURE);
     console.print("\n  Type         : Experimental modular monolith\n");
     console.print("  Bootloader   : Limine (UEFI, x86_64)\n");
+    console.print("  Build        : ");
+    console.print(version::BUILD_DATE);
+    console.print(" (");
+    console.print(version::BUILD_PROFILE);
+    console.print(", ");
+    console.print(version::GIT_COMMIT);
+    console.print(")\n");
     CmdResult::Ok
 }

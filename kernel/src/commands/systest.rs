@@ -92,8 +92,8 @@ fn show_cpu_info(console: &mut Console) {
     console.print(crate::cpu_info::vendor_str(&info));
     console.print("\n");
     console.print("  Cores:  ");
-    console.print_num(info.cores as usize);
-    console.print(" logical\n");
+    console.print(crate::cpu_info::topology_str(&info).as_str());
+    console.print("\n");
     console.print("  Freq:   ");
     console.print(crate::cpu_info::freq_str(&info).as_str());
     console.print("\n");

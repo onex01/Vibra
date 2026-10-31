@@ -6,7 +6,7 @@ build_dir="$repo_root/build"
 size_mb="${USB_SIZE_MB:-128}"
 image="${UEFI_USB_IMAGE:-$build_dir/vibra-uefi.img}"
 limine_dir="${LIMINE_DIR:-$repo_root/limine-bin}"
-kernel="$repo_root/target/x86_64-unknown-none/debug/vibra"
+kernel="${KERNEL_ELF:-$repo_root/target/x86_64-unknown-none/${PROFILE:-debug}/vibra}"
 partition_start=2048
 
 if [[ "$image" != /* ]]; then

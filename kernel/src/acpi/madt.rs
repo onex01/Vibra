@@ -1,6 +1,17 @@
 // MADT — Multiple APIC Description Table
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+/// Сколько процессоров прошивка объявила включёнными (MADT type 0/9 с
+/// флагом Enabled). Нужен как fallback для CPUID-топологии: CPUID.1.EBX[23:16]
+/// — это максимальное адресуемое число ID (обычно округлённое до степени
+/// двойки), а не реальное число ядер. На 12C/24T оно даёт 32.
+static ENABLED_CPUS: AtomicU32 = AtomicU32::new(0);
+
+pub fn enabled_cpu_count() -> u32 {
+    ENABLED_CPUS.load(Ordering::Relaxed)
+}
 
 /// Interrupt Source Override (MADT type 2): legacy IRQ → GSI.
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +76,7 @@ pub fn parse(madt_phys: usize) -> Option<MadtInfo> {
         io_apic_gsi_base: 0,
         iso: Vec::new(),
     };
+    let mut enabled_cpus = 0u32;
 
     // Records start after SDT header + MadtHeader
     let records_start = madt_virt + 36 + 8;
@@ -79,6 +91,20 @@ pub fn parse(madt_phys: usize) -> Option<MadtInfo> {
         }
 
         match record_type {
+            // Processor Local APIC: flags bit 0 = Enabled.
+            0 if record_len >= 8 => {
+                let flags = unsafe { core::ptr::read_unaligned((ptr + 4) as *const u32) };
+                if flags & 1 != 0 {
+                    enabled_cpus += 1;
+                }
+            }
+            // Processor Local x2APIC: flags bit 0 = Enabled.
+            9 if record_len >= 16 => {
+                let flags = unsafe { core::ptr::read_unaligned((ptr + 12) as *const u32) };
+                if flags & 1 != 0 {
+                    enabled_cpus += 1;
+                }
+            }
             1 => {
                 // IO APIC: id(u8@2), reserved(u8@3), addr(u32@4), gsi_base(u32@8)
                 let ioapic_id = unsafe { core::ptr::read_volatile((ptr + 2) as *const u8) };
@@ -114,8 +140,10 @@ pub fn parse(madt_phys: usize) -> Option<MadtInfo> {
         ptr += record_len;
     }
 
-    crate::println!("[ACPI] MADT: LAPIC={:#x}, IOAPIC={:?}, ISO={}",
-        info.lapic_addr, info.io_apic_addr, info.iso.len());
+    ENABLED_CPUS.store(enabled_cpus, Ordering::Relaxed);
+
+    crate::println!("[ACPI] MADT: LAPIC={:#x}, IOAPIC={:?}, ISO={}, CPUs={}",
+        info.lapic_addr, info.io_apic_addr, info.iso.len(), enabled_cpus);
 
     Some(info)
 }

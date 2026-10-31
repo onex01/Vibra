@@ -259,7 +259,9 @@ impl KeyboardState {
         // проверяют его в своих циклах.
         if self.ctrl && ch.is_ascii_alphabetic() {
             let ctrl = ((ch.to_ascii_lowercase() as u8) - b'a' + 1) as char;
-            if ctrl == '\x03' {
+            // Ctrl+C и Ctrl+Z — отмена текущей команды. Job control в ядре
+            // нет, поэтому Ctrl+Z трактуется как «прервать», а не «в фон».
+            if ctrl == '\x03' || ctrl == '\x1A' {
                 crate::request_cancel();
             }
             return Key::Char(ctrl);

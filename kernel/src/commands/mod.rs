@@ -51,6 +51,7 @@ pub mod net;
 pub mod systest;
 pub mod hidtest;
 pub mod test;
+pub mod vktst;
 
 use crate::framebuffer::Console;
 
@@ -72,6 +73,7 @@ pub struct Command {
 }
 
 pub const COMMANDS: &[Command] = &[
+    Command { name: "vktst",   help: "Vibra Kernel Tests (interactive)", func: vktst::run },
     Command { name: "help",    help: "show this help",             func: help::run },
     Command { name: "version", help: "show OS/kernel version",     func: version::run },
     Command { name: "clear",   help: "clear screen",               func: clear::run },

@@ -180,7 +180,45 @@ pub fn list_entries() -> Vec<DirEntry> {
     list_dir(&get_current_dir())
 }
 
+/// Привести путь к абсолютному виду относительно `base`.
+///
+/// Нужен для команд, которые получают относительный путь (`tree sub`,
+/// `cat hello.txt`): VFS ищет только по абсолютным путям, а раньше такие
+/// аргументы молча уходили в корневой RamFS. `tree` без аргументов вообще
+/// всегда начинал с `/`.
+pub fn resolve_path(base: &str, path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if !path.starts_with('/') {
+        for part in base.split('/') {
+            if !part.is_empty() {
+                parts.push(part);
+            }
+        }
+    }
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        String::from("/")
+    } else {
+        let mut result = String::new();
+        for part in parts {
+            result.push('/');
+            result.push_str(part);
+        }
+        result
+    }
+}
+
 pub fn list_dir(path: &str) -> Vec<DirEntry> {
+    let resolved = resolve_path(&get_current_dir(), path);
+    let path = resolved.as_str();
     // Сначала пробуем VFS (включая procfs/sysfs/devtmpfs).
     match vfs_readdir(path) {
         Ok(entries) => return entries,
@@ -198,7 +236,7 @@ pub fn list_dir(path: &str) -> Vec<DirEntry> {
 }
 
 pub fn create_file(name: &str) -> Result<(), FsError> {
-    let path = combine_path(&get_current_dir(), name);
+    let path = resolve_path(&get_current_dir(), name);
 
     match vfs_create(&path) {
         Ok(_) => Ok(()),
@@ -212,6 +250,8 @@ pub fn create_file(name: &str) -> Result<(), FsError> {
 }
 
 pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
+    let resolved = resolve_path(&get_current_dir(), name);
+    let name = resolved.as_str();
     // Сначала пробуем VFS (включая procfs/sysfs/devtmpfs).
     match vfs_open(name) {
         Ok(mut file) => return read_all(file.as_mut()),
@@ -220,15 +260,14 @@ pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
         Err(e) => return Err(e),
     }
 
-    // Fallback: корневой RamFS.
+    // Fallback: корневой RamFS (имя уже абсолютное).
     let ramfs = ROOT_RAMFS.lock();
-    let path = combine_path(&get_current_dir(), name);
-    let mut file = ramfs.open(&path)?;
+    let mut file = ramfs.open(name)?;
     read_all(file.as_mut())
 }
 
 pub fn write_file(name: &str, data: &[u8]) -> Result<(), FsError> {
-    let path = combine_path(&get_current_dir(), name);
+    let path = resolve_path(&get_current_dir(), name);
 
     // Перезаписываем: удаляем старый файл, если он есть. Ошибки чтения/удаления
     // на read-only томе должны дойти до пользователя, а не осесть в ramfs.
@@ -254,7 +293,7 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<(), FsError> {
 }
 
 pub fn create_dir(name: &str) -> Result<(), FsError> {
-    let path = combine_path(&get_current_dir(), name);
+    let path = resolve_path(&get_current_dir(), name);
 
     // Сначала VFS: если путь попадает в смонтированный FAT32, каталог должен
     // появиться именно там. Раньше вызов всегда уходил в LEGACY_RAMFS, и
@@ -278,7 +317,7 @@ pub fn create_dir(name: &str) -> Result<(), FsError> {
 /// Отдельно от `remove_entry`, потому что `rmdir` не должен сносить файлы:
 /// иначе `rmdir file.txt` молча удалил бы файл.
 pub fn remove_dir(name: &str) -> Result<(), FsError> {
-    let path = combine_path(&get_current_dir(), name);
+    let path = resolve_path(&get_current_dir(), name);
 
     match vfs_rmdir(&path) {
         Ok(()) => return Ok(()),
@@ -291,7 +330,7 @@ pub fn remove_dir(name: &str) -> Result<(), FsError> {
 }
 
 pub fn remove_entry(name: &str) -> Result<(), FsError> {
-    let path = combine_path(&get_current_dir(), name);
+    let path = resolve_path(&get_current_dir(), name);
 
     // Файл или каталог на дисковом томе — через VFS.
     match vfs_remove(&path) {
@@ -314,6 +353,8 @@ pub fn remove_entry(name: &str) -> Result<(), FsError> {
 }
 
 pub fn dir_exists(path: &str) -> bool {
+    let full_path = resolve_path(&get_current_dir(), path);
+    let path = full_path.as_str();
     // Сначала пробуем VFS
     if vfs_exists(path) {
         return true;
@@ -321,23 +362,13 @@ pub fn dir_exists(path: &str) -> bool {
 
     // Fallback: корневой RamFS.
     let ramfs = ROOT_RAMFS.lock();
-    let full_path = combine_path(&get_current_dir(), path);
-    if let Ok(meta) = ramfs.stat(&full_path) {
+    if let Ok(meta) = ramfs.stat(path) {
         meta.file_type == FileType::Directory
     } else {
         false
     }
 }
 
-fn combine_path(base: &str, name: &str) -> String {
-    if name.starts_with('/') {
-        String::from(name)
-    } else if base == "/" {
-        format!("/{}", name)
-    } else {
-        format!("{}/{}", base, name)
-    }
-}
 
 // ==========================================
 // NEW API - Виртуальная файловая система
@@ -382,11 +413,18 @@ pub fn mount_fat32_rw(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> 
     mount_fs(path, Box::new(fatfs), false)
 }
 
-/// Монтировать EXT2/3/4 диск (опционально readonly)
-pub fn mount_ext(path: &str, disk: Box<dyn DiskIo>, readonly: bool) -> Result<(), FsError> {
+/// Монтировать EXT2/3/4 диск (только чтение: драйвер не поддерживает запись).
+pub fn mount_ext(path: &str, disk: Box<dyn DiskIo>, readonly: bool) -> Result<&'static str, FsError> {
+    if !readonly {
+        // Честно сообщаем, что ext-драйвер read-only, а не делаем вид, что
+        // смонтировали rw и молча теряем данные.
+        return Err(FsError::ReadOnly);
+    }
     let mut extfs = Ext2Fs::new(disk)?;
     extfs.mount()?;
-    mount_fs(path, Box::new(extfs), readonly)
+    let name = extfs.fs_type();
+    mount_fs(path, Box::new(extfs), true)?;
+    Ok(name)
 }
 
 /// Монтировать NTFS раздел (только чтение)
@@ -442,14 +480,15 @@ fn mount_auto_mode(path: &str, disk_id: usize, write: bool) -> Result<&'static s
             mount_fs(path, Box::new(fs), !write)?;
             Ok("fat32")
         }
-        "ext2" => {
+        "ext2" | "ext3" | "ext4" => {
             if write {
                 return Err(FsError::ReadOnly);
             }
             let mut fs = Ext2Fs::new(disk)?;
             fs.mount()?;
+            let name = fs.fs_type();
             mount_fs(path, Box::new(fs), true)?;
-            Ok("ext2")
+            Ok(name)
         }
         "ntfs" => {
             if write {

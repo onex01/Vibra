@@ -64,12 +64,24 @@ pub fn request_cancel() {
     CANCEL_FLAG.store(true, Ordering::Relaxed);
 }
 
-/// Опросить клавиатуру/COM1 и обработать Ctrl+C.
+/// Опросить клавиатуру/COM1 и обработать Ctrl+C / Ctrl+Z.
 ///
-/// Длинные команды вызывают это в своих циклах: клавиатурный драйвер
-/// выставляет `CANCEL_FLAG` при Ctrl+C, а команда проверяет `is_cancelled()`.
+/// Возвращает `true`, если пришла отмена. Длинные команды вызывают это в
+/// своих циклах (`tree`, `cp`, `rm`, `top`, `vktst`). Раньше `poll_input`
+/// просто выбрасывал клавишу, поэтому Ctrl+C/Ctrl+Z не останавливали `tree`;
+/// Ctrl+Z вообще не выставлял флаг.
+pub fn poll_cancel() -> bool {
+    if let Some(key) = serial::poll_key().or_else(keyboard::poll_key) {
+        if matches!(key, keyboard::Key::Char('\x03') | keyboard::Key::Char('\x1A')) {
+            request_cancel();
+        }
+    }
+    is_cancelled()
+}
+
+/// Совместимость со старым именем.
 pub fn poll_input() {
-    let _ = serial::poll_key().or_else(keyboard::poll_key);
+    let _ = poll_cancel();
 }
 
 #[inline]

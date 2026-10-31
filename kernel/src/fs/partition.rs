@@ -49,6 +49,12 @@ pub struct Partition {
 }
 
 /// Окно в родительский диск: сектор 0 окна = `offset` родительского диска.
+///
+/// ЕДИНИЦА ИЗМЕРЕНИЯ: `offset` и `sectors` всегда в 512-байтных секторах,
+/// независимо от размера логического сектора устройства. Раньше здесь
+/// смешивались 512-байтные сектора таблицы разделов и `sector_size()`
+/// (4096 на 4Kn), из-за чего окно раздела уезжало в 8 раз дальше и ФС
+/// читалась как «unknown».
 pub struct PartitionDisk {
     inner: Arc<Mutex<Box<dyn DiskIo>>>,
     offset: u64,
@@ -64,12 +70,9 @@ impl PartitionDisk {
 
     fn check(&self, sector: u64, buf: &[u8]) -> Result<(), FsError> {
         if buf.is_empty() || buf.len() % 512 != 0 { return Err(FsError::InvalidPath); }
-        let ss = self.inner.lock().sector_size() as u64;
-        let start_byte = sector.checked_mul(512).ok_or(FsError::IoError)?;
-        let end_byte = start_byte
-            .checked_add(buf.len() as u64)
-            .ok_or(FsError::IoError)?;
-        if end_byte > self.sectors.checked_mul(ss).ok_or(FsError::IoError)? {
+        let len_sectors = (buf.len() / 512) as u64;
+        let end = sector.checked_add(len_sectors).ok_or(FsError::IoError)?;
+        if end > self.sectors {
             return Err(FsError::IoError);
         }
         Ok(())
@@ -79,27 +82,35 @@ impl PartitionDisk {
 impl DiskIo for PartitionDisk {
     fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), FsError> {
         self.check(sector, buf)?;
-        let ss = self.inner.lock().sector_size() as u64;
-        let byte_offset = self.offset.checked_mul(ss).ok_or(FsError::IoError)?
-            + sector.checked_mul(512).ok_or(FsError::IoError)?;
-        self.inner.lock().read(byte_offset / 512, buf)
+        let target = self.offset.checked_add(sector).ok_or(FsError::IoError)?;
+        self.inner.lock().read(target, buf)
     }
 
     fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), FsError> {
         self.check(sector, buf)?;
-        let ss = self.inner.lock().sector_size() as u64;
-        let byte_offset = self.offset.checked_mul(ss).ok_or(FsError::IoError)?
-            + sector.checked_mul(512).ok_or(FsError::IoError)?;
-        self.inner.lock().write(byte_offset / 512, buf)
+        let target = self.offset.checked_add(sector).ok_or(FsError::IoError)?;
+        self.inner.lock().write(target, buf)
     }
 
     fn sector_size(&self) -> usize {
         self.inner.lock().sector_size()
     }
 
+    fn is_read_only(&self) -> bool {
+        self.inner.lock().is_read_only()
+    }
+
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
-        let target = self.offset.checked_add(lba).ok_or(FsError::IoError)?;
-        self.inner.lock().read_lba(target, buf)
+        // LBA — в логических секторах устройства, а `offset` — в 512-байтных.
+        let ss = self.inner.lock().sector_size().max(512) as u64;
+        let byte = self.offset
+            .checked_mul(512).ok_or(FsError::IoError)?
+            .checked_add(lba.checked_mul(ss).ok_or(FsError::IoError)?)
+            .ok_or(FsError::IoError)?;
+        if byte % 512 != 0 {
+            return Err(FsError::InvalidPath);
+        }
+        self.inner.lock().read(byte / 512, buf)
     }
 }
 
@@ -159,35 +170,104 @@ fn utf16_name(buf: &[u8], off: usize, max_chars: usize) -> String {
 // ==========================================
 
 /// MBR: 4 записи по 16 байт с offset 446, сигнатура 0x55AA в 510.
-fn parse_mbr(sector0: &[u8]) -> Option<Vec<Partition>> {
-    if sector0[510] != 0x55 || sector0[511] != 0xAA { return None; }
+///
+/// Поддерживаются extended-разделы (типы 0x05/0x0F/0x85): логические разделы
+/// нумеруются с 5 и идут цепочкой EBR. Без этого два NTFS-раздела на MBR-
+/// диске оставались «unknown», потому что в primary-записях лежал только
+/// контейнер extended.
+fn kind_from_mbr(ptype: u8) -> PartKind {
+    match ptype {
+        // FAT12/16/32 и скрытые варианты.
+        0x01 | 0x04 | 0x06 | 0x0B | 0x0C | 0x0E | 0x11 | 0x14 | 0x16 | 0x1B | 0x1C
+        | 0x1E => PartKind::Data,
+        // NTFS/exFAT.
+        0x07 | 0x17 | 0x27 => PartKind::Data,
+        0x83 => PartKind::Linux,
+        0xEF => PartKind::Efi,
+        _ => PartKind::Unknown,
+    }
+}
 
+fn read_mbr_sector(disk: &mut dyn DiskIo, lba: u64) -> Option<[u8; 512]> {
+    let mut sector = [0u8; 512];
+    disk.read(lba, &mut sector).ok()?;
+    if sector[510] != 0x55 || sector[511] != 0xAA {
+        return None;
+    }
+    Some(sector)
+}
+
+fn mbr_entry(sector: &[u8], index: usize) -> (u8, u64, u64) {
+    let off = 446 + index * 16;
+    let ptype = sector[off + 4];
+    let start = u32_at(sector, off + 8) as u64;
+    let sectors = u32_at(sector, off + 12) as u64;
+    (ptype, start, sectors)
+}
+
+fn parse_mbr(disk: &mut dyn DiskIo, sector0: &[u8]) -> Option<Vec<Partition>> {
     let mut parts = Vec::new();
+    let mut extended_start: Option<u64> = None;
+
     for i in 0..4usize {
-        let off = 446 + i * 16;
-        let ptype = sector0[off + 4];
-        let start = u32_at(sector0, off + 8) as u64;
-        let sectors = u32_at(sector0, off + 12) as u64;
-        if ptype == 0 || sectors == 0 { continue; }
-
-        // 0xEE = protective MBR, значит настоящая таблица — GPT.
-        if ptype == 0xEE { return None; }
-
-        let kind = match ptype {
-            0x0B | 0x0C | 0x0E | 0x06 | 0x01 | 0x04 => PartKind::Data, // FAT
-            0x07 => PartKind::Data,                                     // NTFS/exFAT
-            0x83 => PartKind::Linux,
-            0xEF => PartKind::Efi,
-            _ => PartKind::Unknown,
-        };
+        let (ptype, start, sectors) = mbr_entry(sector0, i);
+        if ptype == 0 || sectors == 0 {
+            continue;
+        }
+        // 0xEE = protective MBR. В hybrid-образе (debug ISO) рядом с ним
+        // лежат обычные записи appended-разделов, поэтому не выходим сразу,
+        // а просто пропускаем защитную запись.
+        if ptype == 0xEE {
+            continue;
+        }
+        if ptype == 0x05 || ptype == 0x0F || ptype == 0x85 {
+            extended_start = Some(start);
+            continue;
+        }
 
         parts.push(Partition {
             index: (i + 1) as u8,
             start_lba: start,
             sectors,
-            kind,
+            kind: kind_from_mbr(ptype),
             label: String::new(),
         });
+    }
+
+    // Логические разделы внутри extended: EBR-цепочка.
+    if let Some(extended) = extended_start {
+        let mut ebr_lba = extended;
+        let mut logical_index = 5u8;
+        // Ограничение от зацикливания на повреждённой цепочке.
+        for _ in 0..128 {
+            let Some(ebr) = read_mbr_sector(disk, ebr_lba) else {
+                break;
+            };
+
+            // Запись 0 — сам логический раздел (start относительно EBR).
+            let (ptype, rel_start, sectors) = mbr_entry(&ebr, 0);
+            if ptype != 0 && sectors != 0 {
+                parts.push(Partition {
+                    index: logical_index,
+                    start_lba: ebr_lba.checked_add(rel_start)?,
+                    sectors,
+                    kind: kind_from_mbr(ptype),
+                    label: String::new(),
+                });
+                logical_index = logical_index.saturating_add(1);
+            }
+
+            // Запись 1 — ссылка на следующий EBR (start относительно extended).
+            let (next_type, next_rel, next_sectors) = mbr_entry(&ebr, 1);
+            if next_type == 0 || next_sectors == 0 {
+                break;
+            }
+            let next = extended.checked_add(next_rel)?;
+            if next == ebr_lba {
+                break;
+            }
+            ebr_lba = next;
+        }
     }
 
     if parts.is_empty() { None } else { Some(parts) }
@@ -272,6 +352,18 @@ fn parse_gpt(disk: &mut dyn DiskIo) -> Option<Vec<Partition>> {
         let last = u64_at(entry, 40);
         if last < first { continue; }
 
+        // GPT хранит LBA в логических секторах устройства. Внутри ядра все
+        // разделы живут в 512-байтных единицах, поэтому на 4Kn умножаем на 8.
+        let ratio = (ss / 512).max(1) as u64;
+        let start_lba = match first.checked_mul(ratio) {
+            Some(value) => value,
+            None => continue,
+        };
+        let sectors = match (last - first + 1).checked_mul(ratio) {
+            Some(value) => value,
+            None => continue,
+        };
+
         let kind = if guid_eq(entry, 0, &GUID_EFI_SYSTEM) {
             PartKind::Efi
         } else if guid_eq(entry, 0, &GUID_LINUX_DATA) {
@@ -284,8 +376,8 @@ fn parse_gpt(disk: &mut dyn DiskIo) -> Option<Vec<Partition>> {
 
         parts.push(Partition {
             index: (i + 1) as u8,
-            start_lba: first,
-            sectors: last - first + 1,
+            start_lba,
+            sectors,
             kind,
             label: utf16_name(entry, 56, 36),
         });
@@ -302,11 +394,24 @@ pub fn read_partitions(disk: &mut dyn DiskIo) -> Vec<Partition> {
     let mut sector0 = [0u8; 512];
     if disk.read(0, &mut sector0).is_err() { return Vec::new(); }
 
-    // Сначала GPT (protective MBR отличим по типу 0xEE), потом MBR.
-    if sector0[446 + 4] == 0xEE {
-        if let Some(parts) = parse_gpt(disk) { return parts; }
+    // Protective MBR может стоять в любой из четырёх записей (спецификация
+    // требует первую, но некоторые загрузчики/утилиты кладут её иначе).
+    let has_protective = (0..4).any(|i| mbr_entry(&sector0, i).0 == 0xEE);
+
+    // Сначала GPT: пробуем всегда, если есть protective MBR или валидный
+    // заголовок "EFI PART" в LBA 1.
+    if has_protective {
+        if let Some(parts) = parse_gpt(disk) {
+            return parts;
+        }
     }
-    if let Some(parts) = parse_mbr(&sector0) { return parts; }
+    if let Some(parts) = parse_mbr(disk, &sector0) {
+        return parts;
+    }
+    // GPT без protective MBR (редко, но бывает у обрезанных образов).
+    if let Some(parts) = parse_gpt(disk) {
+        return parts;
+    }
     Vec::new()
 }
 
@@ -330,14 +435,39 @@ pub fn detect_fs_type(disk: &mut dyn DiskIo) -> &'static str {
 
     // ext2/3/4: магия 0xEF53 в суперблоке (смещение 1024 + 56).
     if u16::from_le_bytes([s[1024 + 56], s[1024 + 57]]) == 0xEF53 {
+        // Различаем поколения по feature-флагам суперблока.
+        let compat = u32_at(&s, 1024 + 92);
+        let incompat = u32_at(&s, 1024 + 96);
+        let ro_compat = u32_at(&s, 1024 + 100);
+        let is_ext4 = incompat & (0x40 | 0x80 | 0x200) != 0 // EXTENTS|64BIT|FLEX_BG
+            || ro_compat & 0x200 != 0; // METADATA_CSUM
+        if is_ext4 {
+            return "ext4";
+        }
+        if compat & 0x4 != 0 {
+            // HAS_JOURNAL
+            return "ext3";
+        }
         return "ext2";
     }
 
     "unknown"
 }
 
-/// Имя раздела: `sda` + `1` → `sda1`.
+/// Имя раздела: `sda` + `1` → `sda1`, `sr0` + `2` → `sr0p2`.
+///
+/// Как в Linux: если имя устройства заканчивается цифрой (sr0, nvme0n1),
+/// добавляется `p`, иначе `sr02` читалось бы как отдельное устройство.
 pub fn part_name(disk_name: &str, index: u8) -> String {
-    format!("{}{}", disk_name, index)
+    let ends_with_digit = disk_name
+        .as_bytes()
+        .last()
+        .map(|byte| byte.is_ascii_digit())
+        .unwrap_or(false);
+    if ends_with_digit {
+        format!("{}p{}", disk_name, index)
+    } else {
+        format!("{}{}", disk_name, index)
+    }
 }
 

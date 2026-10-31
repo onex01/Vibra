@@ -4,8 +4,9 @@
 # Проверяется:
 #   1. FAT32 «superfloppy» (диск целиком): mount, ls, cat, LFN.
 #   2. ext2: mount, ls, cat, вложенный каталог.
-#   3. NTFS (read-only): mount, ls, cat.
-#   4. MBR-таблица разделов: определяется sde1, монтируется через `mount auto`.
+#   3. ext4: extents + 64bit + metadata_csum, mount/ls/cat, вложенный каталог.
+#   4. NTFS (read-only): mount, ls, cat.
+#   5. MBR-таблица разделов: определяется sde1, монтируется через `mount auto`.
 #
 # Требования: qemu-system-x86_64, mtools, e2fsprogs, ntfs-3g, util-linux(sfdisk).
 set -euo pipefail
@@ -19,6 +20,7 @@ report="$repo_root/build/fs-test-status.txt"
 
 img_fat="$repo_root/build/fs-test-fat.img"
 img_ext="$repo_root/build/fs-test-ext.img"
+img_ext4="$repo_root/build/fs-test-ext4.img"
 img_ntfs="$repo_root/build/fs-test-ntfs.img"
 img_mbr="$repo_root/build/fs-test-mbr.img"
 
@@ -46,6 +48,8 @@ printf 'hello from fat32\n'   > "$tmp_dir/hello.txt"
 printf 'long file name works\n' > "$tmp_dir/long.txt"
 printf 'nested ext2 file works\n' > "$tmp_dir/nested.txt"
 printf 'hello from ext2\n'    > "$tmp_dir/ext_hello.txt"
+printf 'hello from ext4\n'    > "$tmp_dir/ext4_hello.txt"
+printf 'nested ext4 file works\n' > "$tmp_dir/ext4_nested.txt"
 printf 'hello from ntfs\n'    > "$tmp_dir/ntfs_hello.txt"
 printf 'hello from mbr partition\n' > "$tmp_dir/mbr_hello.txt"
 
@@ -66,12 +70,19 @@ cp "$tmp_dir/nested.txt" "$tmp_dir/ext/sub/nested.txt"
 dd if=/dev/zero of="$img_ext" bs=1M count=128 status=none
 mke2fs -q -t ext2 -b 1024 -d "$tmp_dir/ext" "$img_ext" >/dev/null
 
-# --- 3. NTFS (read-only) ---
+# --- 3. ext4: extents, 64bit, metadata_csum (дефолты mke2fs) ---
+mkdir -p "$tmp_dir/ext4/sub"
+cp "$tmp_dir/ext4_hello.txt" "$tmp_dir/ext4/hello.txt"
+cp "$tmp_dir/ext4_nested.txt" "$tmp_dir/ext4/sub/nested.txt"
+dd if=/dev/zero of="$img_ext4" bs=1M count=128 status=none
+mke2fs -q -t ext4 -b 4096 -d "$tmp_dir/ext4" "$img_ext4" >/dev/null
+
+# --- 4. NTFS (read-only) ---
 dd if=/dev/zero of="$img_ntfs" bs=1M count=128 status=none
 mkntfs -F -q -L NTFSVOL "$img_ntfs" >/dev/null 2>&1
 ntfscp -f "$img_ntfs" "$tmp_dir/ntfs_hello.txt" /hello.txt >/dev/null
 
-# --- 4. MBR: один FAT32-раздел с началом на LBA 2048 ---
+# --- 5. MBR: один FAT32-раздел с началом на LBA 2048 ---
 dd if=/dev/zero of="$img_mbr" bs=1M count=128 status=none
 sfdisk --quiet "$img_mbr" >/dev/null <<'EOF'
 label: dos
@@ -130,11 +141,17 @@ send_text() {
     send_text "ls /mnt2/sub";                send_text $'\n'; sleep 2
     send_text "cat /mnt2/sub/nested.txt";    send_text $'\n'; sleep 2
 
-    send_text "mount /mnt3 ntfs sdd";        send_text $'\n'; sleep 2
+    send_text "mount /mnt5 ext4 sdd";        send_text $'\n'; sleep 2
+    send_text "ls /mnt5";                    send_text $'\n'; sleep 2
+    send_text "cat /mnt5/hello.txt";         send_text $'\n'; sleep 2
+    send_text "ls /mnt5/sub";                send_text $'\n'; sleep 2
+    send_text "cat /mnt5/sub/nested.txt";    send_text $'\n'; sleep 2
+
+    send_text "mount /mnt3 ntfs sde";        send_text $'\n'; sleep 2
     send_text "ls /mnt3";                    send_text $'\n'; sleep 2
     send_text "cat /mnt3/hello.txt";         send_text $'\n'; sleep 2
 
-    send_text "mount /mnt4 auto sde1";       send_text $'\n'; sleep 2
+    send_text "mount /mnt4 auto sdf1";       send_text $'\n'; sleep 2
     send_text "ls /mnt4/mbrdir";             send_text $'\n'; sleep 2
     send_text "cat /mnt4/mbrdir/mbr.txt";    send_text $'\n'; sleep 3
     echo "quit"
@@ -148,6 +165,7 @@ send_text() {
     -drive "file=$repo_root/build/hdd.img,format=raw,snapshot=on" \
     -drive "file=$img_fat,format=raw" \
     -drive "file=$img_ext,format=raw" \
+    -drive "file=$img_ext4,format=raw" \
     -drive "file=$img_ntfs,format=raw" \
     -drive "file=$img_mbr,format=raw" \
     -M q35 \
@@ -172,9 +190,13 @@ check "hello from fat32"
 check "Long File Name.txt"
 check "long file name works"
 
-check "OK (ext, ro)"
+check "OK (ext2, ro)"
 check "hello from ext2"
 check "nested ext2 file works"
+
+check "OK (ext4, ro)"
+check "hello from ext4"
+check "nested ext4 file works"
 
 check "OK (ntfs, ro)"
 check "hello from ntfs"

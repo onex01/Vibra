@@ -3,6 +3,22 @@ TARGET := x86_64-unknown-none
 BUILD_DIR := build
 LIMINE_DIR := limine-bin
 
+# Версия берётся из единственного источника — kernel/src/version.rs.
+VERSION := $(shell sed -n 's/^pub const KERNEL_VERSION: &str = "\(.*\)";/\1/p' kernel/src/version.rs)
+BUILD_DATE ?= $(shell date -u +%Y-%m-%d)
+
+# Имена артефактов: vibra_2026-10-31_0.2.0-rc.5.iso
+ARTIFACT := vibra_$(BUILD_DATE)_$(VERSION)
+DEBUG_ARTIFACT := vibra-debug_$(BUILD_DATE)_$(VERSION)
+RELEASE_ARTIFACT := vibra-release_$(BUILD_DATE)_$(VERSION)
+
+ISO_IMAGE ?= $(BUILD_DIR)/$(ARTIFACT).iso
+DEBUG_ISO_IMAGE ?= $(BUILD_DIR)/$(DEBUG_ARTIFACT).iso
+RELEASE_ISO_IMAGE ?= $(BUILD_DIR)/$(RELEASE_ARTIFACT).iso
+UEFI_IMG ?= $(BUILD_DIR)/vibra-uefi_$(BUILD_DATE)_$(VERSION).img
+USB_IMG ?= $(BUILD_DIR)/vibra-usb_$(BUILD_DATE)_$(VERSION).img
+USB_DEBUG_IMG ?= $(BUILD_DIR)/vibra-usb-debug_$(BUILD_DATE)_$(VERSION).img
+
 # Загрузчик и прошивку можно закрепить на конкретной версии и SHA256.
 # По умолчанию поведение прежнее (latest), но для воспроизводимой сборки:
 #   make setup LIMINE_VERSION=v9.2.0 LIMINE_SHA256=<sha> OVMF_SHA256=<sha>
@@ -231,11 +247,11 @@ run-serial-file: build
 
 run-bios-usb: iso
 	@echo "==> Starting QEMU (SeaBIOS) with USB devices..."
-	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS) $(USB_FLAGS) -cdrom $(BUILD_DIR)/vibra.iso -M q35 -display none
+	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS) $(USB_FLAGS) -cdrom $(ISO_IMAGE) -M q35 -display none
 
 run-iso-usb: iso
 	@echo "==> Starting QEMU (UEFI) with USB devices..."
-	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS) $(USB_FLAGS) -cdrom $(BUILD_DIR)/vibra.iso -drive if=pflash,format=raw,file=OVMF.fd,readonly=on -M q35 -display none
+	$(QEMU_ENV) $(QEMU) $(QEMU_FLAGS) $(USB_FLAGS) -cdrom $(ISO_IMAGE) -drive if=pflash,format=raw,file=OVMF.fd,readonly=on -M q35 -display none
 
 clean:
 	$(CARGO) clean
@@ -280,7 +296,7 @@ iso: kernel
 		-efi-boot-part \
 		--efi-boot-image \
 		--protective-msdos-label \
-		-o $(BUILD_DIR)/vibra.iso \
+		-o $(ISO_IMAGE) \
 		$(BUILD_DIR)/iso_root
 
 	@echo "==> Installing Limine BIOS bootloader (hybrid MBR)..."
@@ -288,31 +304,32 @@ iso: kernel
 		echo "    building limine host tool from limine.c"; \
 		cc -O2 -o $(LIMINE_DIR)/limine $(LIMINE_DIR)/limine.c; \
 	fi
-	@$(LIMINE_DIR)/limine bios-install $(BUILD_DIR)/vibra.iso
+	@$(LIMINE_DIR)/limine bios-install $(ISO_IMAGE)
 
-	@echo "==> ISO image created: $(BUILD_DIR)/vibra.iso"
-	@ls -lh $(BUILD_DIR)/vibra.iso
+	@ln -sf $(notdir $(ISO_IMAGE)) $(BUILD_DIR)/vibra.iso
+	@echo "==> ISO image created: $(ISO_IMAGE)"
+	@ls -lh $(ISO_IMAGE)
 	@echo ""
 	@echo "==> Write to USB with Ventoy: just copy .iso to Ventoy USB drive"
-	@echo "==> Or burn: sudo dd if=$(BUILD_DIR)/vibra.iso of=/dev/sdX bs=4M status=progress"
+	@echo "==> Or burn: sudo dd if=$(ISO_IMAGE) of=/dev/sdX bs=4M status=progress"
 
 # ISO с release-ядром: оптимизация + COM1 полностью выключен.
 # Эквивалент `make RELEASE=1 SERIAL_DEBUG=0 iso`; отдельный таргет нужен,
 # чтобы release-ISO собиралась одной командой без запоминания переменных.
 iso-release:
-	@$(MAKE) RELEASE=1 SERIAL_DEBUG=0 iso
+	@$(MAKE) RELEASE=1 SERIAL_DEBUG=0 iso ISO_IMAGE=$(RELEASE_ISO_IMAGE)
 
 run-iso: iso
 	@echo "==> Starting QEMU with ISO..."
 	$(QEMU_ENV) $(QEMU) -m 512M -serial stdio -monitor none \
-		-cdrom $(BUILD_DIR)/vibra.iso \
+		-cdrom $(ISO_IMAGE) \
 		-drive if=pflash,format=raw,file=OVMF.fd,readonly=on \
 		-M q35 -display none
 
 run-bios: iso
 	@echo "==> Starting QEMU with ISO via SeaBIOS..."
 	$(QEMU_ENV) $(QEMU) -m 512M -serial stdio -monitor none \
-		-cdrom $(BUILD_DIR)/vibra.iso \
+		-cdrom $(ISO_IMAGE) \
 		-M q35 -display none
 
 qemu-usb: build
@@ -327,7 +344,6 @@ qemu-usb: build
 # Записывается на USB: sudo dd if=build/vibra-usb.img of=/dev/sdX bs=4M status=progress
 
 USB_SIZE_MB ?= 128
-USB_IMG := $(BUILD_DIR)/vibra-usb.img
 UEFI_USB_OVERWRITE ?= 0
 
 usb: build
@@ -354,6 +370,7 @@ usb: build
 	@$(LIMINE_DIR)/limine bios-install $(USB_IMG) 1 --force
 
 	@echo ""
+	@ln -sf $(notdir $(USB_IMG)) $(BUILD_DIR)/vibra-usb.img
 	@echo "==> USB image ready: $(USB_IMG)"
 	@ls -lh $(USB_IMG)
 	@echo ""
@@ -363,7 +380,9 @@ usb: build
 # UEFI-only GPT image with a standards-compliant EFI System Partition.
 uefi-usb:
 	$(CARGO) build -p vibra-kernel $(CARGO_FEATURES) $(CARGO_PROFILE) -Z build-std=core,alloc,compiler_builtins -Z build-std-features
-	@UEFI_USB_OVERWRITE="$(UEFI_USB_OVERWRITE)" USB_SIZE_MB="$(USB_SIZE_MB)" bash scripts/build-uefi-usb.sh
+	@UEFI_USB_OVERWRITE="$(UEFI_USB_OVERWRITE)" USB_SIZE_MB="$(USB_SIZE_MB)" \
+		UEFI_USB_IMAGE="$(UEFI_IMG)" KERNEL_ELF="$(KERNEL_ELF)" bash scripts/build-uefi-usb.sh
+	@ln -sf $(notdir $(UEFI_IMG)) $(BUILD_DIR)/vibra-uefi.img
 
 
 # === Boot-лог на USB (feature boot-log-to-usb) ===
@@ -372,8 +391,10 @@ uefi-usb:
 # VIBRALOG. Двойное согласие: feature при сборке + метка тома.
 
 LOG_PARTITION_MB ?= 64
+KERNEL_PARTITION_MB ?= 64
 USB_DEBUG_SIZE_MB ?= 256
 USB_DEBUG_ESP_MB ?= 64
+USB_DEBUG_KERNEL_MB ?= 64
 
 # Ядро с записью лога на USB (для образов usb-debug / iso-debug).
 boot-log-kernel:
@@ -391,7 +412,9 @@ usb-storage-test: build
 # GPT-образ флешки: ESP (VIBRA-ESP) + раздел для лога (VIBRALOG).
 usb-debug: boot-log-kernel
 	@USB_DEBUG_SIZE_MB="$(USB_DEBUG_SIZE_MB)" USB_DEBUG_ESP_MB="$(USB_DEBUG_ESP_MB)" \
-		KERNEL_ELF="$(KERNEL_ELF)" bash scripts/build-usb-debug.sh
+		USB_DEBUG_KERNEL_MB="$(USB_DEBUG_KERNEL_MB)" \
+		KERNEL_ELF="$(KERNEL_ELF)" USB_DEBUG_IMAGE="$(USB_DEBUG_IMG)" bash scripts/build-usb-debug.sh
+	@ln -sf $(notdir $(USB_DEBUG_IMG)) $(BUILD_DIR)/vibra-usb-debug.img
 
 # Гибридный ISO (UEFI+BIOS) + приложенный раздел VIBRALOG (xorriso).
 #
@@ -406,27 +429,35 @@ iso-debug: boot-log-kernel
 	@mkdir -p $(BUILD_DIR)/iso_debug_root/limine
 	@mkdir -p $(BUILD_DIR)/iso_debug_root/EFI/BOOT
 	@cp $(KERNEL_ELF) $(BUILD_DIR)/iso_debug_root/kernel.elf
-	@cp limine.conf $(BUILD_DIR)/iso_debug_root/limine/
+	@cp limine-debug.conf $(BUILD_DIR)/iso_debug_root/limine/limine.conf
 	@cp $(LIMINE_DIR)/BOOTX64.EFI $(BUILD_DIR)/iso_debug_root/EFI/BOOT/
 	@cp $(LIMINE_DIR)/limine-bios-cd.bin $(BUILD_DIR)/iso_debug_root/limine/
 	@cp $(LIMINE_DIR)/limine-uefi-cd.bin $(BUILD_DIR)/iso_debug_root/limine/
 # Без limine-bios.sys BIOS-ветка El Torito не находит stage2 — образ грузится
 # только через UEFI. Файл должен лежать внутри ISO рядом с limine-bios-cd.bin.
 	@cp $(LIMINE_DIR)/limine-bios.sys $(BUILD_DIR)/iso_debug_root/limine/
+	@echo "==> Building VIBRA kernel partition ($(KERNEL_PARTITION_MB)MB)"
+	@dd if=/dev/zero of=$(BUILD_DIR)/kernel-partition.img bs=1M count=$(KERNEL_PARTITION_MB) status=none
+	@mkfs.fat -F 32 -n VIBRA $(BUILD_DIR)/kernel-partition.img >/dev/null
+	@mcopy -i $(BUILD_DIR)/kernel-partition.img $(KERNEL_ELF) ::/kernel.elf
+	@mcopy -i $(BUILD_DIR)/kernel-partition.img limine-debug.conf ::/limine.conf
 	@LOG_IMG=$$(bash scripts/build-log-partition.sh "$(LOG_PARTITION_MB)" "$(BUILD_DIR)/log-partition.img"); \
 	xorriso -as mkisofs \
 		-b limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
 		--protective-msdos-label \
-		-append_partition 2 0x0c "$$LOG_IMG" \
-		-o $(BUILD_DIR)/vibra-debug.iso $(BUILD_DIR)/iso_debug_root
+		-append_partition 2 0x0c "$(BUILD_DIR)/kernel-partition.img" \
+		-append_partition 3 0x0c "$$LOG_IMG" \
+		-o $(DEBUG_ISO_IMAGE) $(BUILD_DIR)/iso_debug_root
 # Гибридный MBR (limine bios-install) здесь не ставим: у образа GPT
 # (EFI-раздел + добавленный VIBRALOG), и limine требует отдельный BIOS boot
 # partition. Для загрузки с CD достаточно El Torito (`-b limine-bios-cd.bin`
 # + limine-bios.sys внутри ISO) — именно так грузится SeaBIOS.
-	@echo "==> debug ISO: $(BUILD_DIR)/vibra-debug.iso"
-	@echo "    GPT partition 4 = VIBRALOG ($(LOG_PARTITION_MB)MB, xorriso -append_partition 2)"
-	@ls -lh $(BUILD_DIR)/vibra-debug.iso
+	@ln -sf $(notdir $(DEBUG_ISO_IMAGE)) $(BUILD_DIR)/vibra-debug.iso
+	@echo "==> debug ISO: $(DEBUG_ISO_IMAGE)"
+	@echo "    partition 2 = VIBRA (kernel, $(KERNEL_PARTITION_MB)MB)"
+	@echo "    partition 3 = VIBRALOG ($(LOG_PARTITION_MB)MB)"
+	@ls -lh $(DEBUG_ISO_IMAGE)
 
 # Прочитать лог с образа/флешки без монтирования: make read-boot-log LOG_DEVICE=/dev/sdX
 read-boot-log:

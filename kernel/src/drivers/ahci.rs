@@ -41,6 +41,7 @@ const FIS_TYPE_DATA: u8 = 0x46;
 const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
 const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
+const ATA_CMD_PACKET: u8 = 0xA0;
 
 // Port CMD bits
 const PORT_CMD_ST: u32 = 1;        // Start
@@ -160,6 +161,8 @@ struct AhciPort {
 }
 
 static AHCI_PORTS: Mutex<Vec<AhciPort>> = Mutex::new(Vec::new());
+/// Порты с ATAPI-устройством (CD/DVD). Их нельзя опрашивать IDENTIFY DEVICE.
+static ATAPI_PORTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 // DMA-адрес для буферов (используем HHDM — физическая = виртуальная - hhdm)
 fn virt_to_phys(virt: u64) -> u64 {
@@ -246,6 +249,13 @@ pub fn init() {
                 continue;
             }
 
+            // PxSIG на части контроллеров (в т.ч. ICH9 в QEMU) читается как
+            // 0xFFFFFFFF до старта порта, поэтому «фантомность» проверяем не
+            // по SIG, а командой IDENTIFY DEVICE. Читаем SIG уже после
+            // init_port: тогда ATAPI определяется по 0xEB14 без лишнего
+            // таймаута IDENTIFY.
+            init_port(i);
+
             let sig = port_read32(i, PORT_SIG);
             let sig_str = match sig >> 16 {
                 0x0000 => "ATA",
@@ -255,10 +265,26 @@ pub fn init() {
                 _ => "ATA/SATA",
             };
 
-            // PxSIG на части контроллеров (в т.ч. ICH9 в QEMU) читается как
-            // 0xFFFFFFFF даже при подключённом диске, поэтому «фантомность»
-            // проверяем не по SIG, а командой IDENTIFY DEVICE.
-            init_port(i);
+            // ATAPI (CD/DVD) не отвечает на IDENTIFY DEVICE — нужен PACKET
+            // + SCSI READ CAPACITY. Без этой ветки ядро вообще не видело
+            // CD, и разделы debug-ISO оставались недоступны.
+            if sig >> 16 == 0xEB14 {
+                match atapi_read_capacity(i) {
+                    Some((blocks, block_size)) => {
+                        println!(
+                            "[AHCI] Port {}: ATAPI CD-ROM, {} blocks x {} bytes",
+                            i, blocks, block_size
+                        );
+                        ATAPI_PORTS.lock().push(i);
+                    }
+                    None => {
+                        // Пустой CD-привод тоже отдаёт SIG=ATAPI: молча
+                        // пропускаем, это не ошибка загрузки.
+                        println!("[AHCI] Port {}: ATAPI drive, no media", i);
+                    }
+                }
+                continue;
+            }
 
             match identify_device(i) {
                 Some(info) => {
@@ -270,7 +296,26 @@ pub fn init() {
                     ports.push(AhciPort { num: i, active: true, ssts });
                 }
                 None => {
-                    println!("[AHCI] Port {}: нет ответа на IDENTIFY (SIG={:#010x}), skip", i, sig);
+                    // ATAPI не отвечает на IDENTIFY DEVICE. PxSIG на ICH9 в
+                    // QEMU читается как 0xFFFFFFFF, поэтому определяем CD по
+                    // успешному SCSI READ CAPACITY, а не по сигнатуре.
+                    println!(
+                        "[AHCI] Port {}: no IDENTIFY (SIG={:#010x}), probing ATAPI",
+                        i, sig
+                    );
+                    init_port(i);
+                    match atapi_read_capacity(i) {
+                        Some((blocks, block_size)) => {
+                            println!(
+                                "[AHCI] Port {}: ATAPI CD-ROM, {} blocks x {} bytes",
+                                i, blocks, block_size
+                            );
+                            ATAPI_PORTS.lock().push(i);
+                        }
+                        None => {
+                            println!("[AHCI] Port {}: neither ATA nor ATAPI, skip", i);
+                        }
+                    }
                 }
             }
         }
@@ -362,7 +407,10 @@ unsafe fn fis_command(fis: &mut FisRegH2d, command: u8) {
 /// `write` выставляет бит W в DW0 (0 — чтение из устройства, 1 — запись).
 unsafe fn fill_cmd_header(cmd: &mut CommandHeader, write: bool, ct_phys: u64) {
     cmd.cfl_w = 5 | if write { 0x40 } else { 0 }; // CFL=5 dwords, W при записи
-    cmd.flags = 0x08;                             // C=1: сбросить PxCI по завершении
+    // DW0 bit 10 = C (clear PxCI on completion). Раньше здесь стоял 0x08 —
+    // это резервный бит, поэтому PxCI не сбрасывался и следующая команда
+    // (в частности ATAPI PACKET) уходила в таймаут.
+    cmd.flags = 0x04;
     cmd.prdtl = 1;                                // один PRD
     cmd.prdbc = 0;                                // заполнит контроллер
     cmd.ctba = ct_phys as u32;
@@ -444,6 +492,201 @@ pub fn read_sectors(port_num: u32, lba: u64, count: u16, buffer: &mut [u8]) -> b
         }
 
         true
+    }
+}
+
+
+/// Отправить SCSI-пакет через ATAPI PACKET (PIO) и дождаться данных.
+fn atapi_command(port_num: u32, cdb: &[u8], buffer: &mut [u8], verbose: bool) -> bool {
+    if cdb.is_empty() || cdb.len() > 16 || buffer.len() > 0xFFFE {
+        return false;
+    }
+    unsafe {
+        let mut timeout = 500_000u32;
+        while port_read32(port_num, PORT_TFD) as u8 & (TFD_BSY | TFD_DRQ) != 0 && timeout > 0 {
+            timeout -= 1;
+        }
+        if timeout == 0 {
+            return false;
+        }
+        port_write32(port_num, PORT_IS, 0xFFFFFFFF);
+
+        let cmd_list_phys = port_read32(port_num, PORT_CLB) as u64
+            | ((port_read32(port_num, PORT_CLB + 4) as u64) << 32);
+        let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
+        let cmd_list = (hhdm + cmd_list_phys) as *mut CommandHeader;
+        let cmd = &mut *cmd_list;
+
+        let ct_layout = core::alloc::Layout::from_size_align(256, 256).unwrap();
+        let ct_ptr = alloc::alloc::alloc_zeroed(ct_layout);
+        if ct_ptr.is_null() {
+            return false;
+        }
+        let ct_phys = virt_to_phys(ct_ptr as u64);
+
+        // Register H2D FIS: PACKET, PIO, byte count в Sector Count.
+        let fis = ct_ptr as *mut FisRegH2d;
+        fis_command(&mut *fis, ATA_CMD_PACKET);
+        (*fis).features = 1; // DMA: QEMU/ich9 надёжнее отдаёт данные через PRD
+        (*fis).device = 0;
+        (*fis).sector_count_lo = (buffer.len() & 0xFF) as u8;
+        (*fis).sector_count_hi = ((buffer.len() >> 8) & 0xFF) as u8;
+
+        // ACMD лежит в command table по смещению 0x40.
+        let acmd = (ct_ptr as *mut u8).add(0x40);
+        core::ptr::write_bytes(acmd, 0, 16);
+        core::ptr::copy_nonoverlapping(cdb.as_ptr(), acmd, cdb.len());
+
+        // PRD по смещению 0x80.
+        let buf_phys = virt_to_phys(buffer.as_ptr() as u64);
+        let prd = (ct_ptr as *mut u8).add(0x80) as *mut PrdEntry;
+        (*prd).base_addr = buf_phys as u32;
+        (*prd).base_addr_hi = (buf_phys >> 32) as u32;
+        (*prd).byte_count = (buffer.len() as u32) | (1 << 31);
+
+        fill_cmd_header(cmd, false, ct_phys);
+        // DW0 bit 5 (A) обязателен для ATAPI/PACKET. Без него HBA отправляет
+        // команду как обычную ATA и она завершается таймаутом.
+        cmd.cfl_w |= 0x20;
+        port_write32(port_num, PORT_CI, 1);
+
+        timeout = 5_000_000;
+        while port_read32(port_num, PORT_CI) & 1 != 0 && timeout > 0 {
+            timeout -= 1;
+        }
+        alloc::alloc::dealloc(ct_ptr, ct_layout);
+
+        if timeout == 0 {
+            if verbose {
+                println!(
+                    "[ATAPI] Port {}: command timeout CMD={:#x} TFD={:#x} IS={:#x} CI={:#x}",
+                    port_num,
+                    port_read32(port_num, PORT_CMD),
+                    port_read32(port_num, PORT_TFD),
+                    port_read32(port_num, PORT_IS),
+                    port_read32(port_num, PORT_CI)
+                );
+            }
+            return false;
+        }
+        if let Some(is) = command_error(port_num) {
+            if verbose {
+                println!("[ATAPI] Port {}: command error IS={:#x}", port_num, is);
+            }
+            return false;
+        }
+        true
+    }
+}
+
+/// SCSI READ CAPACITY(10): (число блоков, размер блока).
+pub fn atapi_read_capacity(port_num: u32) -> Option<(u64, u32)> {
+    // Буфер обязан быть в HHDM-памяти: PRD хранит физический адрес, а
+    // `virt_to_phys` умеет только HHDM-адреса. Стек ядра в HHDM не лежит,
+    // поэтому стековый массив давал DMA в мусорный адрес и таймаут.
+    let mut buf = alloc::vec![0u8; 8];
+    let cdb = [0x25u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    if !atapi_command(port_num, &cdb, &mut buf, false) {
+        return None;
+    }
+    let last_lba = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64;
+    let block_size = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    if block_size == 0 {
+        return None;
+    }
+    Some((last_lba + 1, block_size))
+}
+
+/// Список ATAPI-портов (CD/DVD).
+pub fn atapi_ports() -> Vec<u32> {
+    ATAPI_PORTS.lock().clone()
+}
+
+/// ATAPI CD/DVD как `DiskIo` с логическими блоками 2048 байт.
+pub struct AtapiDisk {
+    port: u32,
+    block_size: u32,
+    blocks: u64,
+}
+
+impl AtapiDisk {
+    pub fn new(port: u32) -> Option<Self> {
+        let (blocks, block_size) = atapi_read_capacity(port)?;
+        Some(Self {
+            port,
+            block_size,
+            blocks,
+        })
+    }
+
+    /// Размер в 512-байтных секторах (единица block layer/VFS).
+    pub fn sectors_512(&self) -> u64 {
+        self.blocks
+            .saturating_mul(self.block_size as u64)
+            / crate::fs::disk::SECTOR_SIZE as u64
+    }
+
+    fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let bs = self.block_size as usize;
+        if bs == 0 || lba > u32::MAX as u64 {
+            return Err(crate::fs::vfs::FsError::IoError);
+        }
+        let mut offset = 0usize;
+        let mut current_lba = lba;
+        while offset < buf.len() {
+            let remaining = buf.len() - offset;
+            let blocks = ((remaining + bs - 1) / bs).min(32) as u32;
+            let mut tmp = alloc::vec![0u8; blocks as usize * bs];
+            let mut cdb = [0u8; 10];
+            cdb[0] = 0x28; // READ(10)
+            cdb[2] = ((current_lba >> 24) & 0xFF) as u8;
+            cdb[3] = ((current_lba >> 16) & 0xFF) as u8;
+            cdb[4] = ((current_lba >> 8) & 0xFF) as u8;
+            cdb[5] = (current_lba & 0xFF) as u8;
+            cdb[7] = ((blocks >> 8) & 0xFF) as u8;
+            cdb[8] = (blocks & 0xFF) as u8;
+            if !atapi_command(self.port, &cdb, &mut tmp, true) {
+                return Err(crate::fs::vfs::FsError::IoError);
+            }
+            let take = remaining.min(tmp.len());
+            buf[offset..offset + take].copy_from_slice(&tmp[..take]);
+            offset += take;
+            current_lba += blocks as u64;
+        }
+        Ok(())
+    }
+}
+
+impl crate::fs::disk::DiskIo for AtapiDisk {
+    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let byte_offset = sector
+            .checked_mul(crate::fs::disk::SECTOR_SIZE as u64)
+            .ok_or(crate::fs::vfs::FsError::IoError)?;
+        let bs = self.block_size as u64;
+        let start_block = byte_offset / bs;
+        let in_block = (byte_offset % bs) as usize;
+        let need = (in_block + buf.len() + bs as usize - 1) / bs as usize;
+        let mut tmp = alloc::vec![0u8; need * bs as usize];
+        self.read_blocks(start_block, &mut tmp)?;
+        buf.copy_from_slice(&tmp[in_block..in_block + buf.len()]);
+        Ok(())
+    }
+
+    fn sector_size(&self) -> usize {
+        self.block_size as usize
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), crate::fs::vfs::FsError> {
+        let bs = self.block_size as usize;
+        let mut tmp = alloc::vec![0u8; bs];
+        self.read_blocks(lba, &mut tmp)?;
+        let count = buf.len().min(bs);
+        buf[..count].copy_from_slice(&tmp[..count]);
+        Ok(())
     }
 }
 

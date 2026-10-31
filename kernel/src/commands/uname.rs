@@ -21,6 +21,10 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print(crate::version::ARCHITECTURE);
         console.print(" ");
         console.print(crate::version::KERNEL_VERSION);
+        console.print(" build ");
+        console.print(crate::version::BUILD_DATE);
+        console.print(" ");
+        console.print(crate::version::GIT_COMMIT);
         console.print("\n");
     } else if args[0] == "-r" {
         console.print(crate::version::KERNEL_VERSION);
