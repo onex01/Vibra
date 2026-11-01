@@ -313,10 +313,6 @@ pub fn init(io_base: u16) -> bool {
         return false;
     }
 
-    println!(
-        "[UHCI] {:#06x}: frame list phys={:#x} qh={:#x} buf={:#x}",
-        io_base, frame_phys, qh_phys, buf_phys
-    );
     CONTROLLERS.lock().push(controller);
     READY.store(true, Ordering::Relaxed);
     true
