@@ -21,6 +21,7 @@
 | `make debug-image-test` | три раздела USB debug-образа и запись `/VIBRA.LOG` | qemu, mtools, util-linux |
 | `make iso-debug-test` | debug ISO на USB: разделы и запись лога | qemu, mtools, util-linux, xorriso |
 | `make keyboard-test` | PS/2 и USB HID через monitor `sendkey` | qemu, python3 |
+| `make uhci-test` | USB-клавиатура на UHCI (как на чипсетах Intel/AMD) | qemu |
 | `make iso-smoke` | загрузка гибридного ISO в UEFI и BIOS | qemu, xorriso, OVMF, SeaBIOS |
 | `BOOT_ITERATIONS=10 python3 scripts/qemu-boot-matrix.py` | повторяемость загрузки | qemu, python3 |
 

@@ -690,6 +690,55 @@ impl crate::fs::disk::DiskIo for AtapiDisk {
     }
 }
 
+/// Состояние порта для `diag disk`.
+pub struct PortReport {
+    pub num: u32,
+    pub ssts: u32,
+    pub sig: u32,
+    pub tfd: u32,
+    pub serr: u32,
+    pub kind: &'static str,
+}
+
+/// Снимок всех реализованных портов AHCI.
+pub fn port_report() -> Vec<PortReport> {
+    let mut out = Vec::new();
+    if HBA_BASE.load(Ordering::Relaxed) == 0 {
+        return out;
+    }
+    let cap = unsafe { hba_read32(HBA_CAP) };
+    let num_ports = (cap & HBA_CAP_NP) as u32 + 1;
+    let pi = unsafe { hba_read32(HBA_PI) };
+
+    for index in 0..num_ports {
+        if pi & (1 << index) == 0 {
+            continue;
+        }
+        let ssts = unsafe { port_read32(index, PORT_SSTS) };
+        let sig = unsafe { port_read32(index, PORT_SIG) };
+        let tfd = unsafe { port_read32(index, PORT_TFD) };
+        let serr = unsafe { port_read32(index, PORT_SERR) };
+        let kind = match sig >> 16 {
+            0x0000 => "ATA",
+            0xEB14 => "ATAPI",
+            0x9669 => "SEMB",
+            0xC33C => "SATA PM",
+            _ => "unknown",
+        };
+        out.push(PortReport { num: index, ssts, sig, tfd, serr, kind });
+    }
+    out
+}
+
+/// Паспорт уже опрошенного порта (без повторного IDENTIFY).
+pub fn cached_disk_info(port_num: u32) -> Option<DiskInfo> {
+    DISK_INFO
+        .lock()
+        .iter()
+        .find(|info| info.port == port_num)
+        .cloned()
+}
+
 /// Количество активных портов
 pub fn active_port_count() -> usize {
     AHCI_PORTS.lock().iter().filter(|p| p.active).count()
@@ -904,7 +953,11 @@ impl AhciDisk {
         // реальный размер сектора, иначе GPT/FAT будут читать не с того
         // смещения. `with_sector_size` используется там, где IDENTIFY уже
         // выполнен (blockdev), а здесь — для остальных вызывающих.
-        let sector_size = identify_device(port)
+        // Сначала кэш: `blockdev` уже опросил порт при загрузке, и повторный
+        // IDENTIFY на каждом открытии окна занимал секунды на реальном
+        // железе (boot_log сканирует диски несколько раз).
+        let sector_size = cached_disk_info(port)
+            .or_else(|| identify_device(port))
             .map(|info| info.sector_size)
             .unwrap_or(512);
         Self::with_sector_size(port, sector_size)
@@ -925,6 +978,9 @@ impl AhciDisk {
 /// Информация о диске, полученная через ATA IDENTIFY
 #[derive(Clone)]
 pub struct DiskInfo {
+    /// Номер порта: нужен, чтобы не вызывать IDENTIFY повторно
+    /// (blockdev, boot_log и diag раньше опрашивали диск по 3-4 раза).
+    pub port: u32,
     pub total_sectors: u64,
     pub sector_size: u16,
     pub serial: String,
@@ -939,7 +995,34 @@ pub fn get_disk_info() -> Vec<DiskInfo> {
 }
 
 /// Выполнить ATA IDENTIFY DEVICE на указанном порту AHCI
+/// IDENTIFY DEVICE с повторами.
+///
+/// На реальных платах первая команда после init_port иногда возвращает нули
+/// (устройство ещё не готово после COMRESET). Раньше это выглядело как
+/// «диск на 0 секторов», и порт отбрасывался. Теперь до трёх попыток с
+/// паузой и переинициализацией порта между ними.
 pub fn identify_device(port_num: u32) -> Option<DiskInfo> {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            crate::timer::sleep_ms(50);
+            unsafe { init_port(port_num) };
+            crate::timer::sleep_ms(20);
+        }
+        if let Some(info) = identify_once(port_num) {
+            if info.total_sectors > 0 {
+                return Some(info);
+            }
+            println!(
+                "[AHCI] Port {}: IDENTIFY returned 0 sectors (attempt {}), retrying",
+                port_num,
+                attempt + 1
+            );
+        }
+    }
+    None
+}
+
+fn identify_once(port_num: u32) -> Option<DiskInfo> {
     unsafe {
         // Ждём пока порт свободен (BSY=0, DRQ=0)
         let mut timeout = 50_000u32;
@@ -1061,9 +1144,27 @@ pub fn identify_device(port_num: u32) -> Option<DiskInfo> {
 
         alloc::alloc::dealloc(id_buf, id_buf_layout);
 
+        if total_sectors == 0 {
+            // Показываем ключевые слова IDENTIFY: по ним видно, ответил ли
+            // диск вообще (word 0 = 0x0040 у ATA) и что он заявил.
+            println!(
+                "[AHCI] Port {}: IDENTIFY words: 0={:#06x} 1={:#06x} 49={:#06x} 60={:#06x} 83={:#06x} 100={:#06x} 101={:#06x}",
+                port_num, data[0], data[1], data[49], data[60], data[83], data[100], data[101]
+            );
+            let tfd = port_read32(port_num, PORT_TFD);
+            let is = port_read32(port_num, PORT_IS);
+            let serr = port_read32(port_num, PORT_SERR);
+            let ssts = port_read32(port_num, PORT_SSTS);
+            println!(
+                "[AHCI] Port {}: TFD={:#x} IS={:#x} SERR={:#x} SSTS={:#x} (DET={} IPM={} SPD={})",
+                port_num, tfd, is, serr, ssts,
+                ssts & 0xF, (ssts >> 8) & 0xF, (ssts >> 4) & 0xF
+            );
+        }
+
         println!("[AHCI] Port {}: {} — {}sect ({} bytes/sect)",
             port_num, model, total_sectors, sector_size);
 
-        Some(DiskInfo { total_sectors, sector_size, serial, model })
+        Some(DiskInfo { port: port_num, total_sectors, sector_size, serial, model })
     }
 }

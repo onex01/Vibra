@@ -309,18 +309,37 @@ pub fn poll_key() -> Option<crate::keyboard::Key> {
 /// В release-сборке зеркало отключено: экран и `boot_log` пишутся отдельно,
 /// поэтому вывод не теряется, а байт в UART не уходит.
 pub fn mirror_console_char(ch: char) {
+    // Редактор строки перерисовывает ввод через backspace-последовательности.
+    // На время чтения строки журналы молчат, а команда пишется в журнал
+    // целиком — иначе транскрипт shell превращается в мусор.
+    let quiet = crate::boot_log::echo_quiet();
+    if !quiet {
+        // Журнал shell: всё, что попадает в консоль после входа в оболочку,
+        // копируется в отдельное кольцо (/var/log/shell.log).
+        crate::boot_log::session_char(ch);
+    }
+
     #[cfg(feature = "serial-debug")]
     {
         if ch.is_ascii() {
             let byte = ch as u8;
             if byte == b'\n' {
-                write_byte_without_framebuffer(b'\r');
+                mirror_byte(b'\r', quiet);
             }
-            write_byte_without_framebuffer(byte);
+            mirror_byte(byte, quiet);
         }
     }
     #[cfg(not(feature = "serial-debug"))]
     let _ = ch;
+}
+
+/// Зеркалирование в COM1 с опциональной записью в boot-лог.
+#[cfg(feature = "serial-debug")]
+fn mirror_byte(byte: u8, quiet: bool) {
+    if !quiet {
+        crate::boot_log::log_byte(byte);
+    }
+    write_serial_byte(byte);
 }
 
 pub fn write_str(s: &str) {

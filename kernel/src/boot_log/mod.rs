@@ -1,17 +1,21 @@
 // Boot Log — кольцевой буфер в памяти + сохранение на носитель.
 //
-// Все `println!` (serial) попадают в кольцевой буфер (128 КиБ) через
-// `log_byte`. Оттуда лог:
+// Все `println!` (serial) попадают в кольцевой буфер через `log_byte`.
+// Оттуда лог:
 //   1. пишется в /var/log/boot.log (ramfs, после init_filesystem);
-//   2. в файл /VIBRA.LOG на FAT32-разделе с меткой `VIBRALOG` (загрузочная
-//      флешка или отдельный диск). Это единственный канал диагностики на
-//      ноутбуке без COM-порта. Раньше приёмник собирался только с feature
-//      `boot-log-to-usb`, и в обычной сборке лог жил лишь в ramfs — то есть
-//      исчезал при выключении. Теперь модуль компилируется всегда;
+//   2. в файл VIBRA.LOG на FAT32-разделе с меткой `VIBRALOG` либо, если
+//      такого нет, на загрузочном томе (там, где лежит KERNEL.ELF). Это
+//      единственный канал диагностики на машине без COM-порта: снял
+//      загрузочный носитель — прочитал лог;
 //   3. при feature `boot-log-to-disk` — legacy raw-запись в LBA 2/3 (опасно
 //      на реальном железе, только для тестового носителя).
 //
-// Кольцо нужно потому, что запись на USB появляется не сразу: контроллер
+// Отдельно ведётся журнал shell: всё, что печатается в консоль после старта
+// оболочки (prompt, команды, их вывод), копируется в собственное кольцо и
+// сохраняется как /var/log/shell.log и SHELL.LOG на носителе. Это позволяет
+// восстановить полный сеанс терминала, а не только загрузку.
+//
+// Кольца нужны потому, что запись на USB появляется не сразу: контроллер
 // инициализируется на шаге 7, перечисление — на шаге 8.5. Всё, что было
 // напечатано раньше, при `attach()` уходит на диск целиком.
 
@@ -19,25 +23,44 @@ use crate::println;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// Boot-фаза завершена (`init()` вызван). До этого `flush` может повторно
-/// искать VIBRALOG, после — только изредка: idle-цикл shell не должен
-/// сканировать диски каждую секунду.
+/// Boot-фаза завершена (`mark_boot_finished`). До этого `flush` может
+/// повторно искать приёмник, после — только с троттлингом.
 static BOOT_DONE: AtomicBool = AtomicBool::new(false);
 
-/// Размер кольцевого буфера. 128 КиБ — весь boot-лог с запасом;
-/// старые 32 КиБ обрезали лог на этапе enumeration USB.
-pub const LOG_SIZE: usize = 128 * 1024;
+/// Размер кольцевого буфера boot-лога.
+///
+/// 256 КиБ: на реальной машине лог с ACPI, PCI-инвентарём, USB-перечислением
+/// и ФС занимает десятки килобайт, а при `diag`-командах легко перерастает
+/// прежние 128 КиБ — тогда начало лога терялось.
+pub const LOG_SIZE: usize = 256 * 1024;
 
 static mut LOG_BUF: [u8; LOG_SIZE] = [0; LOG_SIZE];
 /// Сколько байт всего записано (монотонно). Позиция в кольце = total % LOG_SIZE.
 static LOG_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
+/// Размер кольца журнала shell.
+pub const SHELL_LOG_SIZE: usize = 64 * 1024;
+
+static mut SHELL_BUF: [u8; SHELL_LOG_SIZE] = [0; SHELL_LOG_SIZE];
+static SHELL_TOTAL: AtomicUsize = AtomicUsize::new(0);
+/// Захват журнала shell включается при входе в оболочку.
+static SHELL_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Сколько байт boot-лога уже записано в /var/log/boot.log (ramfs).
+static RAMFS_BOOT_WRITTEN: AtomicUsize = AtomicUsize::new(0);
+/// Сколько байт журнала shell уже записано в /var/log/shell.log (ramfs).
+static RAMFS_SHELL_WRITTEN: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "boot-log-to-disk")]
 static LOG_WRITTEN: AtomicBool = AtomicBool::new(false);
 
 pub mod usb;
 
-/// Записать байт в лог-буфер.
+// ==========================================
+// Boot-лог
+// ==========================================
+
+/// Записать байт в boot-лог.
 pub fn log_byte(b: u8) {
     let position = LOG_TOTAL.fetch_add(1, Ordering::Relaxed) % LOG_SIZE;
     unsafe {
@@ -45,7 +68,7 @@ pub fn log_byte(b: u8) {
     }
 }
 
-/// Сколько байт всего записано в лог.
+/// Сколько байт всего записано в boot-лог.
 pub fn total_len() -> usize {
     LOG_TOTAL.load(Ordering::Relaxed)
 }
@@ -65,7 +88,7 @@ pub fn mark_boot_finished() {
     BOOT_DONE.store(true, Ordering::Relaxed);
 }
 
-/// Копирует до `out.len()` байт начиная с `cursor`.
+/// Копирует до `out.len()` байт boot-лога начиная с `cursor`.
 /// Возвращает `(скопировано, новый курсор)`.
 pub fn read_chunk(cursor: usize, out: &mut [u8]) -> (usize, usize) {
     let total = total_len();
@@ -83,7 +106,7 @@ pub fn read_chunk(cursor: usize, out: &mut [u8]) -> (usize, usize) {
     (count, start)
 }
 
-/// Копирует весь лог в `out` (дописывая).
+/// Копирует весь boot-лог в `out` (дописывая).
 pub fn copy_log(out: &mut Vec<u8>) {
     let mut cursor = first_cursor();
     loop {
@@ -100,12 +123,132 @@ pub fn copy_log(out: &mut Vec<u8>) {
     }
 }
 
-/// Весь лог как вектор (для файлов и serial).
+/// Весь boot-лог как вектор (для файлов и serial).
 pub fn get_log_bytes() -> Vec<u8> {
     let mut data = Vec::with_capacity(LOG_SIZE);
     copy_log(&mut data);
     data
 }
+
+// ==========================================
+// Журнал shell
+// ==========================================
+
+/// Включить захват журнала shell (вызывается при входе в оболочку).
+pub fn session_begin() {
+    SHELL_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// Захват журнала shell включён?
+pub fn session_active() -> bool {
+    SHELL_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Редактор строки перерисовывает ввод через `\x08`-последовательности.
+/// На время чтения строки журналы глушатся, а сама команда пишется в журнал
+/// целиком (`session_line`) — иначе транскрипт превращается в кашу из
+/// «l ls ls ls /».
+static ECHO_QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Глушить запись консольного эха в журналы (редактор строки).
+pub fn session_suspend() {
+    ECHO_QUIET.store(true, Ordering::Relaxed);
+}
+
+/// Вернуть запись консоли в журналы.
+pub fn session_resume() {
+    ECHO_QUIET.store(false, Ordering::Relaxed);
+}
+
+/// Эхо сейчас подавлено?
+pub fn echo_quiet() -> bool {
+    ECHO_QUIET.load(Ordering::Relaxed)
+}
+
+/// Записать готовую строку в журнал shell (команда после Enter).
+pub fn session_line(text: &str) {
+    if !SHELL_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    for byte in text.bytes() {
+        let position = SHELL_TOTAL.fetch_add(1, Ordering::Relaxed) % SHELL_LOG_SIZE;
+        unsafe {
+            SHELL_BUF[position] = byte;
+        }
+    }
+}
+
+/// Записать символ консоли в журнал shell.
+///
+/// Не-ASCII символы (рамки `tree`, блоки) переводятся в ASCII-эквиваленты:
+/// журнал — текстовый файл, а CP437-графика в нём бесполезна.
+pub fn session_char(ch: char) {
+    if !SHELL_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let mapped = match ch {
+        '\u{2500}' | '\u{2014}' | '\u{2013}' => b'-',
+        '\u{2502}' => b'|',
+        '\u{250C}' | '\u{2510}' | '\u{2514}' | '\u{2518}' => b'+',
+        '\u{251C}' | '\u{2524}' | '\u{252C}' | '\u{2534}' | '\u{253C}' => b'+',
+        '\u{2588}' | '\u{2591}' | '\u{2592}' | '\u{2593}' | '\u{25A0}' => b'#',
+        _ if ch.is_ascii() => ch as u8,
+        _ => b'?',
+    };
+    let position = SHELL_TOTAL.fetch_add(1, Ordering::Relaxed) % SHELL_LOG_SIZE;
+    unsafe {
+        SHELL_BUF[position] = mapped;
+    }
+}
+
+/// Сколько байт всего записано в журнал shell.
+pub fn session_total() -> usize {
+    SHELL_TOTAL.load(Ordering::Relaxed)
+}
+
+/// Начало валидного окна журнала shell.
+pub fn session_first_cursor() -> usize {
+    session_total().saturating_sub(SHELL_LOG_SIZE)
+}
+
+/// Читает порцию журнала shell: `(скопировано, новый курсор)`.
+pub fn session_read_chunk(cursor: usize, out: &mut [u8]) -> (usize, usize) {
+    let total = session_total();
+    let mut start = cursor.max(session_first_cursor());
+    if start >= total || out.is_empty() {
+        return (0, total);
+    }
+    let index = start % SHELL_LOG_SIZE;
+    let count = (SHELL_LOG_SIZE - index).min(total - start).min(out.len());
+    unsafe {
+        out[..count].copy_from_slice(&SHELL_BUF[index..index + count]);
+    }
+    start += count;
+    (count, start)
+}
+
+/// Весь журнал shell как вектор.
+pub fn session_bytes() -> Vec<u8> {
+    let mut data = Vec::with_capacity(SHELL_LOG_SIZE);
+    let mut cursor = session_first_cursor();
+    loop {
+        let total = session_total();
+        if cursor >= total {
+            break;
+        }
+        let index = cursor % SHELL_LOG_SIZE;
+        let count = (SHELL_LOG_SIZE - index).min(total - cursor);
+        unsafe {
+            data.extend_from_slice(&SHELL_BUF[index..index + count]);
+        }
+        cursor += count;
+    }
+    data
+}
+
+// ==========================================
+// Приёмники
+// ==========================================
 
 /// Legacy raw-запись лога в LBA 2/3 первого SATA-порта.
 ///
@@ -145,6 +288,7 @@ fn checkpoint_raw_disk() {}
 pub fn checkpoint() {
     checkpoint_raw_disk();
     usb::flush(false);
+    refresh_ramfs_logs(false);
 }
 
 /// Запись лога при панике: без аллокаций, максимум одна порция.
@@ -188,6 +332,46 @@ pub fn flush_to_file(path: &str) {
     let _ = crate::fs::write_file(path, &log);
 }
 
+/// Сохранить журнал shell в файл ramfs.
+pub fn flush_session_to_file(path: &str) {
+    let data = session_bytes();
+    if data.is_empty() {
+        return;
+    }
+    let _ = crate::fs::write_file(path, &data);
+}
+
+/// Обновить файлы в ramfs, если лог заметно вырос.
+///
+/// Перезапись 256 КиБ на каждую секунду простоя бессмысленна, поэтому
+/// ramfs-копии обновляются порциями; диск получает данные инкрементально
+/// через `usb::flush` и всегда актуален.
+fn refresh_ramfs_logs(force: bool) {
+    const STEP: usize = 16 * 1024;
+
+    let boot_total = total_len();
+    let boot_written = RAMFS_BOOT_WRITTEN.load(Ordering::Relaxed);
+    if force || boot_total.saturating_sub(boot_written) >= STEP {
+        flush_to_file("/var/log/boot.log");
+        RAMFS_BOOT_WRITTEN.store(boot_total, Ordering::Relaxed);
+    }
+
+    if !session_active() {
+        return;
+    }
+    let shell_total = session_total();
+    let shell_written = RAMFS_SHELL_WRITTEN.load(Ordering::Relaxed);
+    if force || shell_total.saturating_sub(shell_written) >= STEP {
+        flush_session_to_file("/var/log/shell.log");
+        RAMFS_SHELL_WRITTEN.store(shell_total, Ordering::Relaxed);
+    }
+}
+
+/// Немедленно записать оба журнала в ramfs (после команды, перед выключением).
+pub fn flush_all_files() {
+    refresh_ramfs_logs(true);
+}
+
 /// Инициализация: raw-запись + файлы в ramfs + сводка в serial.
 ///
 /// Запись на USB запускается раньше, из `boot_log::usb::attach()` —
@@ -196,12 +380,13 @@ pub fn init() {
     flush_raw();
 
     flush_to_file("/var/log/boot.log");
+    RAMFS_BOOT_WRITTEN.store(total_len(), Ordering::Relaxed);
 
     let len = total_len();
     println!("[LOG] Boot log saved ({} bytes)", len);
     println!("[LOG] /var/log/boot.log");
 
     // Полный лог уже транслировался в serial/framebuffer построчно. Повторная
-    // печать всех 128 КиБ на реальном UART занимает десятки секунд, поэтому
+    // печать всех 256 КиБ на реальном UART занимает десятки секунд, поэтому
     // она доступна только по запросу: `log` или `log <N>` в shell.
 }

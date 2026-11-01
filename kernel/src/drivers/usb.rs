@@ -11,6 +11,7 @@ use core::sync::atomic::Ordering;
 
 pub mod hid;
 pub mod storage;
+pub mod uhci;
 pub mod xhci;
 
 /// Информация об обнаруженном USB контроллере
@@ -114,9 +115,19 @@ pub fn get_devices() -> Vec<UsbDevice> {
     USB_DEVICES.lock().clone()
 }
 
-/// Инициализация подсистемы USB — поиск контроллеров через PCI
+/// Инициализация подсистемы USB — поиск контроллеров через PCI.
+///
+/// Тип контроллера определяется по `prog_if` (PCI class 0x0C / subclass 0x03):
+///   0x00 — UHCI (USB 1.1, Intel/VIA): low/full-speed устройства, включая
+///          клавиатуры на USB2-портах чипсетов Intel и AMD SB;
+///   0x10 — OHCI (USB 1.1, NEC/AMD/VIA) — не поддерживается;
+///   0x20 — EHCI (USB 2.0) — не поддерживается (см. docs/usb_and_boot.md);
+///   0x30 — xHCI (USB 3.x) — основной драйвер.
+///
+/// Раньше тип не проверялся: EHCI-контроллеры отдавались в xHCI-код и
+/// падали с «invalid topology (slots=2, ports=0)», а клавиатуры на них
+/// оставались невидимыми.
 pub fn init() {
-    // USB контроллеры: class = 0x0C (Serial Bus), subclass = 0x03 (USB)
     let devices = super::pci::find_all_devices_by_class(0x0C, 0x03);
 
     if devices.is_empty() {
@@ -126,68 +137,98 @@ pub fn init() {
 
     println!("[USB] Found {} USB controller(s)", devices.len());
 
-    // Лок держим только на время записи в реестр: `xhci::init_controller`
-    // выполняет MMIO-ожидания (секунды), и под глобальным локом это
-    // блокировало бы `get_controllers()`/`diag usb` из другого контекста.
     let mut found: Vec<UsbController> = Vec::new();
+    let mut uhci_count = 0usize;
 
     for pci_dev in &devices {
-        // Включаем Bus Master и Memory Space
+        let kind = match pci_dev.prog_if {
+            0x00 => "UHCI",
+            0x10 => "OHCI",
+            0x20 => "EHCI",
+            0x30 => "xHCI",
+            other => {
+                println!(
+                    "[USB] [{:02X}:{:02X}.{}] unknown prog_if {:#04x}, skipping",
+                    pci_dev.bus, pci_dev.dev, pci_dev.func, other
+                );
+                continue;
+            }
+        };
+
         unsafe {
             super::pci::enable_bus_master(pci_dev.bus, pci_dev.dev, pci_dev.func);
         }
 
-        // BAR0 — MMIO базовый адрес (если memory BAR)
-        if !pci_dev.is_io_bar(0) {
-            let bar0_phys = pci_dev.bar0_phys();
-            if bar0_phys == 0 {
-                println!("[USB] [{:02X}:{:02X}.{}] BAR0 is zero, skipping",
-                    pci_dev.bus, pci_dev.dev, pci_dev.func);
-                continue;
+        match pci_dev.prog_if {
+            0x30 => {
+                if pci_dev.is_io_bar(0) {
+                    println!("[USB] xHCI with I/O BAR0, skipping");
+                    continue;
+                }
+                let bar0_phys = pci_dev.bar0_phys();
+                if bar0_phys == 0 {
+                    println!("[USB] [{:02X}:{:02X}.{}] BAR0 is zero, skipping",
+                        pci_dev.bus, pci_dev.dev, pci_dev.func);
+                    continue;
+                }
+                let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
+                let mmio_virt = hhdm + bar0_phys;
+
+                let (hci_version, port_count) = unsafe {
+                    let cap0 = core::ptr::read_volatile(mmio_virt as *const u32);
+                    let hcsparams1 = core::ptr::read_volatile((mmio_virt + 0x04) as *const u32);
+                    let hci_version = (cap0 >> 16) as u16;
+                    let port_count = ((hcsparams1 >> 24) & 0xFF) as u8;
+                    println!(
+                        "[USB] [{:02X}:{:02X}.{}] {:04X}:{:04X} {} v{}.{} ({} ports, CAPLEN={})",
+                        pci_dev.bus, pci_dev.dev, pci_dev.func,
+                        pci_dev.vendor_id, pci_dev.device_id,
+                        kind, hci_version >> 8, hci_version & 0xFF,
+                        port_count, cap0 & 0xFF
+                    );
+                    (hci_version, port_count)
+                };
+
+                if crate::drivers::usb::xhci::init_controller(bar0_phys, mmio_virt) {
+                    found.push(UsbController {
+                        vendor: pci_dev.vendor_id,
+                        device: pci_dev.device_id,
+                        mmio_base: bar0_phys,
+                        port_count,
+                        version: hci_version,
+                    });
+                }
             }
-
-            // Преобразуем физический адрес через HHDM
-            let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
-            let mmio_virt = hhdm + bar0_phys;
-
-            // Capability registers: версия и число портов (HCSPARAMS1 bits 24-31).
-            let (hci_version, port_count) = unsafe {
-                let cap0 = core::ptr::read_volatile(mmio_virt as *const u32);
-                let cap_length = (cap0 & 0xFF) as u64;
-                let hci_version = (cap0 >> 16) as u16;
-                let hcsparams1 = core::ptr::read_volatile((mmio_virt + 0x04) as *const u32);
-                let port_count = ((hcsparams1 >> 24) & 0xFF) as u8;
-
+            0x00 => {
+                // UHCI: I/O BAR4, 32-байтное выравнивание.
+                let io_base = (pci_dev.bar4 & !0x1F) as u16;
                 println!(
-                    "[USB] [{:02X}:{:02X}.{}] {:04X}:{:04X} xHCI v{}.{} ({} ports, CAPLEN={})",
+                    "[USB] [{:02X}:{:02X}.{}] {:04X}:{:04X} UHCI (I/O {:#06x})",
                     pci_dev.bus, pci_dev.dev, pci_dev.func,
-                    pci_dev.vendor_id, pci_dev.device_id,
-                    hci_version >> 8, hci_version & 0xFF,
-                    port_count, cap_length
+                    pci_dev.vendor_id, pci_dev.device_id, io_base
                 );
-                (hci_version, port_count)
-            };
-
-            // Полный lifecycle: BIOS handoff, reset, DCBAA, rings, enumeration.
-            if crate::drivers::usb::xhci::init_controller(bar0_phys, mmio_virt) {
-                found.push(UsbController {
-                    vendor: pci_dev.vendor_id,
-                    device: pci_dev.device_id,
-                    mmio_base: bar0_phys,
-                    port_count,
-                    version: hci_version,
-                });
+                if crate::drivers::usb::uhci::init(io_base) {
+                    uhci_count += 1;
+                }
             }
-        } else {
-            println!("[USB] [{:02X}:{:02X}.{}] I/O BAR, skipping (memory BAR required)",
-                pci_dev.bus, pci_dev.dev, pci_dev.func);
+            other => {
+                println!(
+                    "[USB] [{:02X}:{:02X}.{}] {:04X}:{:04X} {} (prog_if {:#04x}) is not supported yet",
+                    pci_dev.bus, pci_dev.dev, pci_dev.func,
+                    pci_dev.vendor_id, pci_dev.device_id, kind, other
+                );
+            }
         }
     }
 
-    let initialized = found.len();
+    let initialized = found.len() + uhci_count;
     USB_CONTROLLERS.lock().extend(found);
-    println!("[USB] {} controller(s) initialized", initialized);
+    println!(
+        "[USB] {} controller(s) initialized ({} xHCI, {} UHCI)",
+        initialized,
+        USB_CONTROLLERS.lock().len(),
+        uhci_count
+    );
 
-    // HID: отчёты приходят из xhci::poll_keyboard().
     crate::drivers::usb::hid::init();
 }

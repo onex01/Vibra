@@ -5,6 +5,25 @@ use alloc::format;
 
 /// Контроллеры, устройства, накопители и состояние приёмника boot-лога.
 pub fn diag_usb(console: &mut Console) {
+    console.print_colored("[UHCI]\n", COLOR_YELLOW);
+    console.print(&format!(
+        "  controllers: {}\n  keyboards:   {}\n",
+        crate::drivers::usb::uhci::controller_count(),
+        crate::drivers::usb::uhci::keyboard_count()
+    ));
+    for device in crate::drivers::usb::uhci::devices() {
+        console.print(&format!(
+            "  ctrl{} port{} {:04x}:{:04x} addr {} {} (max packet {})\n",
+            device.controller,
+            device.port,
+            device.vendor,
+            device.product,
+            device.address,
+            if device.low_speed { "low-speed" } else { "full-speed" },
+            device.max_packet
+        ));
+    }
+
     console.print_colored("[xHCI]\n", COLOR_YELLOW);
     console.print(&format!(
         "  controllers: {}\n  keyboard:    {}\n",

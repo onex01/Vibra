@@ -36,8 +36,12 @@ pub trait VirtDevice: Send + Sync {
     fn state(&self) -> VirtDeviceState;
     fn init(&mut self) -> Result<(), &'static str> { Ok(()) }
     fn reset(&mut self) -> Result<(), &'static str> { Ok(()) }
-    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, &'static str> { Err("not supported") }
-    fn write(&mut self, offset: u64, buf: &[u8]) -> Result<usize, &'static str> { Err("not supported") }
+    fn read(&mut self, _offset: u64, _buf: &mut [u8]) -> Result<usize, &'static str> {
+        Err("not supported")
+    }
+    fn write(&mut self, _offset: u64, _buf: &[u8]) -> Result<usize, &'static str> {
+        Err("not supported")
+    }
 }
 
 /// Информация о зарегистрированном устройстве

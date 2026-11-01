@@ -62,7 +62,7 @@ pub fn spawn_user_process(name: &str, code: &[u8]) {
         Some(f) => f as u64,
         None => { println!("[USER] ERROR: no free frame for stack"); return; }
     };
-    let user_stack_top = user_code + PAGE_SIZE;
+    let _user_stack_top = user_code + PAGE_SIZE;
 
     let stack_page = hhdm + stack_phys;
     unsafe { core::ptr::write_bytes(stack_page as *mut u8, 0, PAGE_SIZE as usize); }

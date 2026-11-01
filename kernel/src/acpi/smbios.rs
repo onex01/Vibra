@@ -257,12 +257,35 @@ pub fn read() -> Option<SmbiosInfo> {
             // Processor Information
             info.cpu_vendor = string_at(strings, u8_at(formatted, 0x07));
             info.cpu_version = string_at(strings, u8_at(formatted, 0x10));
+            // Type 4: Core Count — БАЙТ по 0x23, Core Enabled — байт по 0x24,
+            // Thread Count — слово по 0x25. Раньше оба поля читались как u16
+            // по 0x23/0x25, из-за чего на Xeon E5-2680 v3 (12C/24T)
+            // печаталось «3084 cores / 64536 threads»: 0x0C0C и 0xFCF8.
             let length = u8_at(formatted, 0x01) as usize;
-            if info.cpu_cores == 0 && length > 0x23 {
-                info.cpu_cores = u16_at(formatted, 0x23);
+            if length > 0x23 {
+                let cores = u8_at(formatted, 0x23);
+                if info.cpu_cores == 0 && cores != 0 && cores != 0xFF {
+                    info.cpu_cores = cores as u16;
+                }
             }
-            if info.cpu_threads == 0 && length > 0x25 {
-                info.cpu_threads = u16_at(formatted, 0x25);
+            if length > 0x25 {
+                let threads = u16_at(formatted, 0x25);
+                if info.cpu_threads == 0 && threads != 0 && threads != 0xFFFF {
+                    info.cpu_threads = threads;
+                }
+            }
+            // SMBIOS 2.6+: Core Count 2 — слово по 0x2A, Thread Count 2 — 0x2C.
+            if info.cpu_cores == 0 && length > 0x2A {
+                let cores = u16_at(formatted, 0x2A);
+                if cores != 0 && cores != 0xFFFF {
+                    info.cpu_cores = cores;
+                }
+            }
+            if info.cpu_threads == 0 && length > 0x2C {
+                let threads = u16_at(formatted, 0x2C);
+                if threads != 0 && threads != 0xFFFF {
+                    info.cpu_threads = threads;
+                }
             }
         }
         17 => {

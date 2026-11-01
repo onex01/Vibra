@@ -29,13 +29,16 @@ pub fn diag_hw(console: &mut Console) {
                 empty(&info.bios_version),
                 empty(&info.bios_date)
             ));
+            // SMBIOS часто дублирует вендора в строке версии
+            // («Intel Intel(R) Xeon(R) ...»), поэтому выводим версию как есть,
+            // а вендор показываем отдельным полем.
             console.print(&format!(
-                "  cpu:     {} {} ({} cores / {} threads)\n",
-                empty(&info.cpu_vendor),
+                "  cpu:     {} ({} cores / {} threads)\n",
                 empty(&info.cpu_version),
                 info.cpu_cores,
                 info.cpu_threads
             ));
+            console.print(&format!("  cpu ven: {}\n", empty(&info.cpu_vendor)));
             if let Some(serial) = non_empty(&info.system_serial) {
                 console.print(&format!("  serial:  {}\n", serial));
             }

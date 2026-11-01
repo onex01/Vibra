@@ -13,7 +13,7 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.7`
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.8`
 обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 
@@ -32,7 +32,7 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 - serial COM1, framebuffer-консоль, GDT/TSS/IDT, PIC и задел APIC;
 - PMM, heap и экспериментальный VMM;
 - PS/2-клавиатура, ACPI и PCI-инвентаризация;
-- AHCI/NVMe/ATAPI (CD), e1000/RTL8139, xHCI;
+- AHCI/NVMe/ATAPI (CD), IDE/PATA, e1000/RTL8139, xHCI и UHCI (USB 1.1);
 - FAT32 (rw для `VIBRALOG`), ext2/3/4 (ro, включая extents и 64bit) и NTFS (ro);
 - RAM-файловая система, встроенная shell, `vktst` и `disks` для диагностики.
 
@@ -123,6 +123,7 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh debug-image-test  проверить 3 раздела USB debug-образа и запись лога
 ./build.sh iso-debug-test проверить debug ISO, записанный на USB
 ./build.sh keyboard-test  проверить ввод PS/2 и USB HID
+./build.sh uhci-test      проверить USB-клавиатуру на UHCI
 ./build.sh iso            собрать гибридный BIOS/UEFI ISO
 ./build.sh iso-smoke      загрузить ISO в UEFI (OVMF) и BIOS (SeaBIOS)
 ./build.sh uefi-usb       собрать GPT-образ с EFI System Partition
@@ -140,8 +141,8 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 драйверы не поддерживают запись. Boot-лог пишется на FAT32-раздел `VIBRALOG`.
 
 Имена образов содержат дату и версию, например
-`vibra_2026-10-31_0.2.0-rc.7.iso` и
-`vibra-debug_2026-10-31_0.2.0-rc.7.iso`; для совместимости создаются
+`vibra_2026-10-31_0.2.0-rc.8.iso` и
+`vibra-debug_2026-10-31_0.2.0-rc.8.iso`; для совместимости создаются
 симлинки `build/vibra.iso` и `build/vibra-debug.iso`.
 
 ## CI

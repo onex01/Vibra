@@ -107,6 +107,9 @@ jobs:
       - name: Test filesystem drivers
         run: ./build.sh fs-test
 
+      - name: Test USB keyboard on UHCI
+        run: ./build.sh uhci-test
+
       - name: Test vktst, top, free and tree
         run: ./build.sh vktst-test
 
@@ -155,6 +158,7 @@ jobs:
             build/*.log
             build/fs-test-status.txt
             build/vktst-test-status.txt
+            build/uhci-keyboard-status.txt
             build/debug-image-status.txt
             build/debug-image-boot.log
           if-no-files-found: ignore

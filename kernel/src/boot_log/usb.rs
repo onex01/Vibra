@@ -1,54 +1,70 @@
-// Приёмник boot-лога: FAT32-раздел с меткой VIBRALOG, файл /VIBRA.LOG.
+// Приёмник логов на FAT32: boot-лог (VIBRA.LOG) и журнал shell (SHELL.LOG).
 //
-// Раздел ищется на всех USB-накопителях (mass storage) и на SATA-дисках
-// (нужно для QEMU-теста: второй AHCI-диск). Проверяются и GPT, и MBR —
-// в hybrid-образе (`iso-debug`) логический раздел добавлен только в MBR,
-// а GPT-запись о нём ничего не знает.
+// Раздел ищется в таком порядке:
+//   1. том с меткой `VIBRALOG` — явно выделенный раздел логов;
+//   2. загрузочный том — тот, где лежит `KERNEL.ELF` (или
+//      `EFI/BOOT/BOOTX64.EFI`). Так лог появляется даже на машине, где
+//      никто не готовил VIBRALOG: снял загрузочный носитель — прочитал лог.
 //
-// Файл создаётся скриптом сборки заранее и заполнен нулями: цепочка кластеров
-// уже выделена, поэтому в рантайме (в том числе в обработчике паники) не
-// требуется аллокация кластеров и запись FAT.
+// Проверяются все диски: USB mass storage, NVMe, AHCI (SATA), ATAPI (CD).
+// Для hybrid-образов (`iso-debug`) дополнительно смотрятся MBR-записи, даже
+// если GPT о них ничего не знает.
 //
-// Порядок записи: сначала данные, затем размер в записи каталога. Если питание
-// пропадёт между ними, файл останется с прежним (меньшим) размером — то есть
-// с валидным префиксом лога, а не с «дырой».
+// Файлы создаются заранее скриптом сборки либо на месте. Порядок записи:
+// сначала данные, затем размер в записи каталога — при обрыве питания файл
+// остаётся с валидным префиксом лога, а не с «дырой».
 
-use super::{first_cursor, read_chunk, total_len};
+use super::{first_cursor, read_chunk, session_first_cursor, session_read_chunk};
 use crate::fs::disk::DiskIo;
 use crate::fs::fat32::{DirSlot, Fat32Fs};
 use crate::fs::partition::{read_partitions, PartitionDisk};
-use crate::fs::vfs::FsError;
+use crate::fs::vfs::{FileSystem, FsError};
 use crate::println;
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// Метка тома-приёмника (11 байт BPB, выровнена пробелами).
 pub const VOLUME_LABEL: [u8; 11] = *b"VIBRALOG   ";
-/// Имя файла лога (8.3).
+/// Имя файла boot-лога (8.3).
 pub const LOG_FILE: &str = "VIBRA.LOG";
-/// Предел, если файл создаётся на месте (а не предвыделен образом).
-const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
+/// Имя файла журнала shell (8.3).
+pub const SHELL_FILE: &str = "SHELL.LOG";
+/// Маркер загрузочного тома: ядро, которое сейчас исполняется.
+const KERNEL_FILE: &str = "KERNEL.ELF";
+/// Второй маркер загрузочного тома (UEFI-загрузчик Limine).
+const ESP_MARKER: &str = "EFI/BOOT/BOOTX64.EFI";
+
+/// Предел boot-лога на носителе.
+const MAX_BOOT_BYTES: u64 = 4 * 1024 * 1024;
+/// Предел журнала shell на носителе.
+const MAX_SHELL_BYTES: u64 = 2 * 1024 * 1024;
 /// Порция записи: фиксированный буфер, без аллокаций (путь паники).
 const CHUNK: usize = 4096;
 
 static mut CHUNK_BUF: [u8; CHUNK] = [0; CHUNK];
 
-static SINK: Mutex<Option<Sink>> = Mutex::new(None);
-/// Сколько раз пробовали найти раздел. Ограничение — чтобы не сканировать
-/// все диски на каждом checkpoint, если VIBRALOG на машине нет.
-static ATTACH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-/// Время последней попытки (мс с загрузки) — троттлинг после boot.
-static LAST_ATTACH_MS: AtomicUsize = AtomicUsize::new(0);
-/// Во время загрузки попыток немного: диски появляются на шаге 8.5.
-const MAX_BOOT_ATTEMPTS: usize = 3;
-/// После загрузки — редкие попытки для горячего подключения носителя.
-const MAX_IDLE_ATTEMPTS: usize = 4;
-/// Интервал между попытками в idle: чаще — значит блокировать shell
-/// (скан дисков занимает десятки мс, а PS/2-сканкоды при этом теряются).
-const IDLE_RETRY_MS: usize = 30_000;
+/// Куда пишется лог.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// Раздел с меткой VIBRALOG.
+    LogVolume,
+    /// Загрузочный том (рядом с KERNEL.ELF).
+    BootVolume,
+}
+
+impl Target {
+    fn as_str(self) -> &'static str {
+        match self {
+            Target::LogVolume => "VIBRALOG",
+            Target::BootVolume => "boot volume",
+        }
+    }
+}
 
 struct Sink {
     fs: Fat32Fs,
@@ -60,6 +76,55 @@ struct Sink {
     written: u64,
     /// Позиция в кольцевом буфере, до которой лог записан на диск.
     cursor: usize,
+    /// true — журнал shell, false — boot-лог.
+    shell: bool,
+}
+
+static BOOT_SINK: Mutex<Option<Sink>> = Mutex::new(None);
+static SHELL_SINK: Mutex<Option<Sink>> = Mutex::new(None);
+
+/// Найденный том и его роль (для `log sink` / `log scan`).
+static VOLUME_TARGET: Mutex<Option<Target>> = Mutex::new(None);
+static VOLUME_LABEL_FOUND: Mutex<Option<String>> = Mutex::new(None);
+
+/// Сколько раз пробовали найти раздел. Ограничение — чтобы не сканировать
+/// все диски на каждом checkpoint, если носителя нет.
+static ATTACH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+/// Время последней попытки (мс с загрузки) — троттлинг после boot.
+static LAST_ATTACH_MS: AtomicUsize = AtomicUsize::new(0);
+/// Уже сообщили, что носителя нет (чтобы не спамить в лог).
+static REPORTED_MISSING: AtomicBool = AtomicBool::new(false);
+
+/// Во время загрузки попыток немного: диски появляются на шаге 8.5.
+const MAX_BOOT_ATTEMPTS: usize = 6;
+/// Интервал между попытками после загрузки. Приёмник больше не «сдаётся»:
+/// флешку можно воткнуть позже, и лог продолжит писаться.
+const IDLE_RETRY_MS: usize = 10_000;
+
+/// Окно в диск: общий носитель + диапазон в 512-байтных секторах.
+///
+/// Хранится как описание, а не как готовый `DiskIo`: для двух файлов
+/// (boot + shell) нужно два независимых окна на один и тот же том.
+#[derive(Clone)]
+struct Window {
+    shared: Arc<Mutex<Box<dyn DiskIo>>>,
+    offset: u64,
+    /// 0 — весь диск (superfloppy без таблицы разделов).
+    sectors: u64,
+}
+
+impl Window {
+    fn open(&self) -> Box<dyn DiskIo> {
+        if self.sectors == 0 {
+            Box::new(DiskView(self.shared.clone()))
+        } else {
+            Box::new(PartitionDisk::new(
+                self.shared.clone(),
+                self.offset,
+                self.sectors,
+            ))
+        }
+    }
 }
 
 /// Обёртка `Arc<Mutex<Box<dyn DiskIo>>>` в `DiskIo`: нужна `read_partitions`,
@@ -130,7 +195,7 @@ fn overlaps(a_start: u64, a_len: u64, b_start: u64, b_len: u64) -> bool {
 }
 
 /// Окна-кандидаты на одном диске: разделы GPT/MBR + hybrid-MBR + весь диск.
-fn windows_of(disk: Box<dyn DiskIo>) -> Vec<Box<dyn DiskIo>> {
+fn windows_of(disk: Box<dyn DiskIo>) -> Vec<Window> {
     let shared = Arc::new(Mutex::new(disk));
 
     let parts = {
@@ -139,34 +204,42 @@ fn windows_of(disk: Box<dyn DiskIo>) -> Vec<Box<dyn DiskIo>> {
     };
     let mbr = mbr_entries(&shared);
 
-    let mut windows: Vec<Box<dyn DiskIo>> = Vec::new();
+    let mut windows: Vec<Window> = Vec::new();
     for part in &parts {
-        windows.push(Box::new(PartitionDisk::new(
-            shared.clone(),
-            part.start_lba,
-            part.sectors,
-        )));
+        windows.push(Window {
+            shared: shared.clone(),
+            offset: part.start_lba,
+            sectors: part.sectors,
+        });
     }
     for (start, count, kind) in mbr {
         if !is_fat_type(kind) {
             continue;
         }
-        // Запись 0xEE —protective MBR, она описывает весь GPT-диск.
+        // Запись 0xEE — protective MBR, она описывает весь GPT-диск.
         if kind == 0xEE || parts.iter().any(|p| overlaps(p.start_lba, p.sectors, start, count)) {
             continue;
         }
-        windows.push(Box::new(PartitionDisk::new(shared.clone(), start, count)));
+        windows.push(Window {
+            shared: shared.clone(),
+            offset: start,
+            sectors: count,
+        });
     }
 
     if windows.is_empty() {
         // Superfloppy: FAT32 без таблицы разделов (hdd.img в QEMU).
-        windows.push(Box::new(DiskView(shared.clone())));
+        windows.push(Window {
+            shared,
+            offset: 0,
+            sectors: 0,
+        });
     }
     windows
 }
 
-/// Все окна на всех дисках: USB-накопители, затем SATA.
-fn candidate_windows() -> Vec<Box<dyn DiskIo>> {
+/// Все окна на всех дисках: USB-накопители, NVMe, ATAPI, SATA.
+fn candidate_windows() -> Vec<Window> {
     let mut disks: Vec<Box<dyn DiskIo>> = Vec::new();
 
     let usb_count = crate::drivers::usb::storage::disks().len();
@@ -175,13 +248,11 @@ fn candidate_windows() -> Vec<Box<dyn DiskIo>> {
             disks.push(disk);
         }
     }
-    // NVMe: на современных ноутбуках это единственный внутренний диск, и
-    // раньше boot-log вообще не сканировал его — VIBRALOG не находился.
+    // NVMe: на современных ноутбуках это единственный внутренний диск.
     if let Some(disk) = crate::drivers::nvme::create_disk() {
         disks.push(disk);
     }
-    // ATAPI CD/DVD: debug ISO держит VIBRALOG на appended-разделе, и без
-    // этого цикла ядро физически не могло найти лог-раздел на CD.
+    // ATAPI CD/DVD: debug ISO держит логи на appended-разделе.
     for port in crate::drivers::ahci::atapi_ports() {
         if let Some(disk) = crate::drivers::ahci::AtapiDisk::new(port) {
             disks.push(Box::new(disk));
@@ -189,6 +260,11 @@ fn candidate_windows() -> Vec<Box<dyn DiskIo>> {
     }
     for port in crate::drivers::ahci::active_ports() {
         disks.push(Box::new(crate::drivers::ahci::AhciDisk::new(port)));
+    }
+    for index in 0..crate::drivers::ide::disk_count() {
+        if let Some(disk) = crate::drivers::ide::open(index) {
+            disks.push(disk);
+        }
     }
 
     let mut windows = Vec::new();
@@ -198,28 +274,35 @@ fn candidate_windows() -> Vec<Box<dyn DiskIo>> {
     windows
 }
 
+/// Том подходит как загрузочный? Ищем ядро или загрузчик Limine.
+fn looks_like_boot_volume(fs: &Fat32Fs) -> bool {
+    fs.lookup(KERNEL_FILE).map(|entry| entry.is_some()).unwrap_or(false)
+        || fs
+            .lookup(ESP_MARKER)
+            .map(|entry| entry.is_some())
+            .unwrap_or(false)
+}
 
-/// Готовит приёмник: находит/создаёт /VIBRA.LOG и читает его цепочку.
-fn prepare(mut fs: Fat32Fs) -> Option<Sink> {
-    use crate::fs::vfs::FileSystem;
-
-    let mut entry = match fs.lookup(LOG_FILE) {
+/// Готовит приёмник: находит/создаёт файл и читает его цепочку.
+fn prepare(mut fs: Fat32Fs, file: &str, shell: bool) -> Option<Sink> {
+    let mut entry = match fs.lookup(file) {
         Ok(value) => value,
         Err(_) => return None,
     };
     if entry.is_none() {
         // Файла нет (например, раздел отформатирован вручную) — создаём.
-        let _ = FileSystem::create(&mut fs, LOG_FILE);
-        entry = fs.lookup(LOG_FILE).ok().flatten();
+        let _ = FileSystem::create(&mut fs, file);
+        entry = fs.lookup(file).ok().flatten();
     }
     let (start, _size, slot) = entry?;
 
+    let limit = if shell { MAX_SHELL_BYTES } else { MAX_BOOT_BYTES };
     let clusters = fs.clusters(start).unwrap_or_default();
     let capacity = if clusters.is_empty() {
         // Цепочка пустая — кластеры будут выделяться по мере записи.
-        MAX_LOG_BYTES
+        limit
     } else {
-        (clusters.len() as u64 * fs.cluster_size() as u64).min(MAX_LOG_BYTES)
+        (clusters.len() as u64 * fs.cluster_size() as u64).min(limit)
     };
 
     Some(Sink {
@@ -229,33 +312,23 @@ fn prepare(mut fs: Fat32Fs) -> Option<Sink> {
         capacity,
         written: 0,
         cursor: 0,
+        shell,
     })
 }
 
-/// Ищет раздел VIBRALOG и подключает приёмник.
+/// Ищет том для логов и подключает оба приёмника.
 ///
 /// Вызывается явно на шаге 8.5 (после enumeration USB) и лениво из
 /// `checkpoint()`. Если носителей ещё нет (boot только начался), попытка не
 /// расходуется — иначе однократный «not found» на шаге 4 навсегда выключал бы
 /// запись на флешку.
 pub fn attach() -> bool {
-    if SINK.lock().is_some() {
+    if BOOT_SINK.lock().is_some() {
         return true;
     }
 
-    // После загрузки idle-цикл shell дергает `flush` раз в секунду: сканировать
-    // диски каждый раз нельзя (долгие блокирующие чтения теряют PS/2-сканкоды),
-    // поэтому троттлим ВСЕГДА, а не только после исчерпания boot-попыток.
-    // Раньше условие `attempts >= MAX_BOOT_ATTEMPTS` означало, что если за
-    // время boot диски ещё не появились и счётчик остался нулевым, то после
-    // загрузки `attach()` сканировал носители на каждом `checkpoint()` —
-    // то есть раз в секунду и на каждое нажатие клавиши в простое.
     let after_boot = super::boot_finished();
     if after_boot {
-        let attempts = ATTACH_ATTEMPTS.load(Ordering::Relaxed);
-        if attempts >= MAX_BOOT_ATTEMPTS + MAX_IDLE_ATTEMPTS {
-            return false;
-        }
         let now = crate::timer::uptime_ms() as usize;
         let last = LAST_ATTACH_MS.load(Ordering::Relaxed);
         if last != 0 && now.saturating_sub(last) < IDLE_RETRY_MS {
@@ -264,77 +337,181 @@ pub fn attach() -> bool {
     }
     LAST_ATTACH_MS.store(crate::timer::uptime_ms() as usize, Ordering::Relaxed);
 
-    // Счётчик попыток увеличиваем ДО сканирования: если дисков ещё нет,
-    // иначе каждый checkpoint заново перебирал бы пустой список.
     let attempt = ATTACH_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
-    if attempt >= MAX_BOOT_ATTEMPTS + MAX_IDLE_ATTEMPTS {
-        return false;
-    }
     if !after_boot && attempt >= MAX_BOOT_ATTEMPTS {
         return false;
     }
 
     let windows = candidate_windows();
     if windows.is_empty() {
+        report_missing("no block devices visible yet");
         return false;
     }
 
-    for window in windows {
-        let fs = match Fat32Fs::new_rw(window) {
+    // Первый проход: ищем VIBRALOG. Второй: любой загрузочный том.
+    for target in [Target::LogVolume, Target::BootVolume] {
+        for window in &windows {
+            let fs = match Fat32Fs::new_rw(window.open()) {
+                Ok(fs) => fs,
+                Err(_) => continue,
+            };
+            if fs.device_is_read_only() {
+                continue;
+            }
+
+            let label = fs.label();
+            let matches = match target {
+                Target::LogVolume => label == VOLUME_LABEL,
+                Target::BootVolume => looks_like_boot_volume(&fs),
+            };
+            if !matches {
+                continue;
+            }
+
+            let Some(boot_sink) = prepare(fs, LOG_FILE, false) else {
+                println!("[LOG] {} found, but /{} is unusable", target.as_str(), LOG_FILE);
+                continue;
+            };
+
+            // Журнал shell — отдельный экземпляр ФС на том же окне.
+            let shell_sink = match Fat32Fs::new_rw(window.open()) {
+                Ok(fs) => prepare(fs, SHELL_FILE, true),
+                Err(_) => None,
+            };
+
+            let capacity = boot_sink.capacity;
+            let mut sink = boot_sink;
+            // Всё, что накопилось до появления носителя, уходит на диск сразу.
+            sink.cursor = first_cursor();
+            *BOOT_SINK.lock() = Some(sink);
+
+            let shell_ok = if let Some(mut shell_sink) = shell_sink {
+                shell_sink.cursor = session_first_cursor();
+                *SHELL_SINK.lock() = Some(shell_sink);
+                true
+            } else {
+                false
+            };
+
+            *VOLUME_TARGET.lock() = Some(target);
+            *VOLUME_LABEL_FOUND.lock() =
+                Some(String::from_utf8_lossy(&label).trim().to_string());
+
+            println!(
+                "[LOG] writing logs to {} ({}): /{} ({} KiB slot), /{}: {}",
+                target.as_str(),
+                String::from_utf8_lossy(&label).trim(),
+                LOG_FILE,
+                capacity / 1024,
+                SHELL_FILE,
+                if shell_ok { "on" } else { "unavailable" }
+            );
+
+            REPORTED_MISSING.store(false, Ordering::Relaxed);
+            flush(false);
+            return true;
+        }
+    }
+
+    report_missing("no FAT32 volume with VIBRALOG or KERNEL.ELF");
+    false
+}
+
+/// Принудительная попытка подключения (команда `log attach`).
+///
+/// Сбрасывает троттлинг и счётчики: пользователь мог только что воткнуть
+/// флешку, и ждать 10 секунд незачем.
+pub fn force_attach() -> bool {
+    LAST_ATTACH_MS.store(0, Ordering::Relaxed);
+    ATTACH_ATTEMPTS.store(0, Ordering::Relaxed);
+    REPORTED_MISSING.store(false, Ordering::Relaxed);
+    attach()
+}
+
+/// Сообщить об отсутствии приёмника один раз, чтобы не засорять лог.
+fn report_missing(reason: &str) {
+    if REPORTED_MISSING.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    // Во время загрузки диски появляются позже (шаг 8.5), поэтому не пугаем
+    // «not found» до входа в shell: сообщение всё равно было бы ложным.
+    if !super::boot_finished() {
+        return;
+    }
+    println!("[LOG] no log volume found: {}", reason);
+    println!("[LOG] create a FAT32 volume labeled VIBRALOG, or boot from media with KERNEL.ELF");
+}
+
+/// Диагностика для `log scan`: что видно и почему не подошло.
+pub fn scan() -> Vec<String> {
+    let mut lines = Vec::new();
+    let windows = candidate_windows();
+    lines.push(format!("candidates: {}", windows.len()));
+
+    for (index, window) in windows.iter().enumerate() {
+        let fs = match Fat32Fs::new_rw(window.open()) {
             Ok(fs) => fs,
             Err(error) => {
-                if !after_boot {
-                    println!("[LOG] candidate volume rejected: {:?}", error);
-                }
+                lines.push(format!("  [{}] not FAT32 ({:?})", index, error));
                 continue;
             }
         };
-        let label = fs.label();
-        if label != VOLUME_LABEL {
-            // После загрузки не шумим: сообщение повторялось бы на каждой
-            // попытке и засоряло serial/консоль во время ввода в shell.
-            if !after_boot {
-                println!(
-                    "[LOG] skipping volume labeled {:?} (want {:?})",
-                    core::str::from_utf8(&label).unwrap_or("?"),
-                    core::str::from_utf8(&VOLUME_LABEL).unwrap_or("?")
-                );
-            }
-            continue;
+        let label = String::from_utf8_lossy(&fs.label()).trim().to_string();
+        let read_only = fs.device_is_read_only();
+        let boot = looks_like_boot_volume(&fs);
+        let is_log = fs.label() == VOLUME_LABEL;
+        let boot_file = fs.lookup(LOG_FILE).ok().flatten().map(|(_, size, _)| size);
+        let shell_file = fs.lookup(SHELL_FILE).ok().flatten().map(|(_, size, _)| size);
+
+        lines.push(format!(
+            "  [{}] label=\"{}\" {} boot={} log={} VIBRA.LOG={} SHELL.LOG={}",
+            index,
+            label,
+            if read_only { "ro" } else { "rw" },
+            boot,
+            is_log,
+            boot_file.map(|s| format!("{} B", s)).unwrap_or_else(|| "-".to_string()),
+            shell_file.map(|s| format!("{} B", s)).unwrap_or_else(|| "-".to_string()),
+        ));
+    }
+    lines
+}
+
+/// Текущее состояние приёмника для `log sink`.
+pub fn describe() -> Vec<String> {
+    let mut lines = Vec::new();
+    match *VOLUME_TARGET.lock() {
+        Some(target) => {
+            let label = VOLUME_LABEL_FOUND
+                .lock()
+                .clone()
+                .unwrap_or_else(|| String::from("?"));
+            lines.push(format!("volume: {} (label \"{}\")", target.as_str(), label));
         }
-
-        if fs.device_is_read_only() {
-            println!(
-                "[LOG] VIBRALOG is on read-only media (CD/DVD); flash the ISO to USB to persist logs"
-            );
-            continue;
-        }
-
-        let mut sink = match prepare(fs) {
-            Some(sink) => sink,
-            None => {
-                println!("[LOG] VIBRALOG found, but /{} is unusable", LOG_FILE);
-                continue;
-            }
-        };
-
-        // Всё, что накопилось до появления USB, уходит на диск сразу.
-        sink.cursor = first_cursor();
-        let capacity = sink.capacity;
-        *SINK.lock() = Some(sink);
-        println!(
-            "[LOG] writing boot log to /{} on VIBRALOG ({} KiB slot)",
-            LOG_FILE,
-            capacity / 1024
-        );
-        flush(false);
-        return true;
+        None => lines.push(String::from("volume: not attached")),
     }
 
-    if !after_boot {
-        println!("[LOG] no FAT32 volume labeled VIBRALOG found");
+    if let Some(sink) = BOOT_SINK.lock().as_ref() {
+        lines.push(format!(
+            "boot log: {} written, {} KiB capacity",
+            sink.written,
+            sink.capacity / 1024
+        ));
+    } else {
+        lines.push(String::from("boot log: not attached"));
     }
-    false
+
+    if let Some(sink) = SHELL_SINK.lock().as_ref() {
+        lines.push(format!(
+            "shell log: {} written, {} KiB capacity",
+            sink.written,
+            sink.capacity / 1024
+        ));
+    } else {
+        lines.push(String::from("shell log: not attached"));
+    }
+
+    lines
 }
 
 /// Сбросить на диск всё, что ещё не записано.
@@ -342,13 +519,18 @@ pub fn attach() -> bool {
 /// `panic` = true: без аллокаций и не больше одной порции (обработчик паники
 /// не должен зависнуть на длинной записи).
 pub fn flush(panic: bool) {
-    let mut guard = match SINK.try_lock() {
+    flush_sink(&BOOT_SINK, panic, false);
+    flush_sink(&SHELL_SINK, panic, true);
+}
+
+fn flush_sink(slot: &Mutex<Option<Sink>>, panic: bool, shell: bool) {
+    let mut guard = match slot.try_lock() {
         Some(guard) => guard,
         None => return,
     };
     let Some(sink) = guard.as_mut() else {
         drop(guard);
-        if !panic {
+        if !panic && !shell {
             attach();
         }
         return;
@@ -362,10 +544,15 @@ fn write_pending(sink: &mut Sink, panic: bool) {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(CHUNK_BUF) as *mut u8, CHUNK)
     };
 
+    let (first, read) : (usize, fn(usize, &mut [u8]) -> (usize, usize)) = if sink.shell {
+        (session_first_cursor(), session_read_chunk)
+    } else {
+        (first_cursor(), read_chunk)
+    };
+
     // Кольцо успело перезаписать непрочитанное — фиксируем пропуск.
-    let first = first_cursor();
     if sink.cursor < first {
-        let marker = alloc::format!(
+        let marker = format!(
             "\n[LOG] {} byte(s) dropped: ring buffer overflowed\n",
             first - sink.cursor
         );
@@ -375,7 +562,7 @@ fn write_pending(sink: &mut Sink, panic: bool) {
 
     let mut batches = 0;
     loop {
-        let (count, next) = read_chunk(sink.cursor, buffer);
+        let (count, next) = read(sink.cursor, buffer);
         if count == 0 {
             break;
         }
@@ -388,8 +575,6 @@ fn write_pending(sink: &mut Sink, panic: bool) {
             break;
         }
     }
-
-    let _ = total_len();
 }
 
 /// Записывает порцию лога; `false` — запись прекращена (переполнение/ошибка).
@@ -430,12 +615,22 @@ fn write_bytes(sink: &mut Sink, data: &[u8]) -> bool {
     }
 }
 
-/// Сколько байт записано в файл лога.
+/// Сколько байт boot-лога записано в файл.
 pub fn written() -> u64 {
-    SINK.lock().as_ref().map_or(0, |sink| sink.written)
+    BOOT_SINK.lock().as_ref().map_or(0, |sink| sink.written)
+}
+
+/// Сколько байт журнала shell записано в файл.
+pub fn shell_written() -> u64 {
+    SHELL_SINK.lock().as_ref().map_or(0, |sink| sink.written)
 }
 
 /// Подключён ли приёмник.
 pub fn is_attached() -> bool {
-    SINK.lock().is_some()
+    BOOT_SINK.lock().is_some()
+}
+
+/// Подключён ли приёмник журнала shell.
+pub fn is_shell_attached() -> bool {
+    SHELL_SINK.lock().is_some()
 }

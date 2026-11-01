@@ -95,7 +95,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test shell-test check boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
+.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test shell-test check boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
 
 all: run
 
@@ -459,6 +459,10 @@ iso-debug: boot-log-kernel
 	@echo "    partition 2 = VIBRA (kernel, $(KERNEL_PARTITION_MB)MB)"
 	@echo "    partition 3 = VIBRALOG ($(LOG_PARTITION_MB)MB)"
 	@ls -lh $(DEBUG_ISO_IMAGE)
+
+# USB-клавиатура на UHCI (low-speed, как на чипсетах Intel/AMD).
+uhci-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-uhci-keyboard-test.sh
 
 # Проверка vktst/top/free/tree через serial.
 vktst-test: build

@@ -40,7 +40,10 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
             console.print("\n");
         }
         "usb" => diag_usb(console),
-        "disk" | "blk" => diag_disk(console),
+        "disk" | "blk" => {
+            diag_ahci_ports(console);
+            diag_disk(console)
+        }
         "timer" => diag_timer(console),
         "apic" => diag_apic(console),
         "display" => diag_display(console),
@@ -577,6 +580,32 @@ fn diag_timer(console: &mut Console) {
 
 fn diag_hw(console: &mut Console) {
     super::diag_hw::diag_hw(console);
+}
+
+/// Порты AHCI: состояние линии и сигнатура устройства.
+///
+/// Нужно для машин, где «диск есть, но ФС unknown»: по DET/IPM/SPD и PxSIG
+/// видно, доехал ли диск до интерфейса и опознан ли он как ATA/ATAPI.
+fn diag_ahci_ports(console: &mut Console) {
+    let ports = crate::drivers::ahci::port_report();
+    if ports.is_empty() {
+        console.print_colored("  AHCI: no controller\n", crate::framebuffer::COLOR_YELLOW);
+        return;
+    }
+    for port in ports {
+        console.print(&alloc::format!(
+            "  port {}: SSTS={:#010x} (DET={} IPM={} SPD={}) SIG={:#010x} TFD={:#06x} SERR={:#010x} {}\n",
+            port.num,
+            port.ssts,
+            port.ssts & 0xF,
+            (port.ssts >> 8) & 0xF,
+            (port.ssts >> 4) & 0xF,
+            port.sig,
+            port.tfd,
+            port.serr,
+            port.kind
+        ));
+    }
 }
 
 fn diag_disk(console: &mut Console) {

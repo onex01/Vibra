@@ -92,8 +92,8 @@ echo "==> Checking kernel view"
 # ESP в ISO называется "EFI boot partition", а в USB-образе — VIBRA-ESP,
 # поэтому проверяем только метку kernel-раздела и самого лога.
 check "VIBRA"
-check "VIBRALOG"
-check "writing boot log to /VIBRA.LOG on VIBRALOG"
+check "/VIBRA.LOG"
+check "writing logs to VIBRALOG"
 check "vibra:/>"
 check "Kernel v$version"
 

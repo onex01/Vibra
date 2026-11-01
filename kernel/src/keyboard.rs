@@ -609,6 +609,8 @@ pub fn poll_key() -> Option<Key> {
     // USB HID (xHCI) опрашивается до отключения прерываний: MMIO-ожидания
     // не должны идти с выключенным IRQ.
     crate::drivers::usb::xhci::poll_keyboard();
+    // UHCI: клавиатуры на USB2-портах (Intel/AMD чипсеты с EHCI-компаньоном).
+    crate::drivers::usb::uhci::poll_keyboard();
 
     // Лок делится с ISR — берём его только с выключенными прерываниями,
     // иначе IRQ1 во время удержания лока приведёт к дедлоку.

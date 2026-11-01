@@ -226,6 +226,11 @@ pub fn init() -> BootConsole {
     // Перечисление USB отложено до таймера: на реальном железе оно занимает
     // секунды, а интервалы HID легче считать, когда время уже есть.
     crate::drivers::usb::xhci::enumerate_now();
+    // UHCI: low/full-speed устройства (клавиатуры на USB2-портах чипсета).
+    let uhci_found = crate::drivers::usb::uhci::enumerate();
+    if uhci_found > 0 {
+        println!("[UHCI] {} device(s) enumerated", uhci_found);
+    }
     let usb_disks = crate::drivers::usb::storage::probe();
     if usb_disks > 0 {
         println!("[USB-STORAGE] {} disk(s) ready", usb_disks);
@@ -346,6 +351,9 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
     // Boot закончен: с этого момента idle-цикл может дописывать лог на
     // носитель, но поиск приёмника троттлится, чтобы не блокировать ввод.
     crate::boot_log::mark_boot_finished();
+    // Включаем журнал shell: дальше всё, что печатается в консоль
+    // (prompt, команды, их вывод), попадает в /var/log/shell.log.
+    crate::boot_log::session_begin();
 
     console.clear();
     console.print_colored("\n", framebuffer::COLOR_VIBRA_FG);
@@ -397,12 +405,20 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
             let mut editor = LINE_EDITOR.lock();
             editor.set_prompt(prompt_str);
             editor.set_prompt_color(framebuffer::COLOR_VIBRA_PROMPT);
+            // Редактор рисует ввод backspace-последовательностями: на время
+            // чтения строки журналы молчат, иначе транскрипт нечитаем.
+            crate::boot_log::session_suspend();
             let line = editor.read_line(&mut console, prompt_len);
+            crate::boot_log::session_resume();
             line_buffer[..line.len()].copy_from_slice(line.as_bytes());
             line.len()
         };
         let line = core::str::from_utf8(&line_buffer[..line_len]).unwrap_or("");
         let trimmed = line.trim();
+
+        // Команда целиком попадает в журнал shell (/var/log/shell.log).
+        crate::boot_log::session_line(trimmed);
+        crate::boot_log::session_line("\n");
 
         if trimmed.is_empty() { continue; }
 
@@ -441,6 +457,11 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
             console.print(cmd_name);
             console.print_colored("'. Type 'help'.\n", framebuffer::COLOR_RED);
         }
+
+        // Журнал shell сохраняется после каждой команды: даже если машина
+        // зависнет или её выключат, последняя сессия останется на диске.
+        crate::boot_log::flush_all_files();
+        crate::boot_log::checkpoint();
     }
 }
 

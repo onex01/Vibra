@@ -1,7 +1,6 @@
 use super::CmdResult;
 use crate::framebuffer::{Console, COLOR_RED, COLOR_YELLOW};
 use crate::fs;
-use crate::fs::File as _;
 use alloc::format;
 use alloc::vec::Vec;
 
