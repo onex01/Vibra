@@ -5,8 +5,8 @@
 Единственный источник версии — `kernel/src/version.rs`:
 
 ```rust
-pub const KERNEL_VERSION: &str = "0.2.0-rc.6";
-pub const KERNEL_CODENAME: &str = "Foundation RC6";
+pub const KERNEL_VERSION: &str = "0.2.0-rc.7";
+pub const KERNEL_CODENAME: &str = "Foundation RC7";
 ```
 
 `Makefile` читает `KERNEL_VERSION` из этого файла, `kernel/build.rs` добавляет
@@ -93,8 +93,8 @@ make check
 ./build.sh smoke
 ./build.sh fs-test
 git add -A
-git commit -m "release: 0.2.0-rc.6"
-git tag v0.2.0-rc.6
+git commit -m "release: 0.2.0-rc.7"
+git tag v0.2.0-rc.7
 git push origin main --tags
 ```
 

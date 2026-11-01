@@ -156,8 +156,12 @@ pub fn set_current_dir(path: &str) {
     *CURRENT_DIR.lock() = Some(String::from(path));
 }
 
-/// Предел на чтение файла целиком: `cat` большого файла не должен съесть кучу.
-pub const MAX_READ_BYTES: usize = 32 * 1024 * 1024;
+/// Предел на чтение файла целиком в память.
+///
+/// Раньше было 32 МиБ при куче в 4 МиБ: `cat`/`cp` файла на 10 МиБ гарантированно
+/// роняли ядро в `handle_alloc_error`. Команды с потоковым выводом (`cat`)
+/// этот предел не используют.
+pub const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
 
 fn read_all(file: &mut dyn File) -> Result<Vec<u8>, FsError> {
     let size = file.size();
@@ -240,21 +244,65 @@ pub fn create_file(name: &str) -> Result<(), FsError> {
     }
 }
 
-pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
+/// Открыть файл для чтения (VFS, затем корневой RamFS).
+///
+/// Нужен командам с потоковым чтением: `cat` читает кусками и не держит файл
+/// в памяти целиком.
+pub fn open_file(name: &str) -> Result<Box<dyn File>, FsError> {
     let resolved = resolve_path(&get_current_dir(), name);
-    let name = resolved.as_str();
-    // Сначала пробуем VFS (включая procfs/sysfs/devtmpfs).
-    match vfs_open(name) {
-        Ok(mut file) => return read_all(file.as_mut()),
+    let path = resolved.as_str();
+
+    match vfs_open(path) {
+        Ok(file) => return Ok(file),
         Err(FsError::NotFound) => {}
         // Ошибку смонтированной ФС нельзя маскировать fallback-ом в ramfs.
         Err(e) => return Err(e),
     }
 
-    // Fallback: корневой RamFS (имя уже абсолютное).
     let ramfs = ROOT_RAMFS.lock();
-    let mut file = ramfs.open(name)?;
+    ramfs.open(path)
+}
+
+pub fn read_file(name: &str) -> Result<Vec<u8>, FsError> {
+    let mut file = open_file(name)?;
     read_all(file.as_mut())
+}
+
+/// Копирование файла потоком, без загрузки целиком в память.
+///
+/// Нужно для `cp`/`mv`: раньше они читали файл целиком, и копирование
+/// крупного лога на реальной машине исчерпывало кучу.
+pub fn copy_file(source: &str, dest: &str) -> Result<u64, FsError> {
+    let mut src = open_file(source)?;
+    let path = resolve_path(&get_current_dir(), dest);
+
+    let mut dst: Box<dyn File> = match vfs_create(&path) {
+        Ok(file) => file,
+        Err(FsError::NotFound) => {
+            let mut ramfs = ROOT_RAMFS.lock();
+            let _ = ramfs.remove(&path);
+            ramfs.create(&path)?
+        }
+        Err(e) => return Err(e),
+    };
+
+    const CHUNK: usize = 16 * 1024;
+    let mut buf = alloc::vec![0u8; CHUNK];
+    let mut total = 0u64;
+
+    loop {
+        if crate::poll_cancel() {
+            return Err(FsError::IoError);
+        }
+        let read = src.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        dst.write(&buf[..read])?;
+        total += read as u64;
+    }
+
+    Ok(total)
 }
 
 pub fn write_file(name: &str, data: &[u8]) -> Result<(), FsError> {

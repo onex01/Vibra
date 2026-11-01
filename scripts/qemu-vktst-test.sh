@@ -10,7 +10,7 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 qemu="${QEMU:-qemu-system-x86_64}"
-timeout_seconds="${VKTST_TEST_TIMEOUT:-150}"
+timeout_seconds="${VKTST_TEST_TIMEOUT:-240}"
 ready_timeout="${BOOT_READY_TIMEOUT:-45}"
 log_file="$repo_root/build/qemu-vktst-test.log"
 report="$repo_root/build/vktst-test-status.txt"
@@ -75,7 +75,8 @@ rm -f "$log_file"
     done
     sleep 1
 
-    send_text "vktst run all"; send_text $'\n'; sleep 12
+    send_text "diag heap-big 12"; send_text $'\n'; sleep 10
+    send_text "vktst run all"; send_text $'\n'; sleep 20
     send_text "free";           send_text $'\n'; sleep 2
     send_text "top -b";         send_text $'\n'; sleep 4
     send_text "cd /proc";       send_text $'\n'; sleep 1
@@ -104,6 +105,11 @@ for group in cpu mem timer fs disk net kernel log; do
     check "[ OK ] $group"
 done
 check "0 failed"
+
+echo "==> Checking heap growth"
+check "heap-big: OK"
+check "grew by"
+check "OK: all free-list headers valid"
 
 echo "==> Checking free/top/tree"
 check "Mem:"

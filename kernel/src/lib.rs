@@ -1,5 +1,6 @@
 #![no_std]
 #![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
 #![deny(improper_ctypes)]
 
 extern crate alloc;
@@ -441,6 +442,35 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
             console.print_colored("'. Type 'help'.\n", framebuffer::COLOR_RED);
         }
     }
+}
+
+/// Ошибка аллокации: вместо невнятного `memory allocation of N bytes failed`
+/// печатаем размер запроса, состояние кучи и результат проверки free-list.
+///
+/// На реальном железе именно этот путь падал при исчерпании кучи, и по
+/// сообщению нельзя было понять, сколько памяти просили.
+#[alloc_error_handler]
+fn alloc_error(layout: core::alloc::Layout) -> ! {
+    println!(
+        "[HEAP] FATAL: allocation of {} bytes (align {}) failed",
+        layout.size(),
+        layout.align()
+    );
+    let (used, total) = memory::heap::stats();
+    let (blocks, free, bad) = memory::heap::check();
+    println!(
+        "[HEAP] used {} / {} bytes, {} regions, {} free blocks, {} free bytes",
+        used,
+        total,
+        memory::heap::region_count(),
+        blocks,
+        free
+    );
+    if let Some(addr) = bad {
+        println!("[HEAP] free-list CORRUPT at {:#x}", addr);
+    }
+    boot_log::flush_to_file("/var/log/error.log");
+    panic!("kernel heap exhausted ({} bytes requested)", layout.size());
 }
 
 #[panic_handler]

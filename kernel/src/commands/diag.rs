@@ -19,6 +19,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  display    - display backends, pixel format, console geometry\n");
         console.print("  heap-test  - full heap stress test (10k alloc/drop)\n");
         console.print("  heap-check - validate free-list headers (magic/size/bounds)\n");
+        console.print("  heap-big   - allocate N MiB (tests heap growth), default 12\n");
         console.print("  fault-test - trigger a fatal kernel page fault (halts VM)\n");
         console.print("  panic-test - test fatal error screen (halts VM)\n");
         return CmdResult::Ok;
@@ -45,6 +46,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "display" => diag_display(console),
         "heap-test" => diag_heap_test(console),
         "heap-check" => diag_heap_check(console),
+        "heap-big" => diag_heap_big(console, args.get(1).copied()),
         "fault-test" => diag_fault_test(console),
         "panic-test" => panic!("diagnostic panic screen test"),
         _ => {
@@ -139,6 +141,61 @@ fn diag_heap_check(console: &mut Console) {
         }
         None => console.print_colored("  OK: all free-list headers valid\n", crate::framebuffer::COLOR_GREEN),
     }
+}
+
+/// Аллокация крупного буфера: проверяет, что куча растёт по требованию.
+///
+/// `try_reserve` вместо `vec![0; n]`, чтобы нехватка памяти давала отчёт,
+/// а не panic в `handle_alloc_error`.
+fn diag_heap_big(console: &mut Console, arg: Option<&str>) {
+    let mb: usize = arg.and_then(|value| value.parse().ok()).unwrap_or(12);
+    let bytes = mb.saturating_mul(1024 * 1024);
+
+    console.print_colored("[HEAP BIG] ", crate::framebuffer::COLOR_YELLOW);
+    console.print_num(mb);
+    console.print(" MiB allocation\n");
+
+    let (used_before, total_before) = crate::memory::heap::stats();
+    let regions_before = crate::memory::heap::region_count();
+
+    let mut data: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    match data.try_reserve_exact(bytes) {
+        Ok(()) => {
+            data.resize(bytes, 0xAB);
+            // Обращаемся к каждому 4-КиБ блоку: проверяем, что страницы реально
+            // принадлежат куче, а не пересекаются с соседними регионами.
+            let mut checksum = 0u64;
+            let mut index = 0usize;
+            while index < data.len() {
+                checksum = checksum.wrapping_add(data[index] as u64);
+                index += 4096;
+            }
+            let (used_after, total_after) = crate::memory::heap::stats();
+            let regions_after = crate::memory::heap::region_count();
+            console.print_colored("  heap-big: OK\n", crate::framebuffer::COLOR_GREEN);
+            console.print("    before: used ");
+            console.print_num(used_before / 1024);
+            console.print(" KB / ");
+            console.print_num(total_before / 1024);
+            console.print(" KB, regions ");
+            console.print_num(regions_before);
+            console.print("\n    after:  used ");
+            console.print_num(used_after / 1024);
+            console.print(" KB / ");
+            console.print_num(total_after / 1024);
+            console.print(" KB, regions ");
+            console.print_num(regions_after);
+            console.print("\n    checksum ");
+            console.print_num(checksum as usize);
+            console.print("\n");
+        }
+        Err(_) => {
+            console.print_colored("  heap-big: FAILED to reserve\n", crate::framebuffer::COLOR_RED);
+        }
+    }
+
+    drop(data);
+    diag_heap_check(console);
 }
 
 fn diag_pmm(console: &mut Console) {

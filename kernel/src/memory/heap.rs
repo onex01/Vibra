@@ -62,50 +62,190 @@ impl FreeNode {
     }
 }
 
+/// Сколько отдельных регионов PMM разрешено добавить в кучу.
+///
+/// Куча растёт по требованию: при нехватке места аллокатор берёт у PMM ещё
+/// один непрерывный кусок и вставляет его в free-list. Без этого реальная
+/// машина с большим framebuffer, USB-стеком и VIBRALOG упиралась в
+/// фиксированные 4 МиБ и падала в `handle_alloc_error`.
+const MAX_REGIONS: usize = 16;
+/// Верхний предел роста кучи, чтобы не съесть всю RAM.
+const MAX_HEAP_BYTES: usize = 64 * 1024 * 1024;
+
 struct FreeList {
     head: Option<NonNull<FreeNode>>,
-    start: usize,
-    end: usize,
+    /// (начало, конец) каждого региона кучи.
+    regions: [(usize, usize); MAX_REGIONS],
+    region_count: usize,
+    /// Суммарный размер всех регионов.
+    total_bytes: usize,
 }
 
 impl FreeList {
     const fn empty() -> Self {
-        FreeList { head: None, start: 0, end: 0 }
-    }
-
-    // Инициализация одним свободным блоком на весь регион.
-    unsafe fn init(&mut self, start: usize, size: usize) {
-        self.start = start;
-        self.end = start.saturating_add(size);
-        if size >= MIN_BLOCK {
-            let node = NonNull::new_unchecked(start as *mut FreeNode);
-            FreeNode::set_size(node, size);
-            FreeNode::set_next(node, None);
-            self.head = Some(node);
-        } else {
-            self.head = None;
+        FreeList {
+            head: None,
+            regions: [(0, 0); MAX_REGIONS],
+            region_count: 0,
+            total_bytes: 0,
         }
     }
 
-    // Полный размер региона (для stats).
+    // Инициализация первым свободным блоком на весь регион.
+    unsafe fn init(&mut self, start: usize, size: usize) {
+        *self = FreeList::empty();
+        self.add_region(start, size);
+    }
+
+    /// Вставить новый регион PMM в free-list.
+    ///
+    /// Возвращает false, если регионов уже максимум или размер слишком мал.
+    ///
+    /// PMM почти всегда отдаёт следующий кусок вплотную к предыдущему, и
+    /// free-list сливает их в один блок. Поэтому границы регионов тоже нужно
+    /// сливать: иначе `node_ok` видел блок, выходящий за конец своего региона,
+    /// объявлял его испорченным и обрезал список (куча «росла», но памяти
+    /// не появлялось).
+    unsafe fn add_region(&mut self, start: usize, size: usize) -> bool {
+        if size < MIN_BLOCK || self.region_count >= MAX_REGIONS {
+            return false;
+        }
+        if self.total_bytes.saturating_add(size) > MAX_HEAP_BYTES {
+            return false;
+        }
+        let end = match start.checked_add(size) {
+            Some(end) => end,
+            None => return false,
+        };
+
+        // Слить новый интервал со всеми соприкасающимися регионами.
+        let mut merged_start = start;
+        let mut merged_end = end;
+        let mut index = 0;
+        while index < self.region_count {
+            let (region_start, region_end) = self.regions[index];
+            if region_end == merged_start || region_start == merged_end {
+                merged_start = merged_start.min(region_start);
+                merged_end = merged_end.max(region_end);
+                for shift in index..self.region_count - 1 {
+                    self.regions[shift] = self.regions[shift + 1];
+                }
+                self.region_count -= 1;
+                index = 0;
+                continue;
+            }
+            index += 1;
+        }
+
+        if self.region_count >= MAX_REGIONS {
+            return false;
+        }
+        self.regions[self.region_count] = (merged_start, merged_end);
+        self.region_count += 1;
+        self.total_bytes = self.total_bytes.saturating_add(size);
+
+        self.insert_block(start, size);
+        true
+    }
+
+    /// Вставить свободный блок [start, start+size) с коалесценцией соседей.
+    unsafe fn insert_block(&mut self, start: usize, size: usize) {
+        let end = start + size;
+
+        let mut prev: Option<NonNull<FreeNode>> = None;
+        let mut cur = self.head;
+        while let Some(node_ptr) = cur {
+            if !self.node_ok(node_ptr) {
+                self.truncate_before(prev);
+                cur = None;
+                break;
+            }
+            if node_ptr.as_ptr() as usize >= start {
+                break;
+            }
+            prev = cur;
+            cur = FreeNode::next(node_ptr);
+        }
+
+        // Слияние с правым соседом.
+        let mut merge_right = false;
+        let mut right_next = None;
+        let mut merged_end = end;
+        if let Some(node_ptr) = cur {
+            if node_ptr.as_ptr() as usize == end {
+                merge_right = true;
+                right_next = FreeNode::next(node_ptr);
+                merged_end = end + FreeNode::size(node_ptr);
+            }
+        }
+
+        // Слияние с левым соседом.
+        if let Some(prev_ptr) = prev {
+            let p_addr = prev_ptr.as_ptr() as usize;
+            let p_end = p_addr + FreeNode::size(prev_ptr);
+            if p_end == start {
+                FreeNode::set_size(prev_ptr, merged_end - p_addr);
+                if merge_right {
+                    FreeNode::set_next(prev_ptr, right_next);
+                }
+                return;
+            }
+        }
+
+        let node = NonNull::new_unchecked(start as *mut FreeNode);
+        FreeNode::set_size(node, merged_end - start);
+        FreeNode::set_next(node, if merge_right { right_next } else { cur });
+        if let Some(prev_ptr) = prev {
+            FreeNode::set_next(prev_ptr, Some(node));
+        } else {
+            self.head = Some(node);
+        }
+    }
+
+    /// Границы региона, содержащего `addr`.
+    fn region_of(&self, addr: usize) -> Option<(usize, usize)> {
+        for index in 0..self.region_count {
+            let (start, end) = self.regions[index];
+            if addr >= start && addr < end {
+                return Some((start, end));
+            }
+        }
+        None
+    }
+
+    // Полный размер кучи (для stats).
     fn total(&self) -> usize {
-        self.end.saturating_sub(self.start)
+        self.total_bytes
     }
 
-    // (start, end) виртуальных адресов региона.
+    // Общий диапазон кучи: (минимум начала, максимум конца).
     fn region(&self) -> (usize, usize) {
-        (self.start, self.end)
+        let mut start = usize::MAX;
+        let mut end = 0usize;
+        for index in 0..self.region_count {
+            let (s, e) = self.regions[index];
+            start = start.min(s);
+            end = end.max(e);
+        }
+        if start == usize::MAX {
+            (0, 0)
+        } else {
+            (start, end)
+        }
     }
 
-    /// Проверить, что узел лежит в регионе и его заголовок не испорчен.
+    /// Проверить, что узел лежит в одном регионе и его заголовок не испорчен.
     fn node_ok(&self, ptr: NonNull<FreeNode>) -> bool {
         let addr = ptr.as_ptr() as usize;
-        if addr < self.start || addr >= self.end {
+        let Some((region_start, region_end)) = self.region_of(addr) else {
+            return false;
+        };
+        if addr < region_start {
             return false;
         }
         if addr
             .checked_add(core::mem::size_of::<FreeNode>())
-            .map_or(true, |end| end > self.end)
+            .map_or(true, |end| end > region_end)
         {
             return false;
         }
@@ -115,7 +255,7 @@ impl FreeList {
         }
         let size = word & SIZE_MASK;
         size >= MIN_BLOCK
-            && addr.checked_add(size).map_or(false, |end| end <= self.end)
+            && addr.checked_add(size).map_or(false, |end| end <= region_end)
     }
 
     /// Обрезать список перед битым узлом. Возвращает false, если головной
@@ -245,12 +385,15 @@ impl FreeList {
             Some(end) => end,
             None => return,
         };
-        if start < self.start || end > self.end {
-            crate::println!(
-                "[HEAP] dealloc outside heap: ptr={:#x} size={} (heap {:#x}..{:#x})",
-                start, size, self.start, self.end
-            );
-            return;
+        match self.region_of(start) {
+            Some((region_start, region_end)) if start >= region_start && end <= region_end => {}
+            _ => {
+                crate::println!(
+                    "[HEAP] dealloc outside heap: ptr={:#x} size={}",
+                    start, size
+                );
+                return;
+            }
         }
 
         // Список отсортирован по адресу. Найдём позицию вставки.
@@ -346,6 +489,16 @@ impl LockedHeap {
     pub fn check(&self) -> (usize, usize, Option<usize>) {
         without_interrupts(|| self.0.lock().check())
     }
+
+    /// Добавить регион PMM в кучу. Возвращает false, если лимит исчерпан.
+    unsafe fn add_region(&self, start: usize, size: usize) -> bool {
+        without_interrupts(|| self.0.lock().add_region(start, size))
+    }
+
+    /// Сколько регионов уже подключено (для диагностики).
+    pub fn region_count(&self) -> usize {
+        without_interrupts(|| self.0.lock().region_count)
+    }
 }
 
 unsafe impl GlobalAlloc for LockedHeap {
@@ -355,14 +508,32 @@ unsafe impl GlobalAlloc for LockedHeap {
             return core::ptr::NonNull::dangling().as_ptr();
         }
         let ptr = without_interrupts(|| self.0.lock().allocate(layout));
-        if ptr.is_null() {
-            let (used, total) = self.stats();
-            println!(
-                "[HEAP] Out of memory! size={} align={} (used {}/{} bytes)",
-                layout.size(), layout.align(), used, total
-            );
+        if !ptr.is_null() {
+            return ptr;
         }
-        ptr
+
+        // Не хватило места — растём у PMM, пока хватает лимита. Одна попытка
+        // даёт 4 МиБ, поэтому крупный буфер может потребовать нескольких.
+        for _ in 0..MAX_REGIONS {
+            if !grow() {
+                break;
+            }
+            let retry = without_interrupts(|| self.0.lock().allocate(layout));
+            if !retry.is_null() {
+                return retry;
+            }
+        }
+
+        let (used, total) = self.stats();
+        println!(
+            "[HEAP] Out of memory! size={} align={} (used {}/{} bytes, {} regions)",
+            layout.size(),
+            layout.align(),
+            used,
+            total,
+            self.region_count()
+        );
+        core::ptr::null_mut()
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -385,29 +556,82 @@ unsafe impl Sync for LockedHeap {}
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-// Инициализация кучи: регион 4 МБ (1024 фрейма) из PMM, отображённый через HHDM.
-pub unsafe fn init(hhdm: u64) {
-    let (phys, frames) = match pmm::alloc_contiguous(1024) {
-        Some(p) => (p, 1024usize),
-        None => {
-            // Запасной вариант: попросим меньше.
-            match pmm::alloc_contiguous(512) {
-                Some(p) => {
-                    println!("[HEAP] WARNING: requested 4 MB, got 2 MB");
-                    (p, 512usize)
-                }
-                None => panic!("[HEAP] FATAL: cannot allocate heap region from PMM"),
-            }
-        }
+/// Начальный размер кучи: 8 МиБ. Дальше растёт по требованию.
+const INITIAL_FRAMES: usize = 2048;
+/// Порция роста: 4 МиБ за один раз.
+const GROW_FRAMES: usize = 1024;
+
+fn hhdm() -> u64 {
+    crate::memory::paging::HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Добавить куче ещё один регион из PMM.
+///
+/// Вызывается из `alloc` при нехватке места. Не использует кучу (только PMM),
+/// поэтому не может рекурсивно упасть в тот же OOM.
+fn grow() -> bool {
+    let (phys, frames) = match pmm::alloc_contiguous(GROW_FRAMES) {
+        Some(p) => (p, GROW_FRAMES),
+        None => match pmm::alloc_contiguous(GROW_FRAMES / 2) {
+            Some(p) => (p, GROW_FRAMES / 2),
+            None => return false,
+        },
     };
     let size = frames * pmm::FRAME_SIZE;
-    let start = hhdm as usize + phys;
+    let start = hhdm() as usize + phys;
+
+    let added = unsafe { ALLOCATOR.add_region(start, size) };
+    if !added {
+        // Лимит регионов/размера: физику надо вернуть, иначе она потеряется.
+        pmm::free_contiguous(phys, frames);
+        return false;
+    }
+
+    let (used, total) = ALLOCATOR.stats();
+    println!(
+        "[HEAP] grew by {} KB: {} KB total, {} regions (used {} KB)",
+        size / 1024,
+        total / 1024,
+        ALLOCATOR.region_count(),
+        used / 1024
+    );
+    true
+}
+
+// Инициализация кучи: 8 МБ из PMM через HHDM, с ростом по требованию.
+pub unsafe fn init(hhdm_offset: u64) {
+    let (phys, frames) = match pmm::alloc_contiguous(INITIAL_FRAMES) {
+        Some(p) => (p, INITIAL_FRAMES),
+        None => match pmm::alloc_contiguous(INITIAL_FRAMES / 2) {
+            Some(p) => {
+                println!("[HEAP] WARNING: requested 8 MB, got 4 MB");
+                (p, INITIAL_FRAMES / 2)
+            }
+            None => match pmm::alloc_contiguous(INITIAL_FRAMES / 4) {
+                Some(p) => {
+                    println!("[HEAP] WARNING: requested 8 MB, got 2 MB");
+                    (p, INITIAL_FRAMES / 4)
+                }
+                None => panic!("[HEAP] FATAL: cannot allocate heap region from PMM"),
+            },
+        },
+    };
+    let size = frames * pmm::FRAME_SIZE;
+    let start = hhdm_offset as usize + phys;
 
     ALLOCATOR.init(start, size);
     println!(
-        "[HEAP] Free-list allocator at phys={:#x} virt={:#x} ({} KB)",
-        phys, start, size / 1024
+        "[HEAP] Free-list allocator at phys={:#x} virt={:#x} ({} KB, max {} MB)",
+        phys,
+        start,
+        size / 1024,
+        MAX_HEAP_BYTES / (1024 * 1024)
     );
+}
+
+/// Сколько регионов подключено (для `diag heap-check`).
+pub fn region_count() -> usize {
+    ALLOCATOR.region_count()
 }
 
 /// Статистика кучи: (used, total) в байтах.

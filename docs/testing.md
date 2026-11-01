@@ -62,6 +62,8 @@ BOOT_ITERATIONS=100 python3 scripts/qemu-boot-matrix.py
 - `diag fault-test` не печатает CR2/error code/RIP;
 - `diag heap-test` показывает утечку;
 - `diag heap-check` находит битый заголовок free-list;
+- `diag heap-big 12` не может вырастить кучу (`heap-big: FAILED`);
+- `cat` файла больше 2 МиБ падает в OOM вместо потокового вывода;
 - `vktst run all` показывает `failed`;
 - debug-образ не находит `VIBRALOG` или `/VIBRA.LOG` пуст;
 - `tree` без аргумента начинает с `/` вместо текущего каталога.

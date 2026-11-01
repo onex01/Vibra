@@ -47,7 +47,7 @@ vktst help            краткая справка
 ## CI
 
 `make vktst-test` (`scripts/qemu-vktst-test.sh`) запускает
-`vktst run all`, `free`, `top -b` и `tree` из `/proc`, затем проверяет
+`diag heap-big 12`, `vktst run all`, `free`, `top -b` и `tree` из `/proc`, затем проверяет
 маркеры в serial-логе. Тест входит в `.github/workflows/kernel.yml`.
 
 ## Отношение к `diag`
