@@ -1,6 +1,6 @@
 # Vibra Kernel — статус проекта
 
-**Версия:** `0.2.0-rc.9` «Foundation RC9»
+**Версия:** `0.2.0-rc.10` «Foundation RC10»
 **Поддерживаемая архитектура:** только `x86_64-unknown-none`  
 **Загрузка:** Limine через UEFI; QEMU — основная тестовая среда
 
@@ -16,7 +16,7 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 Подтверждено только прохождение компиляции и QEMU-путь, когда он явно
 зафиксирован тестом. Наличие исходного файла не является поддержкой железа.
 
-| Подсистема | Состояние 0.2.0-rc.9 |
+| Подсистема | Состояние 0.2.0-rc.10 |
 |---|---|
 | Limine, serial, framebuffer | базовый x86_64 boot path |
 | PMM, heap, paging/VMM | экспериментально, требуется стресс на железе |
@@ -45,6 +45,7 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | `make ro-mount-test` | FAT32 read-only по умолчанию; запись только с `rw` |
 | `make bad-fs-test` | повреждённые ФС не роняют ядро |
 | `make fs-test` | FAT32/ext2/ext4/NTFS read-only + MBR-раздел через shell по serial |
+| `make big-fs-test` | NTFS 2 ТБ, GPT выше 2 ТБ, MBR на 4Kn |
 | `make boot-log-test` | запись `/VIBRA.LOG` на `VIBRALOG` и инкрементальный flush |
 | `make debug-image-test` | три раздела, лог начинается с `[BOOT]` |
 | `make vktst-test` | `vktst run all`, `free`, `top -b`, `tree` из `/proc` |

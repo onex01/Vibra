@@ -1,203 +1,464 @@
 # Roadmap — Vibra Kernel
 
-> Текущая версия: **0.2.0-rc.9 «Foundation RC9»**.
+> Текущая версия: **0.2.0-rc.10 «Foundation RC10»**.
 > Цель: стабильное диагностическое ядро на реальном x86_64-железе, не ОС.
+
+Дорожная карта разбита на **серии patch-релизов** внутри каждого minor.
+Раньше переходы были крупными («0.3.0: прерывания и блочный слой» — 6 разных
+подсистем сразу), из-за чего пункты накапливались и не закрывались. Теперь
+один релиз — одна проверяемая тема и один набор тестов.
 
 ## Принципы
 
 - Новая версия возможна только после воспроизводимого теста, а не после
   добавления прототипа драйвера.
-- До `0.5.0` GUI, приложения, userland и ARM64 не расширяют scope.
+- До `0.6.0` GUI, приложения и ARM64 не расширяют scope.
 - Операции записи на физический диск выключены по умолчанию и требуют
   отдельного тестового носителя.
 - QEMU — регрессия; реальная машина — критерий готовности.
+- Каждый пункт ниже имеет критерий приёмки и тест (`make ...`). Пункт без
+  теста не считается закрытым.
+- Нельзя заявлять поддержку железа по QEMU (см. `docs/verified-hardware.md`).
 
-## 0.1.0 «Bootstrap» — текущая база
+## Легенда
 
-- [x] UEFI/Limine boot path в QEMU.
-- [x] Serial, framebuffer, PMM, heap, GDT/IDT, PS/2 и диагностическая shell.
-- [x] Компиляция `x86_64-unknown-none`.
-- [x] QEMU smoke-тест boot-лога и inventory hardware claims; serial log дошёл
-  до `vibra:/>` без `[FATAL]`.
+- `[x]` — есть код **и** автоматическая проверка;
+- `[~]` — код есть, проверки нет или она только в QEMU;
+- `[ ]` — не начато;
+- `[!]` — известно, что не работает; описано в «Известных пробелах».
 
-## 0.2.0 «Foundation» — воспроизводимый x86_64 boot
+---
 
-- [x] Чёткий kernel-only build layout и единая версия `0.2.0-rc.9`.
-- [x] Runtime panic/page-fault checks в изолированной QEMU VM: panic screen,
-  CR2, error code, access flags, RIP/RSP/RFLAGS и source location подтверждены.
-- [x] Безопасный runtime W^X check: `diag wxtest` подтвердил read-only `.rodata`
-  mapping без намеренного kernel fault и остановки гостя.
-- [ ] Проверить live boot log на Limine framebuffer и сохранение экрана при
-  переходе в shell; реализация добавлена, QEMU-проверка ожидается.
-- [x] Silent hang через 30–60 секунд: xHCI polling удалён из timer ISR,
-  context-switch stubs больше не сравнивают caller-saved `rdi`, serial dequeue
-  защищён от IRQ4, PIT fallback приведён к 100 Hz. Ручной QEMU+xHCI прогон жил
-  75 секунд, дошёл до shell и записал 12 heartbeat. Heartbeat выведен на QEMU
-  debugcon, COM1 оставлен для shell; после 14 heartbeat `diag pmm` прошёл по COM.
-  Дополнительно: `tick_and_switch` шлёт EOI **до** попытки взять `SCHEDULER` —
-  иначе занятый лок приводил к потере EOI, таймер замолкал навсегда, а shell
-  навсегда оставался в `hlt`. Добавлены маркеры `[TICK]`/`[HALT]` на debugcon.
-- [x] QEMU+xHCI heartbeat smoke и panic/page-fault checks добавлены в CI;
-  первый CI run ожидается.
-- [x] CI сам ставит тулчейн: официальный rustup (пакеты из apt/dnf не дают
-  рабочего `rustup`), `nightly --component rust-src`, target
-  `x86_64-unknown-none`; PATH передаётся через `$GITHUB_PATH`.
-- [x] Warning budgets enforced in CI: debug ≤107, no-default ≤110.
-- [x] Растеризация консоли: строка глифа собирается в `[u64; 4]` и пишется
-  4 записями вместо 8 (символ — 64 store вместо 128), `draw_extended_char`
-  конвертирует цвета 2 раза на символ вместо 128, курсор пишется пакетно.
-  `draw_char_at` пропускает перерисовку при совпадении `TextCell`.
-  Подробности и стоимость — в [framebuffer.md](framebuffer.md).
-- [x] COM1 только в debug: в release `serial::init` не трогает порты,
-  `write_serial_byte` пустая, IRQ4 замаскирован, `isr_serial` не ставится.
-  Экранный boot-лог не зависит от UART. Цели: `make build-release`,
-  `make iso-release`; `./build.sh release` → `make run RELEASE=1 SERIAL_DEBUG=0`.
-- [x] Makefile: `RELEASE=1` действительно собирает release-профиль
-  (`CARGO_PROFILE=--release` в `kernel:`/`uefi-usb:`/`boot-log-kernel:`),
-  `build-release`/`run-release` стали обёртками над `build`, а
-  `install-kernel` берёт `$(KERNEL_ELF)` вместо жёсткого `target/release`.
-- [x] Прокрутка консоли: `scroll()` выбирает стратегию по типу памяти за
-  фреймбуфером (`probe_framebuffer_is_ram`, `rdtsc`-замер чтения). Для RAM —
-  `memmove`, для WC/uncached MMIO — перерисовка из текстовой тени со склейкой
-  пробельных прогонов. Убирает деградацию «строка за строкой» на реальном
-  железе. Подробности — в [framebuffer.md](framebuffer.md).
-- [x] `quit` через ACPI S5: разбор FADT (`PM1a_CNT`, `PM1b_CNT`, DSDT) и
-  пакета `_S5` в DSDT (включая `Zero`/`One`/`BytePrefix`/`WordPrefix`),
-  затем fallback на порты эмуляторов и ACPI reset. `reboot` переведён на
-  ACPI reset. Диагностика — `diag power`. Подробности —
-  в [storage_and_power.md](storage_and_power.md).
-- [x] Каталоги FAT32: `mkdir` (кластер, `.`/`..`, 8.3-запись) и `rmdir`
-  (только пустой, корень защищён); `vfs_mkdir`/`vfs_rmdir`/`vfs_remove`,
-  `create_dir`/`remove_entry`/`remove_dir` идут через VFS, а не только в
-  RamFS; команда `rmdir`.
-- [x] Единый корневой RamFS: VFS `/` и legacy-API видят один экземпляр ФС;
-  `RamFsFile` пишет в каталог, а не в копию `Vec`. Регрессия —
-  `make ramfs-test` (`ls /`, `touch`, `cp`, `hostname`, `/var/log/boot.log`).
-- [x] Read-only по умолчанию для FAT32 и `auto`; запись — только явным `rw`.
-  Флаг `MountPoint.readonly` проверяется в VFS (`vfs_open/create/mkdir/remove`).
-  Регрессия — `make ro-mount-test` (образ не меняется, `COPY.TXT` не появляется).
-- [x] Устойчивость к повреждённым ФС: checked-чтение полей NTFS/ext2/GPT,
-  лимит на чтение файла целиком; регрессия — `make bad-fs-test`.
-- [x] Boot-лог больше не печатается в serial повторно (128 КиБ на реальном
-  UART); полный heap-стресс вынесен в `diag heap-test`, на загрузке — короткий.
-- [x] NVMe подключён к block layer и boot-log: Identify Controller/Namespace,
-  I/O queues, 512/4096-байтные сектора, `mount auto` и VIBRALOG на NVMe.
-  Регрессия — `make nvme-test` (QEMU NVMe, включая 4Kn).
-- [x] `reboot`: FADT RESET_REG → 0xCF9 → 0x92 → i8042 → triple fault.
-- [x] Boot-лог хранится в одном месте: `/var/log/boot.log` (без дублей
-  `/boot.log` и `/var/log/kernel.log`).
-- [x] Shell: Tab для команд и путей, история без затирания prompt, цвет prompt
-  сохраняется, курсор корректно перерисовывается; `Ctrl+C`/`Ctrl+Z`.
-- [x] `beep` использует монотонные часы и корректный делитель PIT;
-  `vktst` объединяет системные проверки; `cmd --help` работает для всех
-  команд.
-- [x] 4Kn/GPT: `DiskIo::read_lba` и `sector_size`; GPT-записи читаются по
-  логическим секторам, FAT32 масштабирует BPB 4096 → 512; `diag disk`
-  печатает размер сектора и сигнатуры ФС.
-- [x] Shell redraw: экранное состояние (`screen_len`/`screen_cursor`) вместо
-  нового буфера истории — prompt больше не стирается при Up/Down любой длины.
-- [x] `mount /dev/sdX1 /mnt [rw]` и `mount /mnt sdX1` — Linux-подобные формы.
-- [x] ext4 read: extents, 64bit GDT, flex_bg, dir_index, metadata_csum;
-  неподдерживаемые incompat-фичи дают `NotSupported`; `make fs-test`
-  проверяет `mke2fs -t ext4`.
-- [x] ATAPI/CD поверх AHCI (`PACKET`, `READ CAPACITY(10)`, `READ(10)`);
-  debug-образы имеют три раздела: ESP, VIBRA (kernel), VIBRALOG.
-- [x] MBR extended (EBR) и hybrid protective MBR; GPT/разделы в 512-байтных
-  единицах для 4Kn.
-- [x] CPU topology через CPUID 0x1F/0x0B, AMD 0x80000008/0x8000001E и MADT:
-  12C/24T вместо 32.
-- [x] Реальная загрузка CPU по idle-времени; htop-like `top`; `free` в GiB/MiB.
-- [x] `tree` от текущего каталога; Ctrl+C/Ctrl+Z отменяют длинные команды.
-- [x] `vktst` — единое интерактивное меню системных тестов и отчёт в
-  `/var/log/vktst-*.log`.
-- [x] Версионированные имена артефактов и release workflow GitHub Actions.
-- [x] Запись логов: дисковый приёмник `VIBRALOG` собирается всегда (был под
-  feature `boot-log-to-usb`); исправлен троттлинг `attach()` после boot;
-  команды `log sink`/`log flush`/`log path`; `quit`/`reboot` сохраняют лог.
-- [ ] Framebuffer back buffer (legacy GUI, не блокер kernel-only сборки):
-  исправить `flip()` без `pitch`, рассогласование смещений back buffer при
-  виртуальном разрешении, `clear()` без back buffer, `draw_cursor` с
-  `!bg_color`, отсутствие `color_to_native` в `read_pixel`/`blit`.
-  Список — в [framebuffer.md](framebuffer.md).
-- [x] QEMU UEFI smoke-test в CI; workflow выполняет `./build.sh smoke`.
-- [x] Загрузка ISO (`make iso-smoke`) в UEFI и BIOS в CI; цель выполняется
-  в workflow.
-- [ ] 100 последовательных QEMU boots: matrix runner и CI job добавлены; локально
-  подтверждены 2 последовательных boot на `build/hdd.img` и 1 boot GPT/ESP-образа
-  (`BOOT_TIMEOUT=90`). В CI по умолчанию 10 итераций (TCG без KVM), 100 задаются
-  через `workflow_dispatch` → `boot_iterations`.
-- [x] GPT/FAT32 ESP UEFI test image target (`./build.sh uefi-usb`); `sfdisk`
-  verification и OVMF boot прошли.
-- [x] Проверяемые PMM/heap stress-тесты: boot heap stress и `diag pmm` прошли
-  в QEMU; тест проверяет frame invariants, contiguous alloc/free и DMA buffer.
-- [x] Подключить DMA buffer allocator к e1000 RX/TX rings и buffers; QEMU
-  подтвердил инициализацию и ARP TX/RX.
-- [ ] Интегрировать DMA allocator в блочные драйверы и определить ownership и
-  cache-coherency contract; ICMP gateway reply пока не подтверждён.
-- [ ] Hardware matrix: 10 boot с отдельного тестового USB на реальной
-  x86_64-машине; запуск пока не выполнен.
+## Что сделано: 0.1–0.2 (база)
 
-**Выход:** 100 последовательных QEMU boot и 10 boot на тестовом ПК без
-повреждения носителя.
+Собрано, чтобы не терять контекст; подробности — в `CHANGELOG.md`.
 
-## 0.3.0 «Hardware Core» — прерывания и блочный слой
+**Boot и платформа.** Limine/UEFI, serial, framebuffer, GDT/TSS/IDT, PIC,
+PIT, PS/2, ACPI (RSDP/XSDT/FADT/MADT/MCFG/HPET/SMBIOS), PCI-инвентаризация,
+перенос BAR выше 4 ГиБ в низкое MMIO-окно.
 
-- [ ] Завершить PIC → LAPIC/IOAPIC для BSP; определить политику MSI/MSI-X.
-- [x] Часы и время на реальном железе: TSC (invariant, калибровка по HPET
-  или PIT ch2) → HPET (частота из ID-регистра, 64-битный счётчик) → PIT IRQ;
-  `uptime`/`date`/тайм-ауты больше не зависят от частоты IRQ-тиков.
-- [x] Синхронизация с BIOS: CMOS RTC (UIP, BCD, 12/24h, CENTURY из FADT)
-  фиксируется на старте как база wall clock; `date`, `date hw`, `diag timer`.
-- [x] `timer::post_init()` измеряет частоту IRQ-тиков; если IRQ0 не
-  доставляется, поднимает LAPIC timer (vector 48 + EOI), иначе
-  `timer::idle_wait()` не уходит в `hlt` — shell не зависает на ноутбуке.
-- [x] Общий `BlockDevice`: bounds, timeouts, read-only, ошибки и DMA-буферы.
-  `PartitionDisk` ограничивает окно раздела, AHCI-команды имеют spin-timeout,
-  ошибки проверяются по `PxTFD.ERR`, запись разрешена только через явный API.
-- [x] GPT/MBR parser и partition devices (`fs/partition.rs`, CRC32 для GPT).
-- [x] Один контроллер хранения: AHCI **или** NVMe, только чтение
-  (AHCI: Command Header/FIS приведены к AHCI 1.3, IDENTIFY/READ работают).
-- [x] Привязать найденные диски к VFS: `fs/blockdev.rs` регистрирует `sda`,
-  `sda1`, ... в `DiskManager`, `mount <path> auto <dev>` определяет ФС.
+**Память.** PMM (битмап, next-fit, contiguous), heap с ростом по требованию
+(8 МиБ → 64 МиБ), free-list с коалесценцией и самодиагностикой, копия PML4
+Limine, read-only page-table walker, `diag paging/paging-test/vmm/wxtest`.
 
-## 0.4.0 «Peripherals» — ввод и файловая система
+**Время.** TSC (invariant, калибровка по HPET/PIT ch2) → HPET → PIT IRQ;
+CMOS RTC; `date`, `date hw`, `uptime`, `diag timer`, LAPIC-timer fallback.
 
-- [x] Полный xHCI lifecycle: BIOS handoff, reset, DCBAA + scratchpad,
-  command/event rings (ERST), port reset, Enable Slot, Address Device,
-  GET_DESCRIPTOR, SET_CONFIGURATION, Configure Endpoint и interrupt IN.
-  Проверено в QEMU (`make keyboard-test`: `[xHCI] HID keyboard ready`,
-  HID-отчёты доходят до драйвера).
-- [x] USB HID boot keyboard: 8-байтовые отчёты разбираются в
-  `drivers/usb/hid.rs` и инжектятся в общий keyboard-слой. Физическая
-  клавиатура ещё не проверена — нужен boot с USB-носителя на ноутбуке.
-- [x] PS/2-клавиатура на реальном железе: ACK/self-test 8042, включение
-  scanning (0xF4) и порта (0xAE), декодирование Scan Code Set 2 при
-  отсутствии трансляции, polling fallback через порт 0x64 (работает без
-  IRQ1), отсутствие `println!` из ISR (дедлок на spin-локах). Проверено
-  в QEMU: `make keyboard-test` → `KEYBOARD_CASE=ps2`.
-- [x] FAT32 read-only, затем Ext2 read-only поверх общего block layer
-  (`mount /mnt fat32 sda1`, `mount /mnt ext sda2`); NTFS read-only добавлен
-  как бонус (`fs/ntfs.rs`: MFT, data runs, $INDEX_ROOT/$INDEX_ALLOCATION).
-  Сквозная проверка — `make fs-test` (`scripts/qemu-fs-test.sh`): FAT32/ext2/NTFS
-  и MBR-раздел монтируются, `ls`/`cat` читают файлы, включая LFN.
-- [x] Автомонтирование явно выбранного read-only boot-раздела
-  (`mount /mnt auto sda1`, FAT32/ext2/NTFS определяются по сигнатурам).
+**Хранилище.** AHCI (ATA read/write, ATAPI CD), IDE/PATA (read-only, теперь
+в block layer), NVMe (Identify, I/O queues, 512/4096 байт/блок),
+USB mass storage (xHCI BOT/SCSI), GPT/MBR/EBR, 4Kn, `sdX`/`srX`,
+FAT32 (rw), ext2/3/4 (ro, extents/64bit/htree), NTFS (ro, MFT/index),
+`mount auto`, `umount`, `sync`, `VIBRALOG`.
 
-## 0.5.0 «Hardware Ready» — стабильное ядро
+**Ввод.** PS/2 (Set 1/2, polling fallback), USB HID boot keyboard на xHCI,
+UHCI-клавиатуры, PS/2 мышь (базово).
 
-- [ ] NIC для одного поддержанного физического адаптера.
-- [ ] RX/TX, ARP, DHCP, IPv4 и ICMP; `ping` внешнего узла с тайм-аутом.
-- [ ] Regression matrix минимум для двух x86_64-конфигураций.
-- [ ] Документированная recovery-процедура и boot-логи.
+**Сеть.** e1000 (RX/TX, ARP, IPv4, ICMP), RTL8139 (инициализация),
+`ping`, `ifconfig`; DHCP/TCP/UDP нет.
 
-**Выход:** с USB-образа загружается диагностика, работает USB keyboard,
-чтение с диска и DHCP/ping на двух реальных машинах.
+**Диагностика и UX.** `vktst`, `diag` (12 подкоманд), `top`, `free`, `tree`,
+`ls -l/-a`, `mount/umount/sync`, история, Tab, `Ctrl+C/Ctrl+Z`,
+boot/shell-логи в ramfs и на носителе, ACPI S5/reset.
 
-## После 0.5.0
+**Надёжность.** Паника и page fault без аллокаций, полный IDT (0..32),
+DMA-адрес из таблиц страниц, read-only по умолчанию, проверка битых ФС.
 
-- `0.6`: controlled write path, USB Mass Storage, UDP и собственный remote shell.
-- `0.7`: SMP и пер-CPU ресурсы после аудита локов.
-- `0.8+`: ARM64 platform layer. Первый этап Orange Pi Zero 3 (H618): UART,
-  U-Boot, Device Tree, MMU, GIC, generic timer, SD/MMC и Ethernet.
-  Mali/HDMI/Wi-Fi не входят в первый ARM milestone.
-- GUI и desktop возможны только после отдельного решения о userland ABI.
+---
+
+## 0.2.x «Foundation hardening» — довести базу до честного 0.2.0
+
+Цель серии: закрыть дефекты, которые ломают работу на реальном железе, и
+сделать 0.2.0 финальным. Каждый patch-релиз — одна тема.
+
+### 0.2.0-rc.10 — большие тома и NTFS (текущий)
+
+- [x] `DiskIo::dma_address` из таблиц страниц; AHCI/NVMe/RTL8139 не
+  программируют PRD/PRP при неудачной трансляции.
+- [x] VIBRALOG ищется первым на всех дисках; загрузочный том — только
+  fallback после shell.
+- [x] IDE/PATA в `blockdev::probe`; `sector_size()` = 512.
+- [x] MBR на 4Kn: LBA таблицы разделов переводятся в 512-байтные единицы.
+- [x] NTFS читается потоково (файл любого размера, без лимита 64 МиБ).
+- [x] `disks` показывает `gpt`/`mbr` вместо `unknown`.
+- [x] `make big-fs-test`: NTFS 2 ТБ целиком, GPT-раздел за 2 ТБ,
+  MBR на 4Kn-устройстве.
+
+### 0.2.0-rc.11 — целостность ФС и запись
+
+- [ ] FAT32: создание LFN-имён (сейчас только 8.3), корректный FSInfo,
+  обновление `free_clusters`.
+- [ ] FAT32: порядок записи «данные → размер → FAT» зафиксировать
+  тестом `power-loss` (обрыв QEMU через `quit`/SIGKILL на разных этапах).
+- [ ] `fsck`-lite: проверка цепочки кластеров, потерянных кластеров и
+  cross-link при монтировании (read-only отчёт, без исправлений).
+- [ ] `sync`/`umount` для FAT32: дождаться завершения всех записей, запрет
+  `umount` при открытых файлах.
+- [ ] Тест: 100 циклов `mount → cp → sync → umount → проверка на хосте`.
+
+**Выход:** запись на FAT32 не портит том при обрыве на любом шаге; повторный
+`cp` не создаёт дубликаты и «потерянные» кластеры.
+
+### 0.2.0-rc.12 — файловые системы, которых не хватает
+
+- [ ] exFAT read-only (boot sector, FAT, directory entries, allocation
+  bitmap) — закрывает типичный внешний HDD.
+- [ ] ISO9660 read-only для `sr0` (PVD, directory records, Rock Ridge/Joliet
+  как минимум по именам).
+- [ ] `detect_fs_type`: `fat12/16` отдельно от `fat32` (сейчас FAT12/16
+  просто не монтируются и выглядят как unknown).
+- [ ] `mount` по метке тома (`LABEL=VIBRALOG`) и по UUID раздела.
+- [ ] Тесты: `make fs-test` расширить exFAT/ISO; `make big-fs-test`
+  добавить exFAT 2 ТБ.
+
+**Выход:** все распространённые ФС внешних дисков либо монтируются
+read-only, либо дают точное сообщение, почему нет.
+
+### 0.2.0-rc.13 — несколько дисков и контроллеров
+
+- [ ] NVMe: несколько контроллеров (сейчас один `NVME_CONTROLLER`),
+  несколько namespace на контроллер (`nvme0n1`, `nvme0n2`).
+- [ ] AHCI: hotplug (PxSSTS), переинициализация порта после ошибки,
+  сброс контроллера при зависании команды.
+- [ ] USB storage: несколько устройств, повторная нумерация после
+  переподключения, `sdX` не «съезжает».
+- [ ] Единый реестр устройств: `disks` показывает драйвер, порт, модель,
+  серийник, размер сектора.
+- [ ] Тест: 2 NVMe + 2 SATA + 1 USB одновременно; `disks` и монтирование
+  каждого.
+
+**Выход:** на машине с несколькими накопителями видны и монтируются все,
+номера стабильны между загрузками.
+
+### 0.2.0-rc.14 — память без сюрпризов
+
+- [ ] VMM: собственные `map`/`unmap`/`protect` для ядра и MMIO, а не только
+  копия PML4 Limine.
+- [ ] W^X: `.text` RX, `.rodata` R, `.data/.bss` RW+NX — выставить явно и
+  проверять `diag wxtest` для всех трёх регионов.
+- [ ] Guard page под каждым стеком задачи (сейчас 8 КиБ без защиты).
+- [ ] Refcount фреймов; запрет `free` занятого фрейма (сейчас только
+  double-free warning).
+- [ ] Политика OOM: не паника, а отказ операции + освобождение кэшей.
+- [ ] `diag heap-frag`: доля фрагментации и крупнейший свободный блок.
+- [ ] Тесты: `vktst run mem`, `diag heap-big 40` на 256 МиБ, 1 ГиБ, 4 ГиБ
+  RAM (QEMU `-m`).
+
+**Выход:** рост/освобождение памяти не оставляет «дыр»; переполнение стека
+даёт page fault, а не порчу кучи.
+
+### 0.2.0-rc.15 — наблюдаемость
+
+- [ ] Backtrace по RBP с символами (`nm`-таблица или сгенерированный
+  список) в panic/page fault.
+- [ ] `dmesg`-совместимый `log -f`/`log level` с фильтром подсистем.
+- [ ] Счётчики: прерывания по векторам, I/O по устройствам, ошибки DMA,
+  отказы ФС — в `/proc/stat`, `/proc/interrupts`, `/proc/diskstats`.
+- [ ] `diag all` — одна команда, которая прогоняет все подсистемы и
+  складывает отчёт в `/var/log/diag.log`.
+- [ ] Тест: `make diag-report-test` проверяет наличие всех разделов.
+
+**Выход:** по логу с реальной машины можно понять, где остановилась
+загрузка и почему, без пересборки.
+
+### 0.2.0 (финал) — критерии
+
+- [ ] 100 последовательных QEMU boot (`BOOT_ITERATIONS=100`).
+- [ ] 10 boot на реальной x86_64-машине с отдельного USB.
+- [ ] Все пункты rc.10–rc.15 закрыты или явно перенесены.
+- [ ] `docs/verified-hardware.md` заполнен хотя бы для одной машины.
+
+---
+
+## 0.3.x «Interrupts»
+
+Сейчас прерывания — это PIC + polling во всех драйверах. Серия закрывает
+это по шагам, а не одним «0.3.0».
+
+### 0.3.1 — MADT-driven LAPIC/IOAPIC
+
+- [ ] LAPIC base и IOAPIC base из MADT (сейчас IOAPIC захардкожен
+  `0xFEC00000`), учёт нескольких IOAPIC.
+- [ ] Interrupt Source Override: полярность и trigger (level/edge) из MADT.
+- [ ] GSI → vector mapping с учётом `gsi_base`.
+- [ ] `APIC_ACTIVE` выставляется реально; PIC маскируется после миграции.
+- [ ] EOI: LAPIC EOI вместо PIC для всех APIC-векторов.
+- [ ] `diag apic` показывает таблицу маршрутов и доставленные векторы.
+- [ ] Тест: `make apic-test` — таймер и клавиатура приходят через IOAPIC,
+  PIC замаскирован.
+
+**Выход:** IRQ0/IRQ1 работают через APIC на реальной машине; `diag kstat`
+показывает рост по нужным векторам.
+
+### 0.3.2 — MSI/MSI-X
+
+- [ ] `msi.rs`: включение MSI/MSI-X для устройства (mask/unmask, affinity).
+- [ ] AHCI/NVMe/xHCI/e1000 переводятся на MSI/MSI-X, polling остаётся
+  fallback при отсутствии capability.
+- [ ] Проверка capability list через 16-битный command (`enable_bus_master`
+  уже исправлен).
+- [ ] `diag irq` — какие устройства на MSI, какие на INTx, какие polling.
+- [ ] Тест: `make msi-test` в QEMU (`-device nvme` + MSI) и лог «vector N».
+
+**Выход:** блочные и сетевой драйверы получают прерывания, а не крутят
+опрос в idle.
+
+### 0.3.3 — драйверы на прерываниях
+
+- [ ] IRQ-handler AHCI (`PxIS`), NVMe (admin/IO CQ), xHCI (event ring),
+  e1000 (RX/TX).
+- [ ] Bottom half / workqueue: обработчик только снимает событие, работа —
+  в планировщике.
+- [ ] Запрет блокирующих операций в IRQ (проверить отсутствие `lock` на
+  диске/вводе в контексте прерывания).
+- [ ] `top` показывает IRQ-время по подсистемам.
+- [ ] Тест: загрузка под нагрузкой (dd + ping) без потери ввода.
+
+**Выход:** shell отвечает во время чтения диска и сетевого трафика.
+
+### 0.3.4 — таймеры и тики
+
+- [ ] HPET comparators для периодических событий, отказ от PIT.
+- [ ] Tickless idle: `hlt` до ближайшего дедлайна, а не 100 Гц.
+- [ ] Монотонные часы: проверка отсутствия скачков при S3/S0ix (если
+  платформа поддерживает; иначе явный отказ).
+- [ ] `diag timer` — дрейф за 60 с и число «пропущенных» тиков.
+- [ ] Тест: 10 минут простоя, дрейф < 0.1 %.
+
+---
+
+## 0.4.x «Storage write path»
+
+Read-only база есть; серия добавляет безопасную запись и целостность.
+
+### 0.4.1 — единый DMA-контракт
+
+- [ ] `DmaBuffer`/`DmaDirection`/ownership для всех драйверов; запрет
+  `Layout::from_size_align(...).unwrap()` на пути драйвера.
+- [ ] Bounce-буфер для буферов, не пригодных для DMA (стек, `.bss`).
+- [ ] PRP-list для NVMe (сейчас только PRP1) и несколько PRD для AHCI.
+- [ ] Cache-coherency: явный контракт (x86 — coherent, но задокументировать
+  и проверить на ARM64 позже).
+- [ ] `diag dma` — карта выданных буферов, отказы трансляции.
+- [ ] Тест: NVMe/AHCI I/O по 1 МиБ в 4 КиБ буфер и обратно.
+
+### 0.4.2 — запись: FAT32 и общая модель
+
+- [ ] Явный write-path в VFS: `open(O_RDWR)`, `flush`, `fsync`, `truncate`.
+- [ ] FAT32: LFN-создание, переименование, `mkdir/rmdir`, `free_clusters`,
+  зеркалирование FAT.
+- [ ] Порядок записи и crash-consistency: журнал намерений в свободных
+  кластерах (мини-FAT-journal) либо чётко задокументированный «last write
+  wins».
+- [ ] `mount rw` требует отдельного подтверждения на устройстве без метки
+  тестового носителя (сейчас просто `rw`).
+- [ ] Тест: `make write-test` — 100 циклов записи и `fsck.fat` после
+  каждого; обрыв питания на каждом этапе.
+
+### 0.4.3 — ext2/3/4 и NTFS
+
+- [ ] Решение по ext4 write: либо реализовать (bitmap, journal replay,
+  extents), либо официально зафиксировать read-only навсегда.
+- [ ] NTFS: `$Bitmap`/`$UpCase` не нужны для чтения, но нужен корректный
+  `$DATA` с несколькими runs и sparse — проверить на больших файлах.
+- [ ] `stat`: реальные даты создания/изменения из MFT и inode.
+- [ ] Тест: файлы > 4 ГиБ на NTFS/ext4 (чтение потоково).
+
+### 0.4.4 — съёмные носители
+
+- [ ] Автомонтирование при подключении (по метке/ФС) с уведомлением, а не
+  только `mount`.
+- [ ] Защита: запрет записи, пока том не размонтирован другим потребителем.
+- [ ] `eject`/`umount -l` для USB.
+- [ ] Тест: подключить/отключить USB 10 раз, проверить отсутствие
+  «залипших» записей и паники.
+
+---
+
+## 0.5.x «Peripherals»
+
+### 0.5.1 — USB host controllers
+
+- [ ] EHCI (USB 2.0): флешки и клавиатуры на USB2-портах чипсетов.
+- [ ] OHCI (USB 1.1, AMD/NEC).
+- [ ] USB hubs (external + internal root hub с несколькими tier).
+- [ ] Hotplug: подключение/отключение без перезагрузки.
+- [ ] `diag usb` — дерево устройств, скорость, endpoint'ы.
+
+### 0.5.2 — ввод
+
+- [ ] Раскладки US/RU, переключение, AltGr, dead keys.
+- [ ] Автоповтор, задержка, настройка через `/cfg/keyboard`.
+- [ ] USB HID mouse + PS/2 mouse → единый слой указателя; курсор в консоли
+  (выделение/скролл) — только если появится GUI.
+- [ ] Тест: `make keyboard-test` для US и RU, включая Shift/AltGr.
+
+### 0.5.3 — прочая периферия
+
+- [ ] PC speaker: подтвердить на железе, иначе явно писать «нет устройства».
+- [ ] SMBus/I2C? — только если понадобится для батареи/температуры; иначе
+  вне scope.
+- [ ] Датчики: температура CPU через MSR (Intel) / k10temp (AMD), батарея
+  через ACPI `_BST`.
+- [ ] `sensors`/`battery` команды.
+
+---
+
+## 0.6.x «Network»
+
+### 0.6.1 — драйверы и линк
+
+- [ ] Один поддерживаемый физический NIC: e1000e/I219 или RTL8168 — выбрать
+  по доступному железу.
+- [ ] RTL8139 подключить к `net` (сейчас инициализируется, но не
+  используется).
+- [ ] Link state, скорость/duplex, MAC из EEPROM.
+- [ ] IRQ/MSI вместо polling; RX ring с DmaBuffer.
+
+### 0.6.2 — IPv4
+
+- [ ] DHCP client (discover/offer/request/ack, lease, renew).
+- [ ] ARP cache с таймаутами, gratuitous ARP, proxy ARP не нужен.
+- [ ] IP fragmentation/reassembly (минимум для ping большого размера).
+- [ ] UDP: сокеты, checksum, порты.
+- [ ] ICMP: echo, unreachable, time exceeded.
+
+### 0.6.3 — TCP и приложения
+
+- [ ] TCP: handshake, retransmit, окно, закрытие; без congestion control
+  сверх минимума.
+- [ ] DNS-клиент (A/AAAA через UDP).
+- [ ] `ping`, `nslookup`, `wget` (HTTP/1.0 GET) как проверка стека.
+- [ ] Тест: `ping` шлюза, `wget` локального HTTP-сервера в QEMU user-net.
+
+---
+
+## 0.7.x «Userland»
+
+До этого пункта userland-код в репозитории — прототип (`syscall`, `task/user`).
+
+### 0.7.1 — адресные пространства
+
+- [ ] Per-process CR3, `AddressSpace` с `map/unmap/protect`.
+- [ ] ELF64 loader (PT_LOAD, BSS, стек, argv/envp).
+- [ ] Разделение kernel/user, KPTI не обязателен, но SMEP/SMAP включить.
+
+### 0.7.2 — процессы и ABI
+
+- [ ] `fd`-таблица, `open/read/write/close/seek`, `stat`.
+- [ ] `fork`, `exec`, `wait`, `exit`, `pipe`, `dup2`.
+- [ ] Сигналы (SIGINT/SIGTERM/SIGKILL/SIGSEGV), `kill`.
+- [ ] FPU/SIMD-контекст (сейчас не сохраняется).
+- [ ] Стабильный syscall ABI: номера, регистры, возврат ошибок.
+
+### 0.7.3 — минимальный userland
+
+- [ ] `/init` на Rust (отдельный crate, `no_std` + syscall).
+- [ ] `sh` с pipe/redirect, `ls`, `cat`, `cp`, `rm`, `ps`, `mount`.
+- [ ] `docs/syscalls.md` и `docs/userland.md`.
+
+**Выход:** с диска загружается `/init`, запускает shell, монтирует том,
+читает файл.
+
+---
+
+## 0.8.x «SMP»
+
+- [ ] ACPI MADT: запуск AP (INIT/SIPI), per-CPU GDT/TSS/стеки.
+- [ ] Per-CPU данные, `gs`-based %cpu; убрать глобальные `PERCPU`.
+- [ ] Блокировки: очередь на спинлоках, IRQ-safe варианты, lockdep-lite.
+- [ ] IPI: TLB shootdown, reschedule, остановка CPU.
+- [ ] Планировщик на N CPU, миграция, affinity.
+- [ ] Тест: 4 vCPU, стресс alloc/free + I/O + shell без дедлоков.
+
+---
+
+## 0.9 «ARM64»
+
+Только после стабильного 0.8 на x86_64.
+
+- [ ] QEMU `virt`: UART, PSCI, GICv3, generic timer, MMU 4 уровня.
+- [ ] Device Tree: разбор, memory map, UART/GIC/PCIe.
+- [ ] Orange Pi Zero 3 (H618): U-Boot, eMMC/SD, Ethernet.
+- [ ] Mali/HDMI/Wi-Fi — вне первого milestone.
+
+---
+
+## Сквозные направления (идут параллельно)
+
+### Воспроизводимость
+
+- [ ] Запинить `nightly` датой в `rust-toolchain.toml`.
+- [ ] Запинить Limine/OVMF версией + SHA256 (переменные уже есть).
+- [ ] Перенести `[profile.*]` в корневой `Cargo.toml` (сейчас игнорируются).
+- [ ] `cargo fmt --check` и `clippy` в CI.
+- [ ] Кэш `target/`, `~/.cargo`, `limine-bin`, `OVMF.fd` в CI.
+
+### Тестирование
+
+- [ ] Разделить CI на job'ы: `build`, `qemu-boot`, `storage`, `network`,
+  `userland`, `boot-matrix`.
+- [ ] `make check` = fmt + clippy + бюджеты предупреждений.
+- [ ] Host-тесты парсеров (GPT/MBR/FAT/ext/NTFS) на фикстурах.
+- [ ] Fuzz парсеров ФС (cargo-fuzz в отдельном crate).
+- [ ] Регрессия на 100 boot с artifact'ами логов при падении.
+
+### Документация
+
+- [x] `docs/commands.md` — команды и горячие клавиши.
+- [ ] `docs/drivers.md` — lifecycle драйвера, DMA-контракт, IRQ.
+- [ ] `docs/syscalls.md` — ABI после 0.7.
+- [ ] `docs/hardware.md` — поддерживаемые чипсеты/NIC/контроллеры.
+- [ ] `docs/known-issues.md` — сводка `[!]` пунктов из этой карты.
+
+### Безопасность
+
+- [ ] SMEP/SMAP/UMIP, NX везде, KASLR (после VMM).
+- [ ] Stack canary и проверка канареечных значений в panic.
+- [ ] `cargo-audit` для зависимостей (`limine`, `spin`).
+- [ ] Отключить/удалить `boot-log-to-disk` (пишет в LBA 2/3 — GPT entries).
+
+### Производительность
+
+- [ ] Boot time: цель < 2 с до shell на реальной машине (сейчас ~5–8 с).
+- [ ] Логи: не писать на диск в горячем пути (только по таймеру/событию).
+- [ ] Framebuffer: budget на прокрутку, замер на реальном железе.
+
+---
+
+## Известные пробелы (`[!]`)
+
+Список того, чего сейчас **нет**, чтобы не было иллюзий и резких переходов.
+
+- [!] Нет записи на ext2/3/4 и NTFS (только FAT32).
+- [!] Нет exFAT и ISO9660 — часть внешних носителей не монтируется.
+- [!] Один NVMe-контроллер; несколько namespace не поддержаны.
+- [!] USB: нет EHCI/OHCI, нет хабов, нет hotplug.
+- [!] Нет MSI/MSI-X; все драйверы на polling.
+- [!] Нет IOAPIC-маршрутизации; PIC остаётся основным.
+- [!] Нет SMP, per-CPU данных и TLB shootdown.
+- [!] Нет userland ABI: per-process CR3, ELF, fork/exec, сигналов.
+- [!] FPU/SIMD-контекст не сохраняется между задачами.
+- [!] Нет DHCP/UDP/TCP/DNS; сеть — статический адрес QEMU.
+- [!] Нет backtrace с символами в panic.
+- [!] Нет `umount`-защиты от открытых файлов (файлы не отслеживаются).
+- [!] Нет проверки целостности ФС при монтировании.
+- [!] W^X не enforced для `.text/.rodata` собственных таблиц (наследие Limine).
+- [!] Нет real-hardware матрицы: `docs/verified-hardware.md` пуст.
+
+---
+
+## Порядок работ
+
+1. **0.2.x**: целостность ФС, exFAT/ISO, несколько дисков, память,
+   наблюдаемость → финальный 0.2.0.
+2. **0.3.x**: APIC → MSI → IRQ-драйверы → таймеры.
+3. **0.4.x**: DMA-контракт → запись → съёмные носители.
+4. **0.5.x**: EHCI/OHCI → ввод → периферия.
+5. **0.6.x**: NIC → IPv4/DHCP → TCP.
+6. **0.7.x**: userland.
+7. **0.8.x**: SMP.
+8. **0.9**: ARM64.
+
+Правило: нельзя начинать следующую серию, пока предыдущая не имеет зелёных
+тестов и записи в `docs/verified-hardware.md` (или явного решения отложить
+hardware-проверку с пометкой в `docs/known-issues.md`).

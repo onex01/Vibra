@@ -98,6 +98,9 @@ jobs:
       - name: Test NVMe and mount auto
         run: ./build.sh nvme-test
 
+      - name: Test large volumes (NTFS 2T, GPT above 2T, MBR 4Kn)
+        run: ./build.sh big-fs-test
+
       - name: Test interactive shell (Tab, history, help)
         run: ./build.sh shell-test
 

@@ -13,7 +13,7 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.9`
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.10`
 обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 
@@ -119,6 +119,7 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh ro-mount-test  проверить read-only монтирование FAT32
 ./build.sh bad-fs-test    проверить устойчивость к повреждённым ФС
 ./build.sh fs-test        проверить FAT32/ext2/ext4/NTFS, MBR-раздел, sync/umount
+./build.sh big-fs-test    проверить NTFS 2 ТБ, GPT выше 2 ТБ и MBR на 4Kn
 ./build.sh vktst-test     проверить vktst, top, free и tree
 ./build.sh debug-image-test  проверить 3 раздела USB debug-образа и запись лога
 ./build.sh iso-debug-test проверить debug ISO, записанный на USB
@@ -141,8 +142,8 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 драйверы не поддерживают запись. Boot-лог пишется на FAT32-раздел `VIBRALOG`.
 
 Имена образов содержат дату и версию, например
-`vibra_2026-10-31_0.2.0-rc.9.iso` и
-`vibra-debug_2026-10-31_0.2.0-rc.9.iso`; для совместимости создаются
+`vibra_2026-10-31_0.2.0-rc.10.iso` и
+`vibra-debug_2026-10-31_0.2.0-rc.10.iso`; для совместимости создаются
 симлинки `build/vibra.iso` и `build/vibra-debug.iso`.
 
 ## CI

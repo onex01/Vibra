@@ -130,6 +130,14 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 let mgr = fs::get_disk_manager().lock();
                 mgr.info(disk_id).map(|(_, _, _, t)| t)
             };
+            if matches!(detected, Some("gpt") | Some("mbr")) && fs_type == "auto" {
+                console.print_colored("SKIPPED (partition table, not a filesystem)\n", COLOR_RED);
+                console.print_colored(
+                    &format!("  Mount a partition instead: mount {} auto {}1\n", path, dev),
+                    COLOR_YELLOW,
+                );
+                return CmdResult::Ok;
+            }
             if detected == Some("exfat") {
                 console.print_colored("SKIPPED (exFAT is not supported)\n", COLOR_RED);
                 console.print_colored("  Use a FAT32/NTFS volume or convert the disk.\n", COLOR_YELLOW);

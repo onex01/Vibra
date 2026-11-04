@@ -15,14 +15,17 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use alloc::sync::Arc;
 use spin::Mutex;
 
 const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
 const ATTR_INDEX_ALLOCATION: u32 = 0xA0;
 
-/// Максимальный размер файла, который готовы прочитать целиком.
-const MAX_FILE_SIZE: usize = 64 * 1024 * 1024;
+/// Предел на размер индексных буферов каталога ($INDEX_ALLOCATION),
+/// которые приходится читать целиком. Файлы читаются потоково и этим
+/// лимитом не ограничены.
+const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Загрузочный сектор NTFS (нужные поля).
 struct NtfsBoot {
@@ -232,6 +235,48 @@ fn apply_fixup(rec: &mut [u8], bytes_per_sector: u16) {
     }
 }
 
+/// Прочитать `out.len()` байт из цепочки runs по смещению `offset`.
+///
+/// Общая функция для `NtfsFs` и открытого файла: файл читается по требованию,
+/// а не копируется в память при `open` (иначе `cat` файла больше
+/// `MAX_INDEX_BYTES` падал с `NotSupported`).
+fn read_runs_into(
+    disk: &Mutex<Box<dyn DiskIo>>,
+    cs: u64,
+    runs: &[Run],
+    offset: u64,
+    out: &mut [u8],
+) -> Result<(), FsError> {
+    if cs == 0 || runs.is_empty() {
+        return Err(FsError::IoError);
+    }
+    let sectors_per_cluster = (cs / 512).max(1) as u64;
+    let mut done = 0usize;
+    let mut disk = disk.lock();
+
+    while done < out.len() {
+        let abs = offset + done as u64;
+        let vcn = abs / cs;
+        let in_cluster = (abs % cs) as usize;
+
+        let run = run_for(runs, vcn).ok_or(FsError::IoError)?;
+        let lcn = run.lcn + (vcn - run.vcn);
+
+        let take = (out.len() - done).min(cs as usize - in_cluster);
+        let sector = lcn * sectors_per_cluster + (in_cluster / 512) as u64;
+        let start = in_cluster % 512;
+
+        let need = start + take;
+        let nsectors = (need + 511) / 512;
+        let mut tmp = vec![0u8; nsectors * 512];
+        disk.read(sector, &mut tmp).map_err(|_| FsError::IoError)?;
+        out[done..done + take].copy_from_slice(&tmp[start..start + take]);
+
+        done += take;
+    }
+    Ok(())
+}
+
 /// Прочитать `buf.len()` байт по абсолютному смещению.
 fn read_abs(disk: &mut dyn DiskIo, byte_offset: u64, buf: &mut [u8]) -> Result<(), FsError> {
     let sector = byte_offset / 512;
@@ -277,7 +322,9 @@ fn parse_name_key(key: &[u8]) -> Option<NameInfo> {
 // ==========================================
 
 pub struct NtfsFs {
-    disk: Mutex<Box<dyn DiskIo>>,
+    /// Диск разделяется с открытыми файлами: `cat` читает потоково, а не
+    /// копирует файл в память при открытии.
+    disk: Arc<Mutex<Box<dyn DiskIo>>>,
     boot: NtfsBoot,
     /// Размещение $MFT ($DATA записи 0).
     mft_runs: Vec<Run>,
@@ -324,7 +371,7 @@ impl NtfsFs {
         if mft_runs.is_empty() { return Err(FsError::InvalidPath); }
 
         Ok(Self {
-            disk: Mutex::new(disk),
+            disk: Arc::new(Mutex::new(disk)),
             boot,
             mft_runs,
             mft_size,
@@ -336,32 +383,7 @@ impl NtfsFs {
 
     /// Прочитать `out.len()` байт из цепочки runs по смещению `offset`.
     fn read_runs(&self, runs: &[Run], offset: u64, out: &mut [u8]) -> Result<(), FsError> {
-        let cs = self.cluster_size();
-        let mut done = 0usize;
-        let mut disk = self.disk.lock();
-
-        while done < out.len() {
-            let abs = offset + done as u64;
-            let vcn = abs / cs;
-            let in_cluster = (abs % cs) as usize;
-
-            let run = run_for(runs, vcn).ok_or(FsError::IoError)?;
-            let lcn = run.lcn + (vcn - run.vcn);
-
-            let take = (out.len() - done).min(cs as usize - in_cluster);
-            let sectors_per_cluster = (cs / 512) as u64;
-            let sector = lcn * sectors_per_cluster + (in_cluster / 512) as u64;
-            let start = in_cluster % 512;
-
-            let need = start + take;
-            let nsectors = (need + 511) / 512;
-            let mut tmp = vec![0u8; nsectors * 512];
-            disk.read(sector, &mut tmp).map_err(|_| FsError::IoError)?;
-            out[done..done + take].copy_from_slice(&tmp[start..start + take]);
-
-            done += take;
-        }
-        Ok(())
+        read_runs_into(&self.disk, self.cluster_size(), runs, offset, out)
     }
 
     /// Прочитать запись MFT по номеру (с применением fixup).
@@ -382,37 +404,32 @@ impl NtfsFs {
     }
 
 
-    /// Содержимое безымянного $DATA (файл целиком).
-    fn file_data(&self, rec: &[u8]) -> Result<Vec<u8>, FsError> {
+    /// Хранилище файла: resident-данные или цепочка runs.
+    ///
+    /// Раньше here читался файл целиком (`file_data`) с лимитом 64 МиБ:
+    /// `cat` файла больше лимита падал с `NotSupported`. Теперь `NtfsFile`
+    /// читает по требованию, а лимит остаётся только для индексных буферов.
+    fn file_storage(&self, rec: &[u8]) -> Result<FileStorage, FsError> {
         for (off, atype) in attr_offsets(rec) {
             if atype != ATTR_DATA || rec[off + 9] != 0 { continue; }
 
             if rec[off + 8] == 0 {
-                // Resident — данные прямо в записи.
-                let v = attr_resident_value(rec, off).ok_or(FsError::IoError)?;
-                return Ok(v.to_vec());
+                let value = attr_resident_value(rec, off).ok_or(FsError::IoError)?;
+                return Ok(FileStorage::Resident(value.to_vec()));
             }
 
-            // Non-resident: runs + real_size.
             let alen = rd_u32(rec, off + 4) as usize;
             let run_off = rd_u16(rec, off + 32) as usize;
-            if off + run_off > rec.len() || off + alen > rec.len() { return Err(FsError::IoError); }
-
-            let real_size = rd_u64(rec, off + 48) as usize;
-            if real_size > MAX_FILE_SIZE { return Err(FsError::NotSupported); }
-
-            let runs = parse_runs(&rec[off + run_off..off + alen]);
-            if runs.is_empty() { return Ok(Vec::new()); }
-
-            let mut data = vec![0u8; real_size];
-            if real_size > 0 {
-                self.read_runs(&runs, 0, &mut data)?;
+            if off + run_off > rec.len() || off + alen > rec.len() {
+                return Err(FsError::IoError);
             }
-            return Ok(data);
+
+            let size = rd_u64(rec, off + 48);
+            let runs = parse_runs(&rec[off + run_off..off + alen]);
+            return Ok(FileStorage::Runs { runs, size });
         }
         Err(FsError::NotFound)
     }
-
 
     /// Размер безымянного $DATA без чтения содержимого.
     fn data_size(&self, rec: &[u8]) -> usize {
@@ -461,7 +478,7 @@ impl NtfsFs {
             if runs.is_empty() { continue; }
 
             let real_size = rd_u64(rec, off + 48) as usize;
-            if real_size == 0 || real_size > MAX_FILE_SIZE { continue; }
+            if real_size == 0 || real_size > MAX_INDEX_BYTES { continue; }
             if block_size < 512 || block_size > 65536 { block_size = 4096; }
 
             let mut buf = vec![0u8; real_size];
@@ -532,18 +549,50 @@ impl NtfsFs {
 }
 
 
-/// Открытый файл NTFS (данные в памяти).
+/// Открытый файл NTFS.
+///
+/// Данные не копируются при открытии: `cat`/`cp` читают файл порциями, поэтому
+/// файл любого размера не занимает кучу целиком. Мелкие resident-файлы
+/// (атрибут $DATA внутри записи MFT) по-прежнему держатся в памяти.
 pub struct NtfsFile {
-    data: Vec<u8>,
+    disk: Arc<Mutex<Box<dyn DiskIo>>>,
+    cluster_size: u64,
+    storage: FileStorage,
     position: u64,
+}
+
+enum FileStorage {
+    Resident(Vec<u8>),
+    Runs { runs: Vec<Run>, size: u64 },
+}
+
+impl NtfsFile {
+    fn len(&self) -> u64 {
+        match &self.storage {
+            FileStorage::Resident(data) => data.len() as u64,
+            FileStorage::Runs { size, .. } => *size,
+        }
+    }
 }
 
 impl File for NtfsFile {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, FsError> {
-        let pos = self.position as usize;
-        if pos >= self.data.len() { return Ok(0); }
-        let n = buf.len().min(self.data.len() - pos);
-        buf[..n].copy_from_slice(&self.data[pos..pos + n]);
+        let size = self.len();
+        if self.position >= size || buf.is_empty() {
+            return Ok(0);
+        }
+        let n = buf.len().min((size - self.position) as usize);
+
+        match &self.storage {
+            FileStorage::Resident(data) => {
+                let pos = self.position as usize;
+                buf[..n].copy_from_slice(&data[pos..pos + n]);
+            }
+            FileStorage::Runs { runs, .. } => {
+                read_runs_into(&self.disk, self.cluster_size, runs, self.position, &mut buf[..n])?;
+            }
+        }
+
         self.position += n as u64;
         Ok(n)
     }
@@ -551,10 +600,11 @@ impl File for NtfsFile {
     fn write(&mut self, _buf: &[u8]) -> Result<usize, FsError> { Err(FsError::ReadOnly) }
 
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, FsError> {
+        let size = self.len() as i64;
         let new = match pos {
             SeekFrom::Start(o) => o as i64,
             SeekFrom::Current(o) => self.position as i64 + o,
-            SeekFrom::End(o) => self.data.len() as i64 + o,
+            SeekFrom::End(o) => size + o,
         };
         if new < 0 { return Err(FsError::InvalidPath); }
         self.position = new as u64;
@@ -562,7 +612,7 @@ impl File for NtfsFile {
     }
 
     fn position(&self) -> u64 { self.position }
-    fn size(&self) -> usize { self.data.len() }
+    fn size(&self) -> usize { self.len() as usize }
 }
 
 impl FileSystem for NtfsFs {
@@ -574,8 +624,13 @@ impl FileSystem for NtfsFs {
     fn open(&self, path: &str) -> Result<Box<dyn File>, FsError> {
         let rec = self.find_path(path)?;
         if rd_u16(&rec, 22) & 0x2 != 0 { return Err(FsError::IsADirectory); }
-        let data = self.file_data(&rec)?;
-        Ok(Box::new(NtfsFile { data, position: 0 }))
+        let storage = self.file_storage(&rec)?;
+        Ok(Box::new(NtfsFile {
+            disk: self.disk.clone(),
+            cluster_size: self.cluster_size(),
+            storage,
+            position: 0,
+        }))
     }
 
     fn create(&mut self, _path: &str) -> Result<Box<dyn File>, FsError> { Err(FsError::ReadOnly) }

@@ -10,6 +10,7 @@ use super::vfs::FsError;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use alloc::format;
 use spin::Mutex;
@@ -188,12 +189,20 @@ fn kind_from_mbr(ptype: u8) -> PartKind {
     }
 }
 
+/// Прочитать MBR/EBR по LBA устройства (не по 512-байтному смещению).
+///
+/// На 4Kn-диске LBA из таблицы разделов — это номер 4096-байтного блока,
+/// поэтому читать нужно через `read_lba`, иначе таблица берётся не с того
+/// места.
 fn read_mbr_sector(disk: &mut dyn DiskIo, lba: u64) -> Option<[u8; 512]> {
-    let mut sector = [0u8; 512];
-    disk.read(lba, &mut sector).ok()?;
-    if sector[510] != 0x55 || sector[511] != 0xAA {
+    let ss = disk.sector_size().max(512);
+    let mut buf = vec![0u8; ss];
+    disk.read_lba(lba, &mut buf).ok()?;
+    if buf[510] != 0x55 || buf[511] != 0xAA {
         return None;
     }
+    let mut sector = [0u8; 512];
+    sector.copy_from_slice(&buf[..512]);
     Some(sector)
 }
 
@@ -208,6 +217,9 @@ fn mbr_entry(sector: &[u8], index: usize) -> (u8, u64, u64) {
 fn parse_mbr(disk: &mut dyn DiskIo, sector0: &[u8]) -> Option<Vec<Partition>> {
     let mut parts = Vec::new();
     let mut extended_start: Option<u64> = None;
+    // MBR адресует логические сектора устройства. Внутри ядра разделы живут
+    // в 512-байтных единицах, поэтому на 4Kn умножаем на 8 — как в GPT.
+    let ratio = (disk.sector_size().max(512) / 512).max(1) as u64;
 
     for i in 0..4usize {
         let (ptype, start, sectors) = mbr_entry(sector0, i);
@@ -227,8 +239,8 @@ fn parse_mbr(disk: &mut dyn DiskIo, sector0: &[u8]) -> Option<Vec<Partition>> {
 
         parts.push(Partition {
             index: (i + 1) as u8,
-            start_lba: start,
-            sectors,
+            start_lba: start.saturating_mul(ratio),
+            sectors: sectors.saturating_mul(ratio),
             kind: kind_from_mbr(ptype),
             label: String::new(),
         });
@@ -249,8 +261,10 @@ fn parse_mbr(disk: &mut dyn DiskIo, sector0: &[u8]) -> Option<Vec<Partition>> {
             if ptype != 0 && sectors != 0 {
                 parts.push(Partition {
                     index: logical_index,
-                    start_lba: ebr_lba.checked_add(rel_start)?,
-                    sectors,
+                    start_lba: ebr_lba
+                        .checked_add(rel_start)?
+                        .saturating_mul(ratio),
+                    sectors: sectors.saturating_mul(ratio),
                     kind: kind_from_mbr(ptype),
                     label: String::new(),
                 });
@@ -432,6 +446,20 @@ pub fn detect_fs_type(disk: &mut dyn DiskIo) -> &'static str {
 
     // FAT32: сигнатура 0x55AA + "FAT32" в поле типа ФС (offset 82).
     if s[510] == 0x55 && s[511] == 0xAA && &s[82..87] == b"FAT32" { return "fat32"; }
+
+    // Раздел-таблица без ФС: показываем её тип, а не "unknown". Раньше
+    // `disks` писал `unknown` для диска с GPT/MBR, и было непонятно, что
+    // монтировать нужно раздел (`sdb1`), а не сам диск.
+    if s[510] == 0x55 && s[511] == 0xAA {
+        let protective = (0..4).any(|i| s[446 + i * 16 + 4] == 0xEE);
+        if protective {
+            return "gpt";
+        }
+        let has_partition = (0..4).any(|i| s[446 + i * 16 + 4] != 0);
+        if has_partition {
+            return "mbr";
+        }
+    }
 
     // ext2/3/4: магия 0xEF53 в суперблоке (смещение 1024 + 56).
     if u16::from_le_bytes([s[1024 + 56], s[1024 + 57]]) == 0xEF53 {

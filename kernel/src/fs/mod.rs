@@ -539,6 +539,8 @@ fn mount_auto_mode(path: &str, disk_id: usize, write: bool) -> Result<&'static s
             Ok("ntfs")
         }
         "exfat" => Err(FsError::NotSupported),
+        // Таблица разделов: монтировать нужно раздел, а не диск целиком.
+        "gpt" | "mbr" => Err(FsError::NotFound),
         _ => Err(FsError::NotSupported),
     }
 }
