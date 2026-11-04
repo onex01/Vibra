@@ -4,6 +4,7 @@ pub mod ramfs;
 pub mod fat32;
 pub mod ext2;
 pub mod ntfs;
+pub mod exfat;
 pub mod disk;
 pub mod partition;
 pub mod blockdev;
@@ -17,6 +18,7 @@ pub use ramfs::RamFs;
 pub use fat32::Fat32Fs;
 pub use ext2::Ext2Fs;
 pub use ntfs::NtfsFs;
+pub use exfat::ExfatFs;
 pub use disk::DiskIo;
 pub use disk_manager::DiskManager;
 
@@ -473,6 +475,13 @@ pub fn mount_ntfs(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
     mount_fs(path, Box::new(ntfs), true)
 }
 
+/// Смонтировать exFAT (только чтение).
+pub fn mount_exfat(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
+    let mut exfat = ExfatFs::new(disk)?;
+    exfat.mount()?;
+    mount_fs(path, Box::new(exfat), true)
+}
+
 /// Смонтировать раздел/диск из реестра, определив ФС автоматически.
 ///
 /// Возвращает имя смонтированной ФС (`"fat32"`, `"ext2"`, `"ntfs"`).
@@ -538,7 +547,15 @@ fn mount_auto_mode(path: &str, disk_id: usize, write: bool) -> Result<&'static s
             mount_fs(path, Box::new(fs), true)?;
             Ok("ntfs")
         }
-        "exfat" => Err(FsError::NotSupported),
+        "exfat" => {
+            if write {
+                return Err(FsError::ReadOnly);
+            }
+            let mut fs = ExfatFs::new(disk)?;
+            fs.mount()?;
+            mount_fs(path, Box::new(fs), true)?;
+            Ok("exfat")
+        }
         // FAT12/16 не поддерживаются: драйвер работает только с FAT32.
         "fat12" | "fat16" => Err(FsError::NotSupported),
         // Таблица разделов: монтировать нужно раздел, а не диск целиком.

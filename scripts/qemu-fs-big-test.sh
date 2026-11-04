@@ -29,6 +29,7 @@ QEMU="${QEMU:-qemu-system-x86_64}"
 big2t="$log_dir/fs-big-2t.img"
 fat16="$log_dir/fs-big-fat16.img"
 labelfs="$log_dir/fs-big-label.img"
+exfat="$log_dir/fs-big-exfat.img"
 gpt3t="$log_dir/fs-big-gpt3t.img"
 mbr4k="$log_dir/fs-big-mbr4k.img"
 
@@ -46,7 +47,7 @@ for file in "$hdd" "$repo_root/OVMF.fd"; do
 done
 
 cleanup() {
-    rm -f "$big2t" "$gpt3t" "$mbr4k" "$fat16" "$labelfs"
+    rm -f "$big2t" "$gpt3t" "$mbr4k" "$fat16" "$labelfs" "$exfat"
 }
 trap cleanup EXIT
 
@@ -248,6 +249,9 @@ truncate -s 64M "$labelfs"
 mkfs.fat -F 32 -n LABELVOL "$labelfs" >/dev/null
 printf 'hello from label\n' > "$log_dir/fs-big-label.txt"
 mcopy -i "$labelfs" "$log_dir/fs-big-label.txt" ::/LABEL.TXT
+
+echo "==> Preparing exFAT fixture (contiguous + FAT-chained files)"
+python3 "$repo_root/scripts/mk-exfat-fixture.py" "$exfat" 64 >/dev/null
 
 echo "==> Preparing FAT16 volume (must be detected, not mounted)"
 truncate -s 64M "$fat16"

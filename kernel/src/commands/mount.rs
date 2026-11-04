@@ -150,12 +150,6 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 );
                 return CmdResult::Ok;
             }
-            if detected == Some("exfat") {
-                console.print_colored("SKIPPED (exFAT is not supported)\n", COLOR_RED);
-                console.print_colored("  Use a FAT32/NTFS volume or convert the disk.\n", COLOR_YELLOW);
-                return CmdResult::Ok;
-            }
-
             // Запись на физический носитель — только по явному `rw`.
             let write = args.iter().skip(3).any(|a| *a == "rw");
 
@@ -192,10 +186,10 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                     Some(disk) => fs::mount_ntfs(path, disk).map(|_| format!("OK (ntfs, ro)")),
                     None => Err(fs::FsError::NotFound),
                 },
-                "exfat" => {
-                    console.print_colored("not supported: exFAT (use FAT32/NTFS)\n", COLOR_RED);
-                    return CmdResult::Ok;
-                }
+                "exfat" => match fs::get_disk_manager().lock().open(disk_id) {
+                    Some(disk) => fs::mount_exfat(path, disk).map(|_| format!("OK (exfat, ro)")),
+                    None => Err(fs::FsError::NotFound),
+                },
                 _ => {
                     console.print_colored(&format!("unknown type '{}'\n", fs_type), COLOR_RED);
                     return CmdResult::Ok;

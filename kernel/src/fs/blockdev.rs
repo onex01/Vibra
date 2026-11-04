@@ -288,6 +288,18 @@ fn fat_label(disk: &mut dyn DiskIo) -> alloc::string::String {
     alloc::string::String::from(text)
 }
 
+/// Метка тома для известного типа ФС.
+///
+/// FAT хранит её в BPB (смещение 0x47), exFAT — записью 0x83 в корневом
+/// каталоге, у остальных ФС метки нет.
+fn fs_label(disk: &mut dyn DiskIo, fs: &str) -> alloc::string::String {
+    match fs {
+        "fat12" | "fat16" | "fat32" => fat_label(disk),
+        "exfat" => super::exfat::volume_label(disk).unwrap_or_default(),
+        _ => alloc::string::String::new(),
+    }
+}
+
 struct DiskMeta<'a> {
     driver: &'static str,
     model: &'a str,
@@ -308,7 +320,7 @@ fn register(
     let (disk_fs, disk_label) = {
         let mut view = SharedDisk::new(shared.clone());
         let fs = detect_fs_type(&mut view);
-        let label = fat_label(&mut view);
+        let label = fs_label(&mut view, fs);
         (fs, label)
     };
 
@@ -340,7 +352,7 @@ fn register(
             let mut win =
                 super::partition::PartitionDisk::new(shared.clone(), p.start_lba, p.sectors);
             let fs = detect_fs_type(&mut win);
-            let label = fat_label(&mut win);
+            let label = fs_label(&mut win, fs);
             (fs, label)
         };
         // GPT-имя приоритетнее метки FAT: пользователь задаёт его при

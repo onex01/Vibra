@@ -15,7 +15,7 @@
 | `make ro-mount-test` | FAT32 read-only по умолчанию, запись только с `rw` | qemu, mtools, dosfstools |
 | `make bad-fs-test` | битые FAT32/ext2/NTFS/MBR не роняют ядро | qemu, python3 |
 | `make nvme-test` | NVMe Identify/queues, 32K-кластеры, файл 200K, `diag heap-check` | qemu, mtools |
-| `make big-fs-test` | NTFS 2 ТБ, GPT-раздел за 2 ТБ, MBR на 4Kn | qemu, ntfs-3g, python3 |
+| `make big-fs-test` | NTFS 2 ТБ, GPT-раздел за 2 ТБ, MBR на 4Kn, exFAT по метке, FAT16-диагностика | qemu, ntfs-3g, mtools, python3 |
 | `make shell-test` | Tab, история, `help`, `diag timer`, отсутствие битого prompt | qemu, mtools |
 | `make fs-test` | FAT32/ext2/ext4/NTFS read-only и MBR-раздел | qemu, mtools, e2fsprogs, ntfs-3g, util-linux |
 | `make vktst-test` | `vktst run all`, `free`, `top -b`, `tree` из `/proc` | qemu, mtools |
@@ -53,7 +53,16 @@ BOOT_ITERATIONS=100 python3 scripts/qemu-boot-matrix.py
 
 На CI без KVM QEMU работает через TCG, поэтому таймауты заданы с запасом:
 `SMOKE_TIMEOUT`, `BOOT_TIMEOUT`, `RAMFS_TEST_TIMEOUT`, `RO_MOUNT_TEST_TIMEOUT`,
-`BAD_FS_TEST_TIMEOUT`, `NVME_TEST_TIMEOUT`, `BIG_FS_TEST_TIMEOUT`, `SHELL_TEST_TIMEOUT`, `FS_TEST_TIMEOUT`, `KEYBOARD_TEST_TIMEOUT`.
+`BAD_FS_TEST_TIMEOUT`, `NVME_TEST_TIMEOUT`, `BIG_FS_TEST_TIMEOUT`
+
+## exFAT-фикстура
+
+`mkfs.exfat` умеет только форматировать том, а положить в него файлы без
+root и loop-устройства нечем. Поэтому `scripts/mk-exfat-fixture.py` собирает
+образ вручную: boot sector с checksum, FAT, cluster heap, entry set
+`0x85`+`0xC0`+`0xC1`, метка `0x83`. В образе есть contiguous-файл,
+подкаталог и файл из двух кластеров через FAT — так проверяется и разбор
+каталога, и порядок цепочки., `SHELL_TEST_TIMEOUT`, `FS_TEST_TIMEOUT`, `KEYBOARD_TEST_TIMEOUT`.
 
 ## Что считается регрессией
 
