@@ -269,6 +269,25 @@ fn probe_usb(mgr: &mut DiskManager, first_index: usize) -> usize {
 }
 
 /// Регистрирует диск и его разделы. Возвращает число добавленных записей.
+/// Метка тома из BPB FAT (смещение 0x47, 11 байт, добита пробелами).
+///
+/// Читается только если сектор похож на FAT: иначе для NTFS/ISO вернётся
+/// пустая строка, и в `disks` не появится мусор.
+fn fat_label(disk: &mut dyn DiskIo) -> alloc::string::String {
+    let mut s = [0u8; 512];
+    if disk.read(0, &mut s).is_err() { return alloc::string::String::new(); }
+    if s[510] != 0x55 || s[511] != 0xAA {
+        return alloc::string::String::new();
+    }
+    let bps = u16::from_le_bytes([s[11], s[12]]);
+    if !matches!(bps, 512 | 1024 | 2048 | 4096) {
+        return alloc::string::String::new();
+    }
+    let raw = &s[71..82];
+    let text = core::str::from_utf8(raw).unwrap_or("").trim();
+    alloc::string::String::from(text)
+}
+
 struct DiskMeta<'a> {
     driver: &'static str,
     model: &'a str,
@@ -286,9 +305,11 @@ fn register(
     let mut added = 0usize;
 
     // Тип ФС самого диска (актуально для «superfloppy» без таблицы).
-    let disk_fs = {
+    let (disk_fs, disk_label) = {
         let mut view = SharedDisk::new(shared.clone());
-        detect_fs_type(&mut view)
+        let fs = detect_fs_type(&mut view);
+        let label = fat_label(&mut view);
+        (fs, label)
     };
 
     mgr.add_entry(DiskEntry {
@@ -301,6 +322,7 @@ fn register(
         model: alloc::string::String::from(meta.model),
         serial: alloc::string::String::from(meta.serial),
         sector_size: meta.sector_size.max(512),
+        label: disk_label,
         disk: shared.clone(),
     });
     added += 1;
@@ -312,13 +334,18 @@ fn register(
 
     for p in parts {
         let name = part_name(disk_name, p.index);
-        let fs_type = {
+        let (fs_type, win_label) = {
             // detect_fs_type читает сектор 0 окна, поэтому нужен сдвиг —
             // делаем отдельное окно через PartitionDisk.
             let mut win =
                 super::partition::PartitionDisk::new(shared.clone(), p.start_lba, p.sectors);
-            detect_fs_type(&mut win)
+            let fs = detect_fs_type(&mut win);
+            let label = fat_label(&mut win);
+            (fs, label)
         };
+        // GPT-имя приоритетнее метки FAT: пользователь задаёт его при
+        // разметке, и оно не зависит от ФС внутри.
+        let label = if !p.label.is_empty() { p.label.clone() } else { win_label };
 
         crate::println!(
             "[BLK] {}: {} МиБ, тип {}, ФС {}",
@@ -338,6 +365,7 @@ fn register(
             model: alloc::string::String::from(meta.model),
             serial: alloc::string::String::from(meta.serial),
             sector_size: meta.sector_size.max(512),
+            label,
             disk: shared.clone(),
         });
         added += 1;

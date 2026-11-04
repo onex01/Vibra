@@ -36,6 +36,8 @@ pub struct DiskEntry {
     pub serial: String,
     /// Размер логического сектора устройства (512 или 4096).
     pub sector_size: usize,
+    /// Метка тома (FAT `LABEL` из BPB) или GPT-имя раздела.
+    pub label: String,
     /// Общее устройство ввода-вывода.
     pub disk: Arc<Mutex<Box<dyn DiskIo>>>,
 }
@@ -92,6 +94,13 @@ impl DiskManager {
     /// Найти индекс по имени (`sda1`).
     pub fn find_by_name(&self, name: &str) -> Option<usize> {
         self.disks.iter().position(|e| e.name == name)
+    }
+
+    /// Найти устройство по метке тома (`LABEL=VIBRALOG`).
+    pub fn find_by_label(&self, label: &str) -> Option<usize> {
+        self.disks
+            .iter()
+            .position(|e| !e.label.is_empty() && e.label.eq_ignore_ascii_case(label))
     }
 
     /// Количество дисков

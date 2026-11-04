@@ -29,6 +29,10 @@ qemu_key() {
         '-') echo "minus" ;;
         '.') echo "dot" ;;
         '/') echo "slash" ;;
+        # Заглавные буквы — через shift. Раньше QEMU-тесты обходили их
+        # стороной, и залипание Shift (break-код 0xAA отбрасывался как
+        # «self-test OK») оставалось незамеченным.
+        [A-Z]) printf 'shift-%s\n' "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" ;;
         *) echo "$1" ;;
     esac
 }
@@ -65,6 +69,15 @@ run_case() {
         send_text "echo kbd-ok"
         send_text $'\n'
         sleep 1
+        # Регрессия Shift — только PS/2: QEMU отдаёт usb-kbd события через
+        # hid_keyboard_process_keycode, который не переносит модификатор в
+        # отчёт, поэтому shift-m приходит как обычная 'm'. На реальном
+        # USB-HID модификатор приходит в report[0], и драйвер его разбирает.
+        if [[ "$name" == "ps2" ]]; then
+            send_text "echo MiXeD"
+            send_text $'\n'
+            sleep 1
+        fi
         send_text "diag keyboard"
         send_text $'\n'
         sleep 3
@@ -84,6 +97,10 @@ run_case() {
     local failed=0
     if ! grep -q 'kbd-ok' "$serial_log"; then
         echo "  FAIL: команда, набранная с клавиатуры, не выполнилась"
+        failed=1
+    fi
+    if [[ "$name" == "ps2" ]] && ! grep -Fq 'MiXeD' "$serial_log"; then
+        echo "  FAIL: раскладка/Shift врут — ожидалось MiXeD (Shift залипает?)"
         failed=1
     fi
     if [[ "$name" == "usb" ]] && ! grep -q 'HID keyboard ready' "$serial_log"; then

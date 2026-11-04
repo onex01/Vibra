@@ -29,11 +29,13 @@
 |---|---|
 | `disks [-v]` | блочные устройства и разделы: имя, тип, размер, смещение, ФС |
 | `mount` | список точек монтирования и устройств |
+| `disks [-v]` | диски, разделы, ФС, метки; `-v` — драйвер, модель, сектор |
 | `mount <path> auto <dev>` | определить ФС по сигнатуре (read-only) |
 | `mount <path> fat32 <dev> [rw]` | FAT32; запись только с явным `rw` |
 | `mount <path> ext4 <dev>` | ext2/3/4, только чтение |
 | `mount <path> ntfs <dev>` | NTFS, только чтение |
 | `mount <path> ramfs` | смонтировать RAMFS |
+| `mount <path> auto LABEL=<метка>` | найти том по метке (`LABEL=VIBRALOG`) |
 | `mount /dev/sdb1 /mnt [rw]` | Linux-подобная форма |
 | `umount <path>` / `umount -a` | размонтировать точку (корень `/` защищён) |
 | `sync` | сбросить метаданные ФС и boot/shell-журналы |

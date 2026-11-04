@@ -9,6 +9,10 @@ use crate::fs::FileSystem;
 fn parse_disk_id(arg: &str) -> Option<usize> {
     if let Ok(id) = arg.parse::<usize>() { return Some(id); }
     let mgr = fs::get_disk_manager().lock();
+    // `LABEL=VIBRALOG` — поиск по метке тома/раздела.
+    if let Some(label) = arg.strip_prefix("LABEL=") {
+        return mgr.find_by_label(label);
+    }
     mgr.find_by_name(arg)
 }
 
@@ -55,6 +59,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print("  mount <path> ntfs <disk_id|name>     - mount NTFS (read-only)\n");
         console.print("  mount <path> ramfs                   - mount RAMFS\n");
         console.print("  mount /dev/sdX1 /mnt [rw]            - Linux-style alias\n");
+        console.print("  mount /mnt auto LABEL=VIBRALOG       - by volume label\n");
         console.print("\n");
         console.print_colored("Write access to physical media is opt-in: pass 'rw' explicitly.\n", COLOR_YELLOW);
         return CmdResult::Ok;

@@ -28,10 +28,11 @@ QEMU="${QEMU:-qemu-system-x86_64}"
 
 big2t="$log_dir/fs-big-2t.img"
 fat16="$log_dir/fs-big-fat16.img"
+labelfs="$log_dir/fs-big-label.img"
 gpt3t="$log_dir/fs-big-gpt3t.img"
 mbr4k="$log_dir/fs-big-mbr4k.img"
 
-for tool in "$QEMU" mkntfs ntfscp python3; do
+for tool in "$QEMU" mkntfs ntfscp mcopy mkfs.fat python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "missing required tool: $tool" >&2
         exit 127
@@ -45,7 +46,7 @@ for file in "$hdd" "$repo_root/OVMF.fd"; do
 done
 
 cleanup() {
-    rm -f "$big2t" "$gpt3t" "$mbr4k" "$fat16"
+    rm -f "$big2t" "$gpt3t" "$mbr4k" "$fat16" "$labelfs"
 }
 trap cleanup EXIT
 
@@ -153,6 +154,8 @@ qemu_key() {
         '/') echo "slash" ;;
         '.') echo "dot" ;;
         '-') echo "minus" ;;
+        '=') echo "equal" ;;
+        [A-Z]) printf 'shift-%s\n' "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" ;;
         *) echo "$1" ;;
     esac
 }
@@ -172,6 +175,8 @@ qemu_key() {
         '/') echo "slash" ;;
         '.') echo "dot" ;;
         '-') echo "minus" ;;
+        '=') echo "equal" ;;
+        [A-Z]) printf 'shift-%s\n' "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" ;;
         *) echo "$1" ;;
     esac
 }
@@ -237,6 +242,12 @@ run_case() {
         fail "fatal message while checking $expect"
     fi
 }
+
+echo "==> Preparing FAT32 volume with a label (mount by LABEL=)"
+truncate -s 64M "$labelfs"
+mkfs.fat -F 32 -n LABELVOL "$labelfs" >/dev/null
+printf 'hello from label\n' > "$log_dir/fs-big-label.txt"
+mcopy -i "$labelfs" "$log_dir/fs-big-label.txt" ::/LABEL.TXT
 
 echo "==> Preparing FAT16 volume (must be detected, not mounted)"
 truncate -s 64M "$fat16"

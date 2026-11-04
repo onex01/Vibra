@@ -12,11 +12,11 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
 
     let mgr = crate::fs::get_disk_manager().lock();
 
-    console.print_colored("NAME      TYPE       SIZE      OFFSET     FS\n", COLOR_CYAN);
+    console.print_colored("NAME      TYPE       SIZE      OFFSET     FS        LABEL\n", COLOR_CYAN);
     // Только ASCII: символы U+2500 нет в шрифте консоли, и строка
     // разделителя рисовалась пустой.
     console.print_colored(
-        "--------  ---------  --------  ---------  ------------\n",
+        "--------  ---------  --------  ---------  --------  ----------------\n",
         COLOR_DARK_GRAY,
     );
 
@@ -53,6 +53,10 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
             "unknown" => console.print_colored(entry.fs_type, COLOR_RED),
             "exfat" | "fat12" | "fat16" => console.print_colored(entry.fs_type, COLOR_YELLOW),
             _ => console.print_colored(entry.fs_type, COLOR_GREEN),
+        }
+        if !entry.label.is_empty() {
+            console.print("  ");
+            console.print_colored(&entry.label, COLOR_CYAN);
         }
         console.put_char('\n');
 

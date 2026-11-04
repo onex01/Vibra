@@ -124,9 +124,12 @@ impl KeyboardState {
         loop {
             let sc = self.pop_scancode()?;
             match sc {
-                KBD_ACK | KBD_RESEND | KBD_ECHO | KBD_SELF_TEST_OK | KBD_OVERRUN | KBD_ERROR => {
-                    continue;
-                }
+                KBD_ACK | KBD_RESEND | KBD_ECHO | KBD_OVERRUN | KBD_ERROR => continue,
+                // 0xAA — это и «self-test passed» (set 2), и break-код левого
+                // Shift в set 1. Отбрасывать его можно только в set 2: в set 1
+                // каждое отпускание Shift пропадало, и модификатор «залипал»
+                // навсегда (`help` после заглавной буквы набирался как HELP).
+                KBD_SELF_TEST_OK if self.scan_set2 => continue,
                 _ => {}
             }
 
