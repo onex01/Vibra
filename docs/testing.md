@@ -15,6 +15,8 @@
 | `make ro-mount-test` | FAT32 read-only по умолчанию, запись только с `rw` | qemu, mtools, dosfstools |
 | `make bad-fs-test` | битые FAT32/ext2/NTFS/MBR не роняют ядро | qemu, python3 |
 | `make nvme-test` | NVMe Identify/queues, 32K-кластеры, файл 200K, `diag heap-check` | qemu, mtools |
+| `make noserial-test` | загрузка без COM1 (`-serial none`) до shell по debugcon-маркерам | qemu |
+| `make serial-input-test` | ввод через COM1 (`-serial stdio`), а не через monitor | qemu |
 | `make iso-test` | ISO9660 с CD-ROM (ATAPI), Joliet/Rock Ridge, подкаталог | qemu, genisoimage |
 | `make big-fs-test` | NTFS 2 ТБ, GPT-раздел за 2 ТБ, MBR на 4Kn, exFAT по метке, FAT16-диагностика | qemu, ntfs-3g, mtools, python3 |
 | `make shell-test` | Tab, история, `help`, `diag timer`, отсутствие битого prompt | qemu, mtools |
@@ -41,6 +43,8 @@ make check
 ./build.sh nvme-test
 ./build.sh big-fs-test
 ./build.sh iso-test
+./build.sh noserial-test
+./build.sh serial-input-test
 ./build.sh shell-test
 ./build.sh fs-test
 ./build.sh vktst-test

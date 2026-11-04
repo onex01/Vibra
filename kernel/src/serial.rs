@@ -112,7 +112,14 @@ pub fn is_present() -> bool {
 #[cfg(feature = "serial-debug")]
 pub fn handle_interrupt() {
     unsafe {
-        while inb(LINE_STATUS) & DATA_READY != 0 {
+        // Ограниченный цикл: при отсутствующем/сбойном UART LSR читается как
+        // 0xFF и DATA_READY всегда «установлен», поэтому `while` здесь мог
+        // не завершиться прямо в обработчике прерывания.
+        for _ in 0..RX_POLL_BUDGET {
+            let status = inb(LINE_STATUS);
+            if status == 0xFF || status & DATA_READY == 0 {
+                break;
+            }
             let byte = inb(RX_DATA);
             push_byte(byte);
         }
@@ -214,15 +221,38 @@ pub fn debugcon_println(args: core::fmt::Arguments) {
     unsafe { outb(0xE9, b'\n'); }
 }
 
+/// Сколько байт максимум забираем из UART за один опрос.
+///
+/// Без ограничения поток байтов, которых нет в раскладке (например, 0xFF
+/// от отсутствующего порта), держит `poll_key()` в бесконечном цикле.
+#[cfg(feature = "serial-debug")]
+const RX_POLL_BUDGET: usize = 64;
+
 #[cfg(feature = "serial-debug")]
 fn try_read_byte() -> Option<u8> {
     // Сначала проверяем ring buffer (IRQ4 driven)
     if let Some(b) = pop_byte() {
         return Some(b);
     }
-    // Fallback: polling (если IRQ4 не работает)
+    // Без живого UART порт 0x3F8 не декодируется и читается как 0xFF, то есть
+    // LSR.DR (бит 0) всегда 1, а RX_DATA всегда 0xFF. Раньше здесь доверяли
+    // только LSR: `try_read_byte()` бесконечно возвращал Some(0xFF),
+    // `decode_serial_byte(0xFF)` возвращал None, и `poll_key()` крутился
+    // вечно. Первый вызов идёт из heap_stress -> poll_input, поэтому ядро
+    // вставало на строке `[BOOT] Step 4: Heap stress` — ровно как на
+    // ноутбуке без COM-порта.
+    if !SERIAL_PRESENT.load(Ordering::Relaxed) {
+        return None;
+    }
     unsafe {
-        if inb(LINE_STATUS) & DATA_READY != 0 {
+        let status = inb(LINE_STATUS);
+        if status == 0xFF {
+            // Устройство пропало после loopback-пробы: больше не опрашиваем,
+            // иначе снова получим поток 0xFF.
+            SERIAL_PRESENT.store(false, Ordering::Relaxed);
+            return None;
+        }
+        if status & DATA_READY != 0 {
             Some(inb(RX_DATA))
         } else {
             None
@@ -232,11 +262,17 @@ fn try_read_byte() -> Option<u8> {
 
 #[cfg(feature = "serial-debug")]
 pub fn poll_key() -> Option<crate::keyboard::Key> {
-    loop {
-        if let Some(key) = decode_serial_byte(try_read_byte()?) {
+    // Бюджет байт на вызов: даже если UART выдаёт непрерывный поток мусора,
+    // управление вернётся к вызывающему, а не зависнет здесь.
+    for _ in 0..RX_POLL_BUDGET {
+        let Some(byte) = try_read_byte() else {
+            return None;
+        };
+        if let Some(key) = decode_serial_byte(byte) {
             return Some(key);
         }
     }
+    None
 }
 
 #[cfg(feature = "serial-debug")]

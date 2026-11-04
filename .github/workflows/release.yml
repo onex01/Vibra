@@ -55,13 +55,23 @@ jobs:
 
       - name: Compute version, tag and release policy
         id: vars
+        # Значения из события передаются через env, а не подставляются в текст
+        # скрипта: сообщение коммита и ручной input могут содержать кавычки,
+        # бэктики или $(...), и тогда shell-скрипт сломался бы (или выполнил
+        # бы это).
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+          FORCE_INPUT: ${{ github.event.inputs.force }}
         run: |
           set -euo pipefail
           version="$(sed -n 's/^pub const KERNEL_VERSION: &str = "\(.*\)";/\1/p' kernel/src/version.rs)"
           codename="$(sed -n 's/^pub const KERNEL_CODENAME: &str = "\(.*\)";/\1/p' kernel/src/version.rs)"
           [[ -n "$version" ]] || { echo "cannot read KERNEL_VERSION" >&2; exit 1; }
 
-          tag="${{ github.event.inputs.tag }}"
+          tag="$TAG_INPUT"
           [[ -n "$tag" ]] || tag="v$version"
 
           # rc/beta/alpha — предварительный релиз.
@@ -75,10 +85,10 @@ jobs:
           #   dispatch — всегда собираем;
           #   main     — только если такого тега ещё нет и нет `[skip release]`.
           should_release=true
-          case "${{ github.event_name }}" in
+          case "$EVENT_NAME" in
             push)
-              if [[ "${{ github.ref_type }}" != "tag" ]]; then
-                if grep -qF '[skip release]' <<< "${{ github.event.head_commit.message }}"; then
+              if [[ "$REF_TYPE" != "tag" ]]; then
+                if grep -qF '[skip release]' <<< "${HEAD_MESSAGE:-}"; then
                   echo "release skipped: [skip release] in the commit message"
                   should_release=false
                 elif git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
@@ -88,7 +98,7 @@ jobs:
               fi
               ;;
           esac
-          if [[ "${{ github.event.inputs.force }}" == "true" ]]; then
+          if [[ "$FORCE_INPUT" == "true" ]]; then
             should_release=true
           fi
 

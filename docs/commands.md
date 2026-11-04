@@ -55,6 +55,14 @@ contiguous-файлы и каталоги. Запись не реализова�
 FAT12/FAT16 не поддерживаются — драйвер работает только с FAT32; `mount`
 сообщает об этом явно, а `disks` показывает реальный тип тома.
 
+## Машина без COM1
+
+Если `[BOOT] COM1: absent — serial output disabled`, serial-лога не будет:
+ядро пишет только в framebuffer и в boot-лог на носителе. В QEMU независимый
+канал даёт debugcon (`-debugcon file:log.txt -global isa-debugcon.iobase=0xe9`),
+куда идут маркеры шагов загрузки; на реальной машине смотрите экран и
+`/VIBRA.LOG` на разделе `VIBRALOG` (debug-образ).
+
 ## Диагностика
 
 | Команда | Описание |

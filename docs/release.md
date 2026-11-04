@@ -5,8 +5,8 @@
 Единственный источник версии — `kernel/src/version.rs`:
 
 ```rust
-pub const KERNEL_VERSION: &str = "0.2.0-rc.14";
-pub const KERNEL_CODENAME: &str = "Foundation RC14";
+pub const KERNEL_VERSION: &str = "0.2.0-rc.15";
+pub const KERNEL_CODENAME: &str = "Foundation RC15";
 ```
 
 `Makefile` читает `KERNEL_VERSION` из этого файла, `kernel/build.rs` добавляет

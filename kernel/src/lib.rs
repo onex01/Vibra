@@ -92,6 +92,16 @@ pub fn poll_input() {
 #[inline]
 fn halt() { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
 
+/// Отметка хода загрузки на debugcon (порт 0xE9).
+///
+/// Нужна машинам без COM1: serial-лог там недоступен, а экран не всегда
+/// можно снять. В QEMU `-debugcon file:...` даёт независимый канал, по
+/// которому тест видит, до какого шага дошло ядро.
+#[inline]
+pub fn boot_marker(text: &str) {
+    crate::serial::debugcon_println(format_args!("[BOOT] {}", text));
+}
+
 /// Текущий RSP — VMM проверяет, что стек остаётся отображённым после смены CR3.
 #[inline]
 fn current_stack_pointer() -> u64 {
@@ -198,8 +208,10 @@ pub fn init() -> BootConsole {
     // Куча готова — включаем RAM-тень текстовой сетки консоли.
     framebuffer::after_heap_init();
 
+    boot_marker("step 4: heap stress");
     println!("[BOOT] Step 4: Heap stress");
     heap_stress();
+    boot_marker("step 4 done");
     boot_log::checkpoint();
 
     println!("[BOOT] Step 5: ACPI");
@@ -351,6 +363,7 @@ pub static LINE_EDITOR: Mutex<shell::LineEditor> = Mutex::new(shell::LineEditor:
 /// Vibra может вызвать init() + shell_loop() или написать свой loop.
 pub fn shell_loop(mut bc: BootConsole) -> ! {
     let mut console = bc.console;
+    boot_marker("shell ready");
 
     // Boot закончен: с этого момента idle-цикл может дописывать лог на
     // носитель, но поиск приёмника троттлится, чтобы не блокировать ввод.
