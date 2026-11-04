@@ -2,7 +2,7 @@
 
 ## Область действия
 
-Vibra Kernel 0.2.0-rc.8 — экспериментальное модульное монолитное ядро для
+Vibra Kernel 0.2.0-rc.9 — экспериментальное модульное монолитное ядро для
 `x86_64-unknown-none`. Оно загружается Limine в UEFI и использует QEMU как
 основной тестовый стенд. Реальное оборудование пока не считается
 поддержанным; каждый драйвер должен получить отдельную hardware-валидацию.
@@ -82,13 +82,17 @@ CMOS), `diag apic`, `uptime`.
 | `drivers/usb` | xHCI lifecycle + HID boot keyboard | enumeration и HID-отчёты работают в QEMU |
 | `fs` | RamFS, VFS, block layer, FAT32 (rw для `VIBRALOG`), ext2/3/4 (ro), NTFS (ro) | block layer + MBR/EBR/GPT + ext4 extents работают в QEMU |
 | `drivers/ahci` | SATA + ATAPI CD | ATA read/write и ATAPI `PACKET`/`READ(10)` работают в QEMU |
+| `drivers/ide` | PATA/IDE (BIOS legacy) | только чтение, регистрируется в block layer |
+| `drivers/usb` | xHCI + UHCI + HID + mass storage | QEMU; EHCI/OHCI нет |
 | `commands` | shell-команды | `top` (htop-like), `vktst`, `tree`, `free` |
 | `net` | Ethernet/ARP/IPv4/ICMP | QEMU-ориентированный, без DHCP/TCP |
 
 ## Ограничения архитектуры
 
 - ARM64-код является заглушкой и не входит в сборку/поддержку.
-- DMA-контракт и ownership страниц ещё не унифицированы.
+- DMA-контракт и ownership страниц ещё не унифицированы, но адрес для
+  PRD/PRP уже берётся из таблиц страниц (`paging::dma_address`), а не
+  арифметикой `virt - hhdm`.
 - Нет единого driver lifecycle: AHCI/NVMe/ATAPI/xHCI инициализируются разными
   путями. Запись поддерживает только FAT32 (явный `rw`, используется для
   `VIBRALOG`); ext2/3/4 и NTFS — read-only.

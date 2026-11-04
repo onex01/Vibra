@@ -94,6 +94,15 @@ pub fn init() {
         IDT[8].set_handler_with_ist(isr_double_fault as *const () as u64, crate::gdt::DOUBLE_FAULT_IST_INDEX);
         IDT[13].set_handler(isr_general_protection as *const () as u64);
         IDT[14].set_handler(isr_page_fault as *const () as u64);
+        IDT[7].set_handler(isr_device_not_available as *const () as u64);
+        IDT[3].set_handler(isr_breakpoint as *const () as u64);
+        IDT[1].set_handler(isr_debug as *const () as u64);
+
+        // Остальные исключения: раньше их дескрипторы были `missing()`, и
+        // любое из них (#OF, #BR, #AC, #MC…) превращалось в #NP → #DF →
+        // triple fault без единой строки в логе. Теперь каждое печатает
+        // вектор и состояние, а пользовательский процесс убивается.
+        install_unexpected_handlers();
 
         // === Hardware IRQs (PIC primary + APIC ready) ===
         // Vector 32: PIC PIT timer (naked stub для context switch)
@@ -190,6 +199,148 @@ extern "x86-interrupt" fn isr_timer_apic(_frame: InterruptStackFrame) {
     crate::task::note_tick();
 }
 
+// ============ Необработанные исключения ============
+
+fn unexpected_name(vector: u8) -> &'static str {
+    match vector {
+        0 => "#DE divide error",
+        1 => "#DB debug",
+        3 => "#BP breakpoint",
+        4 => "#OF overflow",
+        5 => "#BR bound range",
+        6 => "#UD invalid opcode",
+        7 => "#NM device not available",
+        9 => "coprocessor segment overrun",
+        10 => "#TS invalid TSS",
+        11 => "#NP segment not present",
+        12 => "#SS stack fault",
+        15 => "reserved",
+        16 => "#MF x87 floating point",
+        17 => "#AC alignment check",
+        18 => "#MC machine check",
+        19 => "#XM SIMD floating point",
+        20 => "#VE virtualization",
+        21 => "#CP control protection",
+        22..=28 => "reserved",
+        29 => "#VC VMM communication",
+        30 => "#SX security",
+        31 => "reserved",
+        _ => "unknown",
+    }
+}
+
+/// Общая обработка исключения, для которого нет специального пути.
+///
+/// Из ring 3 убивает задачу (ядро продолжает работу), из ring 0 — печатает
+/// отчёт и останавливается: продолжать после неизвестного исключения нельзя.
+fn unexpected_exception(vector: u8, frame: &InterruptStackFrame, error_code: Option<u64>) {
+    let is_user = frame.code_segment & 3 == 3;
+    println!(
+        "\n!!! CPU EXCEPTION {} ({}) error={:?} !!!",
+        vector,
+        unexpected_name(vector),
+        error_code
+    );
+    dump_frame(frame);
+    if is_user {
+        println!("[KILL] User process terminated (vector {})", vector);
+        crate::task::kill_current_and_yield();
+    } else {
+        println!("[FATAL] Unhandled kernel exception {} — halting", vector);
+        super::halt_loop();
+    }
+}
+
+macro_rules! exception_no_error {
+    ($name:ident, $vector:expr) => {
+        extern "x86-interrupt" fn $name(frame: InterruptStackFrame) {
+            unexpected_exception($vector, &frame, None);
+        }
+    };
+}
+
+macro_rules! exception_with_error {
+    ($name:ident, $vector:expr) => {
+        extern "x86-interrupt" fn $name(frame: InterruptStackFrame, error_code: u64) {
+            unexpected_exception($vector, &frame, Some(error_code));
+        }
+    };
+}
+
+exception_no_error!(unexpected_1, 1);
+exception_no_error!(unexpected_3, 3);
+exception_no_error!(unexpected_4, 4);
+exception_no_error!(unexpected_5, 5);
+exception_no_error!(unexpected_7, 7);
+exception_no_error!(unexpected_9, 9);
+exception_no_error!(unexpected_15, 15);
+exception_no_error!(unexpected_16, 16);
+exception_no_error!(unexpected_18, 18);
+exception_no_error!(unexpected_19, 19);
+exception_no_error!(unexpected_20, 20);
+exception_no_error!(unexpected_22, 22);
+exception_no_error!(unexpected_23, 23);
+exception_no_error!(unexpected_24, 24);
+exception_no_error!(unexpected_25, 25);
+exception_no_error!(unexpected_26, 26);
+exception_no_error!(unexpected_27, 27);
+exception_no_error!(unexpected_28, 28);
+exception_no_error!(unexpected_31, 31);
+
+exception_with_error!(unexpected_10, 10);
+exception_with_error!(unexpected_11, 11);
+exception_with_error!(unexpected_12, 12);
+exception_with_error!(unexpected_17, 17);
+exception_with_error!(unexpected_21, 21);
+exception_with_error!(unexpected_29, 29);
+exception_with_error!(unexpected_30, 30);
+
+/// Поставить обработчик для вектора без отдельной реализации.
+fn unexpected_handler(vector: u8) -> u64 {
+    match vector {
+        1 => unexpected_1 as *const () as u64,
+        3 => unexpected_3 as *const () as u64,
+        4 => unexpected_4 as *const () as u64,
+        5 => unexpected_5 as *const () as u64,
+        7 => unexpected_7 as *const () as u64,
+        9 => unexpected_9 as *const () as u64,
+        10 => unexpected_10 as *const () as u64,
+        11 => unexpected_11 as *const () as u64,
+        12 => unexpected_12 as *const () as u64,
+        15 => unexpected_15 as *const () as u64,
+        16 => unexpected_16 as *const () as u64,
+        17 => unexpected_17 as *const () as u64,
+        18 => unexpected_18 as *const () as u64,
+        19 => unexpected_19 as *const () as u64,
+        20 => unexpected_20 as *const () as u64,
+        21 => unexpected_21 as *const () as u64,
+        22 => unexpected_22 as *const () as u64,
+        23 => unexpected_23 as *const () as u64,
+        24 => unexpected_24 as *const () as u64,
+        25 => unexpected_25 as *const () as u64,
+        26 => unexpected_26 as *const () as u64,
+        27 => unexpected_27 as *const () as u64,
+        28 => unexpected_28 as *const () as u64,
+        29 => unexpected_29 as *const () as u64,
+        30 => unexpected_30 as *const () as u64,
+        _ => unexpected_31 as *const () as u64,
+    }
+}
+
+/// Заполнить дескрипторы 0..32, у которых нет собственного обработчика.
+///
+/// Форма обработчика уже учитывает наличие error code (см. `has_error_code`),
+/// поэтому здесь достаточно одного `set_handler`.
+unsafe fn install_unexpected_handlers() {
+    for vector in 0..32u8 {
+        // 0/2/3/6/7/8/13/14 уже установлены выше.
+        if matches!(vector, 0 | 2 | 3 | 6 | 7 | 8 | 13 | 14) {
+            continue;
+        }
+        IDT[vector as usize].set_handler(unexpected_handler(vector));
+    }
+}
+
 // ============ Исключения CPU ============
 
 fn dump_frame(frame: &InterruptStackFrame) {
@@ -210,6 +361,28 @@ extern "x86-interrupt" fn isr_divide_by_zero(frame: InterruptStackFrame) {
 extern "x86-interrupt" fn isr_nmi(frame: InterruptStackFrame) {
     println!("\n[NMI] Non-maskable interrupt received");
     dump_frame(&frame);
+}
+
+/// #BP: `int3`. В отладке это точка останова, в остальных случаях —
+/// исключение, которое раньше вело в triple fault.
+extern "x86-interrupt" fn isr_breakpoint(frame: InterruptStackFrame) {
+    println!("\n[#BP] breakpoint");
+    dump_frame(&frame);
+}
+
+/// #DB: аппаратная отладка (TSS/DR). Продолжать после неё нельзя.
+extern "x86-interrupt" fn isr_debug(frame: InterruptStackFrame) {
+    println!("\n!!! #DB DEBUG EXCEPTION !!!");
+    dump_frame(&frame);
+    super::halt_loop();
+}
+
+/// #NM: FPU/MMX/SSE недоступны (CR0.TS/EM). Ядро собрано без SSE, а
+/// пользовательские задачи SIMD не используют, поэтому это ошибка.
+extern "x86-interrupt" fn isr_device_not_available(frame: InterruptStackFrame) {
+    println!("\n!!! #NM DEVICE NOT AVAILABLE (FPU/SSE disabled) !!!");
+    dump_frame(&frame);
+    super::halt_loop();
 }
 
 extern "x86-interrupt" fn isr_invalid_opcode(frame: InterruptStackFrame) {

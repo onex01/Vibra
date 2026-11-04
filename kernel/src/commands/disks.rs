@@ -37,7 +37,9 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         console.print(" ");
 
         let size = if entry.size_mb() >= 1024 {
-            format!("{}.{} GiB", entry.size_mb() / 1024, (entry.size_mb() % 1024) / 103)
+            // tenths of GiB: 1024 * 10 / 1024 → делим остаток на 102.4
+            let tenths = (entry.size_mb() % 1024) * 10 / 1024;
+            format!("{}.{} GiB", entry.size_mb() / 1024, tenths)
         } else {
             format!("{} MiB", entry.size_mb())
         };

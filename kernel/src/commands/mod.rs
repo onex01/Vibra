@@ -40,6 +40,8 @@ pub mod run;
 pub mod history;
 pub mod net;
 pub mod vktst;
+pub mod umount;
+pub mod sync;
 pub mod disks;
 
 use crate::framebuffer::Console;
@@ -82,6 +84,8 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "uptime",  help: "show system uptime",         func: uptime::run },
     Command { name: "neofetch", help: "system info (logo + info)",  func: neofetch::run },
     Command { name: "mount",   help: "mount filesystems",          func: mount::run },
+    Command { name: "umount",  help: "unmount a filesystem",       func: umount::run },
+    Command { name: "sync",    help: "flush filesystem metadata",  func: sync::run },
     Command { name: "disks",   help: "list block devices/partitions", func: disks::run },
     Command { name: "uname",    help: "system information",        func: uname::run },
     Command { name: "diag",     help: "run kernel diagnostics",    func: diag::run },

@@ -132,6 +132,42 @@ pub fn translate(virtual_address: u64) -> Option<Mapping> {
     unsafe { translate_from_root(current_root_phys(), virtual_address) }
 }
 
+/// Физический адрес для DMA через активные таблицы страниц.
+///
+/// Арифметика `virt - hhdm` верна только для HHDM-адресов (heap, PMM-фреймы).
+/// Буфер может лежать в `.bss`, `.data` или на стеке — там разность даёт
+/// фиктивный адрес, и устройство пишет в чужую физическую память. Именно так
+/// терялось начало `/VIBRA.LOG`: DMA-источником был статический `CHUNK_BUF`.
+pub fn virt_to_phys(virtual_address: u64) -> Option<u64> {
+    translate(virtual_address).map(|mapping| mapping.physical_address)
+}
+
+/// Сколько раз `virt_to_phys` не смог перевести адрес (диагностика).
+static TRANSLATE_FAILURES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+pub fn translate_failures() -> u64 {
+    TRANSLATE_FAILURES.load(Ordering::Relaxed)
+}
+
+/// DMA-адрес с явным отказом вместо тихой подстановки мусора.
+///
+/// Возвращает `None`, если адрес не отображён и не лежит в HHDM. Драйвер
+/// обязан в этом случае вернуть ошибку, а не программировать PRD/PRP.
+pub fn dma_address(virt: u64) -> Option<u64> {
+    if let Some(phys) = virt_to_phys(virt) {
+        return Some(phys);
+    }
+    // Fallback только для HHDM-диапазона: после смены CR3 таблицы Limine
+    // могут не содержать промежуточных уровней для экзотических адресов.
+    let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
+    if hhdm != 0 && virt >= hhdm {
+        return Some(virt - hhdm);
+    }
+    TRANSLATE_FAILURES.fetch_add(1, Ordering::Relaxed);
+    None
+}
+
 /// Создаёт копию текущей PML4 и добавляет в свободный PML4-slot одно временное
 /// 4-КиБ отображение. Новая PML4 никогда не становится активной: тестирует
 /// построитель таблиц через `translate_from_root`, после чего освобождает все

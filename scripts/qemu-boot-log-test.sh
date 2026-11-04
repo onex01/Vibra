@@ -130,7 +130,7 @@ check() {
 check '\[BOOT\] Step 1' 'boot log starts at Step 1'
 check '\[xHCI\].*mass storage ready' 'xHCI configured bulk endpoints'
 check '\[USB-STORAGE\].*sectors' 'SCSI READ CAPACITY answered'
-check '\[LOG\] writing boot log to /VIBRA.LOG' 'log sink attached'
+check '\[LOG\] writing logs to VIBRALOG' 'log sink attached to VIBRALOG (not the boot volume)'
 check '\[BOOT\] Step 9' 'log covers filesystem init'
 check "$marker" 'log grew after boot (incremental flush)'
 

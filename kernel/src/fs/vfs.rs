@@ -165,6 +165,11 @@ pub trait FileSystem: Send + Sync {
     fn readdir(&mut self, path: &str) -> Result<Vec<DirEntry>, FsError>;
     fn exists(&self, path: &str) -> bool;
     fn stat(&self, path: &str) -> Result<FileMetadata, FsError>;
+    /// Записать отложенные метаданные на носитель.
+    ///
+    /// По умолчанию — no-op: FAT32 пишет инкрементально, а read-only ФС
+    /// ничего не откладывают. Нужен для `sync`/`umount`.
+    fn sync(&mut self, _path: &str) -> Result<(), FsError> { Ok(()) }
     fn chmod(&mut self, _path: &str, _mode: u16) -> Result<(), FsError> { Err(FsError::NotSupported) }
     fn chown(&mut self, _path: &str, _uid: u32, _gid: u32) -> Result<(), FsError> { Err(FsError::NotSupported) }
 }

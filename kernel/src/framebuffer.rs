@@ -535,6 +535,53 @@ pub(crate) fn take_boot_console() -> Option<Console> {
 }
 
 impl Console {
+    /// Консоль без RAM-тени — для panic/alloc-error путей.
+    ///
+    /// `Console::new` создаёт `Vec<TextCell>` под размер экрана. В обработчике
+    /// паники это опасно: куча могла быть повреждена именно тем запросом,
+    /// который её и убил, и тогда паника рекурсивно упадёт в аллокаторе.
+    /// Здесь памяти не выделяется вообще: рисуем напрямую во фреймбуфер.
+    pub fn new_unbuffered(framebuffer: &Framebuffer) -> Self {
+        let fb_addr = framebuffer.address() as *mut u32;
+        let pitch = framebuffer.pitch as usize / 4;
+        let width = framebuffer.width as usize;
+        let height = framebuffer.height as usize;
+        let pixel_format = if framebuffer.bpp == 32 {
+            crate::display::gop::format_from_framebuffer(framebuffer)
+        } else {
+            crate::display::PixelFormat::Bgr888
+        };
+
+        Console {
+            fb_addr,
+            pitch,
+            width,
+            height,
+            cols: width / FONT_WIDTH,
+            rows: height / FONT_HEIGHT,
+            cursor_col: 0,
+            cursor_row: 0,
+            fg_color: COLOR_VIBRA_FG,
+            bg_color: COLOR_VIBRA_BG,
+            pixel_format,
+            back_buffer: None,
+            back_buffer_ptr: core::ptr::null_mut(),
+            back_buffer_size: 0,
+            virtual_width: 0,
+            virtual_height: 0,
+            scale_x: 0,
+            scale_y: 0,
+            cursor_blink_state: true,
+            last_blink_ms: 0,
+            cells: Vec::new(),
+            cells_valid: core::cell::Cell::new(false),
+            // Без тени прокрутка идёт перерисовкой? Нет: `cells_valid=false`
+            // заставляет scroll() использовать memmove по фреймбуферу — это
+            // медленно на MMIO, но паника печатает один экран без прокрутки.
+            fb_is_ram: core::cell::Cell::new(false),
+        }
+    }
+
     pub fn new(framebuffer: &Framebuffer) -> Self {
         let fb_addr = framebuffer.address() as *mut u32;
         let pitch = framebuffer.pitch as usize / 4; // в u32 словах

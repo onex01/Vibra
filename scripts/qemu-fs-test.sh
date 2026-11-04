@@ -154,6 +154,13 @@ send_text() {
     send_text "mount /mnt4 auto sdf1";       send_text $'\n'; sleep 2
     send_text "ls /mnt4/mbrdir";             send_text $'\n'; sleep 2
     send_text "cat /mnt4/mbrdir/mbr.txt";    send_text $'\n'; sleep 3
+
+    # sync/umount/повторный mount: точка должна освобождаться, а ФС —
+    # монтироваться в неё снова.
+    send_text "sync";                        send_text $'\n'; sleep 2
+    send_text "umount /mnt";                 send_text $'\n'; sleep 2
+    send_text "mount /mnt fat32 sdb";        send_text $'\n'; sleep 3
+    send_text "cat /mnt/hello.txt";          send_text $'\n'; sleep 2
     echo "quit"
 } | timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" \
     "$qemu" \
@@ -203,6 +210,9 @@ check "hello from ntfs"
 
 check "MBR.TXT"
 check "hello from mbr partition"
+
+check "Unmounted /mnt"
+check "sync: done"
 
 if grep -Fq "PANIC" "$log_file"; then
     echo "  [FAIL] kernel panic detected" | tee -a "$report" >&2

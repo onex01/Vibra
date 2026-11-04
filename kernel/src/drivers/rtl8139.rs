@@ -102,9 +102,9 @@ unsafe fn rtl_outl(port: u16, val: u32) {
     core::arch::asm!("out dx, eax", in("dx") port, in("eax") val, options(nomem, nostack, preserves_flags));
 }
 
-fn virt_to_phys(virt: u64) -> u64 {
-    let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
-    virt - hhdm
+/// DMA-адрес через таблицы страниц (RTL8139 адресует 32-битную физику).
+fn dma_phys(virt: u64) -> Option<u64> {
+    crate::memory::paging::dma_address(virt).filter(|phys| *phys < 0xFFFF_F000)
 }
 
 /// RTL8139 контроллер
@@ -154,7 +154,12 @@ impl Rtl8139Controller {
             println!("[RTL8139] ERROR: failed to allocate RX buffer");
             return;
         }
-        self.rx_buffer_phys = virt_to_phys(self.rx_buffer as u64);
+        let Some(rx_phys) = dma_phys(self.rx_buffer as u64) else {
+            println!("[RTL8139] ERROR: RX buffer is not 32-bit DMA-addressable");
+            self.rx_buffer = core::ptr::null_mut();
+            return;
+        };
+        self.rx_buffer_phys = rx_phys;
         self.rx_pos = 0;
 
         // Устанавливаем RBSTART
@@ -170,7 +175,12 @@ impl Rtl8139Controller {
                 println!("[RTL8139] ERROR: failed to allocate TX buffer {}", i);
                 return;
             }
-            self.tx_buffers_phys[i] = virt_to_phys(self.tx_buffers[i] as u64);
+            let Some(tx_phys) = dma_phys(self.tx_buffers[i] as u64) else {
+                println!("[RTL8139] ERROR: TX buffer {} is not 32-bit DMA-addressable", i);
+                self.tx_buffers[i] = core::ptr::null_mut();
+                return;
+            };
+            self.tx_buffers_phys[i] = tx_phys;
 
             // Устанавливаем TXADDR0 + i*4
             rtl_outl(self.io_base + RTL_TXADDR0 + (i as u16) * 4, self.tx_buffers_phys[i] as u32);

@@ -102,10 +102,13 @@ unsafe fn nvme_write64(offset: u64, val: u64) {
     core::ptr::write_volatile((base + offset) as *mut u64, val);
 }
 
-/// Физический адрес виртуального указателя (через HHDM)
-fn virt_to_phys(virt: u64) -> u64 {
-    let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
-    virt - hhdm
+/// DMA-адрес буфера через таблицы страниц.
+///
+/// `virt - hhdm` верна только для HHDM-памяти. Очереди и буферы здесь
+/// выделяются из heap (HHDM), но полагаться на это нельзя: при смене
+/// аллокатора или маппинга PRP указывал бы в чужую физическую память.
+fn dma_phys(virt: u64) -> Option<u64> {
+    crate::memory::paging::dma_address(virt)
 }
 
 /// NVMe контроллер
@@ -232,8 +235,13 @@ impl NvmeController {
             println!("[NVMe] Failed to allocate Identify buffer");
             return;
         }
+        let Some(id_phys) = dma_phys(buf as u64) else {
+            println!("[NVMe] Identify buffer is not DMA-addressable");
+            alloc::alloc::dealloc(buf, buf_layout);
+            return;
+        };
         self.id_buf = buf;
-        self.id_buf_phys = virt_to_phys(buf as u64);
+        self.id_buf_phys = id_phys;
 
         let mut cmd = NvmeSubQueueEntry {
             opcode: NVME_ADMIN_IDENTIFY,
@@ -313,8 +321,15 @@ impl NvmeController {
             return false;
         }
 
-        self.io_sq_phys = virt_to_phys(self.io_sq as u64);
-        self.io_cq_phys = virt_to_phys(self.io_cq as u64);
+        let (Some(io_sq_phys), Some(io_cq_phys)) = (
+            dma_phys(self.io_sq as u64),
+            dma_phys(self.io_cq as u64),
+        ) else {
+            println!("[NVMe] I/O queues are not DMA-addressable");
+            return false;
+        };
+        self.io_sq_phys = io_sq_phys;
+        self.io_cq_phys = io_cq_phys;
 
         // Создаём I/O Completion Queue (opcode 0x05)
         let mut cq_cmd = NvmeSubQueueEntry {
@@ -386,7 +401,10 @@ impl NvmeController {
         let buf_layout = core::alloc::Layout::from_size_align(4096, 4096).unwrap();
         let buf = alloc::alloc::alloc_zeroed(buf_layout);
         if buf.is_null() { return; }
-        let buf_phys = virt_to_phys(buf as u64);
+        let Some(buf_phys) = dma_phys(buf as u64) else {
+            alloc::alloc::dealloc(buf, buf_layout);
+            return;
+        };
 
         let mut cmd = NvmeSubQueueEntry {
             opcode: NVME_ADMIN_IDENTIFY,
@@ -529,8 +547,13 @@ pub fn init() {
             return;
         }
 
-        let admin_sq_phys = virt_to_phys(admin_sq as u64);
-        let admin_cq_phys = virt_to_phys(admin_cq as u64);
+        let (Some(admin_sq_phys), Some(admin_cq_phys)) = (
+            dma_phys(admin_sq as u64),
+            dma_phys(admin_cq as u64),
+        ) else {
+            println!("[NVMe] ERROR: admin queues are not DMA-addressable");
+            return;
+        };
 
         println!("[NVMe] Admin SQ: virt={:#x} phys={:#x}", admin_sq as u64, admin_sq_phys);
         println!("[NVMe] Admin CQ: virt={:#x} phys={:#x}", admin_cq as u64, admin_cq_phys);
@@ -693,9 +716,12 @@ impl NvmeController {
             if dma_buf.is_null() {
                 return Err(crate::fs::vfs::FsError::IoError);
             }
-            let dma_phys = virt_to_phys(dma_buf as u64);
+            let Some(phys) = dma_phys(dma_buf as u64) else {
+                alloc::alloc::dealloc(dma_buf, dma_layout);
+                return Err(crate::fs::vfs::FsError::IoError);
+            };
 
-            let result = self.submit_io(NVME_IO_READ, 10, current_lba, chunk_blocks, dma_phys);
+            let result = self.submit_io(NVME_IO_READ, 10, current_lba, chunk_blocks, phys);
             if result.is_ok() {
                 core::ptr::copy_nonoverlapping(dma_buf, buf[done..].as_mut_ptr(), chunk);
             }
@@ -739,9 +765,12 @@ impl NvmeController {
                 return Err(crate::fs::vfs::FsError::IoError);
             }
             core::ptr::copy_nonoverlapping(buf[done..].as_ptr(), dma_buf, chunk);
-            let dma_phys = virt_to_phys(dma_buf as u64);
+            let Some(phys) = dma_phys(dma_buf as u64) else {
+                alloc::alloc::dealloc(dma_buf, dma_layout);
+                return Err(crate::fs::vfs::FsError::IoError);
+            };
 
-            let result = self.submit_io(NVME_IO_WRITE, 11, current_lba, chunk_blocks, dma_phys);
+            let result = self.submit_io(NVME_IO_WRITE, 11, current_lba, chunk_blocks, phys);
             alloc::alloc::dealloc(dma_buf, dma_layout);
             result?;
 

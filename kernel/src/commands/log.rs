@@ -76,6 +76,10 @@ fn print_boot(console: &mut Console, lines: usize) {
     ));
 
     for line in &all[start..] {
+        if crate::poll_cancel() {
+            console.print_colored("log: cancelled\n", COLOR_YELLOW);
+            break;
+        }
         console.print(line);
         console.print("\n");
     }
@@ -102,6 +106,10 @@ fn print_session(console: &mut Console, lines: usize) -> CmdResult {
         all.len()
     ));
     for line in &all[start..] {
+        if crate::poll_cancel() {
+            console.print_colored("log: cancelled\n", COLOR_YELLOW);
+            break;
+        }
         console.print(line);
         console.print("\n");
     }

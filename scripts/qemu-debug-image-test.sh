@@ -115,6 +115,19 @@ else
     failed=1
 fi
 
+# Лог обязан начинаться с самого начала, а не с нулей/середины записи.
+# Регрессия rc.8: DMA-адрес статического CHUNK_BUF считался как `virt - hhdm`,
+# первые 3 КиБ кластера оставались нулями, и ранний boot терялся.
+if [[ -s "$repo_root/build/debug-image-boot.log" ]]; then
+    if head -c 6 "$repo_root/build/debug-image-boot.log" | grep -q '^\[BOOT'; then
+        echo "  [ OK ] boot log starts at the beginning" | tee -a "$report"
+    else
+        echo "  [FAIL] boot log does not start with [BOOT] (leading garbage/zeros)" | tee -a "$report" >&2
+        head -c 64 "$repo_root/build/debug-image-boot.log" | od -c | head -4 >&2
+        failed=1
+    fi
+fi
+
 if [[ "$failed" -ne 0 ]]; then
     echo "Debug image test failed; serial log: $log_file" >&2
     tail -80 "$log_file" >&2

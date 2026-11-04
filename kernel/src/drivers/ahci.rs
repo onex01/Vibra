@@ -164,11 +164,15 @@ static AHCI_PORTS: Mutex<Vec<AhciPort>> = Mutex::new(Vec::new());
 /// Порты с ATAPI-устройством (CD/DVD). Их нельзя опрашивать IDENTIFY DEVICE.
 static ATAPI_PORTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
-// DMA-адрес для буферов (используем HHDM — физическая = виртуальная - hhdm)
-fn virt_to_phys(virt: u64) -> u64 {
-    let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
-    virt - hhdm
+// DMA-адрес буфера. Раньше здесь была арифметика `virt - hhdm`, которая
+// верна только для HHDM-памяти: для `.bss`/стека она давала фиктивный
+// физический адрес, и устройство писало в чужую память (так терялось
+// начало `/VIBRA.LOG`). Теперь адрес берётся из таблиц страниц.
+fn phys_or_none(virt: u64) -> Option<u64> {
+    crate::memory::paging::dma_address(virt)
 }
+
+
 
 /// Инициализация AHCI контроллера
 pub fn init() {
@@ -334,7 +338,11 @@ unsafe fn init_port(port: u32) {
     let cmd_list_layout = core::alloc::Layout::from_size_align(cmd_list_size, 1024).unwrap();
     let cmd_list_ptr = alloc::alloc::alloc_zeroed(cmd_list_layout);
     if cmd_list_ptr.is_null() { return; }
-    let cmd_list_phys = virt_to_phys(cmd_list_ptr as u64);
+    let Some(cmd_list_phys) = phys_or_none(cmd_list_ptr as u64) else {
+        alloc::alloc::dealloc(cmd_list_ptr, cmd_list_layout);
+        println!("[AHCI] port {}: command list is not DMA-addressable", port);
+        return;
+    };
 
     // FIS接收区 (256 bytes, выровнено)
     let fis_size = 256;
@@ -344,7 +352,11 @@ unsafe fn init_port(port: u32) {
         alloc::alloc::dealloc(cmd_list_ptr, cmd_list_layout);
         return;
     }
-    let fis_phys = virt_to_phys(fis_ptr as u64);
+    let Some(fis_phys) = phys_or_none(fis_ptr as u64) else {
+        alloc::alloc::dealloc(fis_ptr, fis_layout);
+        alloc::alloc::dealloc(cmd_list_ptr, cmd_list_layout);
+        return;
+    };
 
     // Устанавливаем адреса
     port_write32(port, PORT_CLB, cmd_list_phys as u32);
@@ -441,7 +453,10 @@ pub fn read_sectors(port_num: u32, lba: u64, count: u16, buffer: &mut [u8]) -> b
         let ct_layout = core::alloc::Layout::from_size_align(256, 256).unwrap();
         let ct_ptr = alloc::alloc::alloc_zeroed(ct_layout);
         if ct_ptr.is_null() { return false; }
-        let ct_phys = virt_to_phys(ct_ptr as u64);
+        let Some(ct_phys) = phys_or_none(ct_ptr as u64) else {
+            alloc::alloc::dealloc(ct_ptr, ct_layout);
+            return false;
+        };
 
         // Заполняем FIS
         let fis = ct_ptr as *mut FisRegH2d;
@@ -459,7 +474,10 @@ pub fn read_sectors(port_num: u32, lba: u64, count: u16, buffer: &mut [u8]) -> b
         (*fis).sector_count_hi = ((count >> 8) & 0xFF) as u8;
 
         // PRD entry — один регион (данные в buffer)
-        let buf_phys = virt_to_phys(buffer.as_ptr() as u64);
+        let Some(buf_phys) = phys_or_none(buffer.as_ptr() as u64) else {
+            alloc::alloc::dealloc(ct_ptr, ct_layout);
+            return false;
+        };
         let prd = (ct_ptr as *mut u8).add(128) as *mut PrdEntry;
         (*prd).base_addr = buf_phys as u32;
         (*prd).base_addr_hi = (buf_phys >> 32) as u32;
@@ -522,7 +540,10 @@ fn atapi_command(port_num: u32, cdb: &[u8], buffer: &mut [u8], verbose: bool) ->
         if ct_ptr.is_null() {
             return false;
         }
-        let ct_phys = virt_to_phys(ct_ptr as u64);
+        let Some(ct_phys) = phys_or_none(ct_ptr as u64) else {
+            alloc::alloc::dealloc(ct_ptr, ct_layout);
+            return false;
+        };
 
         // Register H2D FIS: PACKET, PIO, byte count в Sector Count.
         let fis = ct_ptr as *mut FisRegH2d;
@@ -538,7 +559,10 @@ fn atapi_command(port_num: u32, cdb: &[u8], buffer: &mut [u8], verbose: bool) ->
         core::ptr::copy_nonoverlapping(cdb.as_ptr(), acmd, cdb.len());
 
         // PRD по смещению 0x80.
-        let buf_phys = virt_to_phys(buffer.as_ptr() as u64);
+        let Some(buf_phys) = phys_or_none(buffer.as_ptr() as u64) else {
+            alloc::alloc::dealloc(ct_ptr, ct_layout);
+            return false;
+        };
         let prd = (ct_ptr as *mut u8).add(0x80) as *mut PrdEntry;
         (*prd).base_addr = buf_phys as u32;
         (*prd).base_addr_hi = (buf_phys >> 32) as u32;
@@ -582,8 +606,8 @@ fn atapi_command(port_num: u32, cdb: &[u8], buffer: &mut [u8], verbose: bool) ->
 /// SCSI READ CAPACITY(10): (число блоков, размер блока).
 pub fn atapi_read_capacity(port_num: u32) -> Option<(u64, u32)> {
     // Буфер обязан быть в HHDM-памяти: PRD хранит физический адрес, а
-    // `virt_to_phys` умеет только HHDM-адреса. Стек ядра в HHDM не лежит,
-    // поэтому стековый массив давал DMA в мусорный адрес и таймаут.
+    // Буфер должен быть DMA-адресуемым: `dma_address` берёт физический
+    // адрес из таблиц страниц, поэтому стек и .bss тоже работают.
     let mut buf = alloc::vec![0u8; 8];
     let cdb = [0x25u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     if !atapi_command(port_num, &cdb, &mut buf, false) {
@@ -778,7 +802,10 @@ pub fn write_sectors(port_num: u32, lba: u64, count: u16, buffer: &[u8]) -> bool
         let ct_layout = core::alloc::Layout::from_size_align(256, 256).unwrap();
         let ct_ptr = alloc::alloc::alloc_zeroed(ct_layout);
         if ct_ptr.is_null() { return false; }
-        let ct_phys = virt_to_phys(ct_ptr as u64);
+        let Some(ct_phys) = phys_or_none(ct_ptr as u64) else {
+            alloc::alloc::dealloc(ct_ptr, ct_layout);
+            return false;
+        };
 
         // FIS — WRITE DMA EXT
         let fis = ct_ptr as *mut FisRegH2d;
@@ -794,7 +821,10 @@ pub fn write_sectors(port_num: u32, lba: u64, count: u16, buffer: &[u8]) -> bool
         (*fis).sector_count_hi = ((count >> 8) & 0xFF) as u8;
 
         // PRD entry
-        let buf_phys = virt_to_phys(buffer.as_ptr() as u64);
+        let Some(buf_phys) = phys_or_none(buffer.as_ptr() as u64) else {
+            alloc::alloc::dealloc(ct_ptr, ct_layout);
+            return false;
+        };
         let prd = (ct_ptr as *mut u8).add(128) as *mut PrdEntry;
         (*prd).base_addr = buf_phys as u32;
         (*prd).base_addr_hi = (buf_phys >> 32) as u32;
@@ -1048,7 +1078,10 @@ fn identify_once(port_num: u32) -> Option<DiskInfo> {
         let ct_layout = core::alloc::Layout::from_size_align(256, 256).unwrap();
         let ct_ptr = alloc::alloc::alloc_zeroed(ct_layout);
         if ct_ptr.is_null() { return None; }
-        let ct_phys = virt_to_phys(ct_ptr as u64);
+        let Some(ct_phys) = phys_or_none(ct_ptr as u64) else {
+            alloc::alloc::dealloc(ct_ptr, ct_layout);
+            return None;
+        };
 
         // Буфер 512 байт для ответа IDENTIFY
         let id_buf_layout = core::alloc::Layout::from_size_align(512, 16).unwrap();
@@ -1057,7 +1090,11 @@ fn identify_once(port_num: u32) -> Option<DiskInfo> {
             alloc::alloc::dealloc(ct_ptr, ct_layout);
             return None;
         }
-        let id_buf_phys = virt_to_phys(id_buf as u64);
+        let Some(id_buf_phys) = phys_or_none(id_buf as u64) else {
+            alloc::alloc::dealloc(id_buf, id_buf_layout);
+            alloc::alloc::dealloc(ct_ptr, ct_layout);
+            return None;
+        };
 
         // FIS — IDENTIFY DEVICE (ATA_CMD_IDENTIFY = 0xEC)
         let fis = ct_ptr as *mut FisRegH2d;

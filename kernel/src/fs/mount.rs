@@ -8,12 +8,23 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::sync::Arc;
 use core::fmt;
+use spin::Mutex;
+
+/// ФС за собственным локом.
+///
+/// Раньше `Box<dyn FileSystem>` жил прямо в таблице монтирования, и каждый
+/// `vfs_*` держал спин-лок таблицы на время дискового I/O. Это нарушало
+/// правило «не держать спин-лок через блокирующий диск» и грозило дедлоком
+/// при вытеснении. Теперь таблица отдаёт `Arc`, а вызывающий отпускает её
+/// до обращения к ФС.
+pub type FsHandle = Arc<Mutex<Box<dyn FileSystem>>>;
 
 /// Точка монтирования
 pub struct MountPoint {
     pub path: String,
-    pub fs: Box<dyn FileSystem>,
+    pub fs: FsHandle,
     pub readonly: bool,
 }
 
@@ -21,15 +32,20 @@ impl MountPoint {
     pub fn new(path: &str, fs: Box<dyn FileSystem>, readonly: bool) -> Self {
         Self {
             path: String::from(path),
-            fs,
+            fs: Arc::new(Mutex::new(fs)),
             readonly,
         }
+    }
+
+    /// Имя ФС для листинга, без удержания лока на время I/O.
+    pub fn fs_name(&self) -> String {
+        String::from(self.fs.lock().name())
     }
 }
 
 impl fmt::Display for MountPoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} -> {} (readonly: {})", self.path, self.fs.name(), self.readonly)
+        write!(f, "{} -> {} (readonly: {})", self.path, self.fs_name(), self.readonly)
     }
 }
 
@@ -130,7 +146,7 @@ impl MountTable {
     pub fn list_entries(&self) -> Vec<(String, String, bool)> {
         self.mounts
             .iter()
-            .map(|m| (m.path.clone(), String::from(m.fs.name()), m.readonly))
+            .map(|m| (m.path.clone(), m.fs_name(), m.readonly))
             .collect()
     }
 

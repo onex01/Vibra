@@ -558,62 +558,50 @@ pub fn is_mounted(path: &str) -> bool {
     VFS_MANAGER.mount_table.lock().is_mounted(path)
 }
 
+/// Найти ФС и её локальный путь, не удерживая лок таблицы.
+///
+/// Возвращает `(handle, путь внутри ФС, readonly)`. Лок таблицы отпускается
+/// здесь же: вызывающий работает с диском уже без него.
+fn resolve_fs(path: &str) -> Result<(mount::FsHandle, String, bool), FsError> {
+    let mt = VFS_MANAGER.mount_table.lock();
+    let (idx, relative_path) = mt.find_fs(path).ok_or(FsError::NotFound)?;
+    let mount = mt.get(idx);
+    let handle = mount.fs.clone();
+    let readonly = mount.readonly;
+    let target = if relative_path.is_empty() {
+        String::from("/")
+    } else {
+        relative_path
+    };
+    Ok((handle, target, readonly))
+}
+
 /// Попытаться найти и открыть файл через VFS.
 pub fn vfs_open(path: &str) -> Result<Box<dyn File>, FsError> {
-    let mt = VFS_MANAGER.mount_table.lock();
-
-    if let Some((idx, relative_path)) = mt.find_fs(path) {
-        // Если относительный путь пустой, это корень
-        let target_path = if relative_path.is_empty() || relative_path == "/" {
-            "/"
-        } else {
-            &relative_path
-        };
-        let mount = mt.get(idx);
-        let file = mount.fs.open(target_path)?;
-        if mount.readonly {
-            Ok(Box::new(vfs::ReadOnlyFile { inner: file }))
-        } else {
-            Ok(file)
-        }
+    let (handle, target, readonly) = resolve_fs(path)?;
+    let file = handle.lock().open(&target)?;
+    if readonly {
+        Ok(Box::new(vfs::ReadOnlyFile { inner: file }))
     } else {
-        Err(FsError::NotFound)
+        Ok(file)
     }
 }
 
 /// Попытаться создать файл через VFS
 pub fn vfs_create(path: &str) -> Result<Box<dyn File>, FsError> {
-    let mut mt = VFS_MANAGER.mount_table.lock();
-
-    if let Some((idx, relative_path)) = mt.find_fs(path) {
-        if mt.get(idx).readonly {
-            return Err(FsError::ReadOnly);
-        }
-        let target_path = if relative_path.is_empty() || relative_path == "/" {
-            "/"
-        } else {
-            &relative_path
-        };
-        mt.get_mut(idx).fs.create(target_path)
-    } else {
-        Err(FsError::NotFound)
+    let (handle, target, readonly) = resolve_fs(path)?;
+    if readonly {
+        return Err(FsError::ReadOnly);
     }
+    let mut fs = handle.lock();
+    fs.create(&target)
 }
 
 /// Получить содержимое директории через VFS
 pub fn vfs_readdir(path: &str) -> Result<Vec<DirEntry>, FsError> {
-    let mut mt = VFS_MANAGER.mount_table.lock();
-
-    if let Some((idx, relative_path)) = mt.find_fs(path) {
-        let target_path = if relative_path.is_empty() || relative_path == "/" {
-            "/"
-        } else {
-            &relative_path
-        };
-        mt.get_mut(idx).fs.readdir(target_path)
-    } else {
-        Err(FsError::NotFound)
-    }
+    let (handle, target, _) = resolve_fs(path)?;
+    let mut fs = handle.lock();
+    fs.readdir(&target)
 }
 
 /// Попытаться создать каталог через VFS.
@@ -622,59 +610,32 @@ pub fn vfs_readdir(path: &str) -> Result<Vec<DirEntry>, FsError> {
 /// на корневом RamFS: раньше `fs::create_dir` был жёстко привязан к
 /// `LEGACY_RAMFS` и на дисковых томах каталог просто не появлялся.
 pub fn vfs_mkdir(path: &str) -> Result<(), FsError> {
-    let mut mt = VFS_MANAGER.mount_table.lock();
-
-    if let Some((idx, relative_path)) = mt.find_fs(path) {
-        if mt.get(idx).readonly {
-            return Err(FsError::ReadOnly);
-        }
-        let target_path = if relative_path.is_empty() || relative_path == "/" {
-            "/"
-        } else {
-            &relative_path
-        };
-        mt.get_mut(idx).fs.mkdir(target_path)
-    } else {
-        Err(FsError::NotFound)
+    let (handle, target, readonly) = resolve_fs(path)?;
+    if readonly {
+        return Err(FsError::ReadOnly);
     }
+    let mut fs = handle.lock();
+    fs.mkdir(&target)
 }
 
 /// Удалить каталог через VFS.
 pub fn vfs_rmdir(path: &str) -> Result<(), FsError> {
-    let mut mt = VFS_MANAGER.mount_table.lock();
-
-    if let Some((idx, relative_path)) = mt.find_fs(path) {
-        if mt.get(idx).readonly {
-            return Err(FsError::ReadOnly);
-        }
-        let target_path = if relative_path.is_empty() || relative_path == "/" {
-            "/"
-        } else {
-            &relative_path
-        };
-        mt.get_mut(idx).fs.rmdir(target_path)
-    } else {
-        Err(FsError::NotFound)
+    let (handle, target, readonly) = resolve_fs(path)?;
+    if readonly {
+        return Err(FsError::ReadOnly);
     }
+    let mut fs = handle.lock();
+    fs.rmdir(&target)
 }
 
 /// Удалить файл через VFS.
 pub fn vfs_remove(path: &str) -> Result<(), FsError> {
-    let mut mt = VFS_MANAGER.mount_table.lock();
-
-    if let Some((idx, relative_path)) = mt.find_fs(path) {
-        if mt.get(idx).readonly {
-            return Err(FsError::ReadOnly);
-        }
-        let target_path = if relative_path.is_empty() || relative_path == "/" {
-            "/"
-        } else {
-            &relative_path
-        };
-        mt.get_mut(idx).fs.remove(target_path)
-    } else {
-        Err(FsError::NotFound)
+    let (handle, target, readonly) = resolve_fs(path)?;
+    if readonly {
+        return Err(FsError::ReadOnly);
     }
+    let mut fs = handle.lock();
+    fs.remove(&target)
 }
 
 /// Проверить существование файла через VFS
@@ -688,16 +649,19 @@ pub fn vfs_exists(path: &str) -> bool {
 
 /// Получить метаданные файла через VFS
 pub fn vfs_stat(path: &str) -> Result<FileMetadata, FsError> {
-    let mt = VFS_MANAGER.mount_table.lock();
+    let (handle, target, _) = resolve_fs(path)?;
+    let fs = handle.lock();
+    fs.stat(&target)
+}
 
-    if let Some((idx, relative_path)) = mt.find_fs(path) {
-        let target_path = if relative_path.is_empty() || relative_path == "/" {
-            "/"
-        } else {
-            &relative_path
-        };
-        mt.get(idx).fs.stat(target_path)
-    } else {
-        Err(FsError::NotFound)
-    }
+/// Принудительно записать изменения ФС на носитель (если ФС это умеет).
+pub fn vfs_sync(path: &str) -> Result<(), FsError> {
+    let (handle, target, _) = resolve_fs(path)?;
+    let mut fs = handle.lock();
+    fs.sync(&target)
+}
+
+/// Размонтировать точку монтирования.
+pub fn vfs_unmount(path: &str) -> Result<(), FsError> {
+    VFS_MANAGER.mount_table.lock().unmount(path)
 }

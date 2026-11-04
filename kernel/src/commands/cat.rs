@@ -60,6 +60,11 @@ fn print_file(console: &mut Console, name: &str) -> Result<(), fs::FsError> {
     let mut last_byte: Option<u8> = None;
     let mut chunk = first;
     loop {
+        // Длинный `cat` большого лога должен прерываться Ctrl+C.
+        if crate::poll_cancel() {
+            console.print_colored("\ncat: cancelled\n", COLOR_YELLOW);
+            return Ok(());
+        }
         if chunk == 0 {
             break;
         }

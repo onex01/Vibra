@@ -428,7 +428,10 @@ impl crate::fs::disk::DiskIo for IdeDisk {
     }
 
     fn sector_size(&self) -> usize {
-        self.info.sector_size as usize
+        // PIO-чтение в этом драйвере всегда идёт 512-байтными секторами,
+        // поэтому и block layer должен видеть 512: иначе GPT-парсер получит
+        // 4096 и посчитает неверный LBA.
+        512
     }
 
     fn is_read_only(&self) -> bool {

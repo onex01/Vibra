@@ -624,6 +624,24 @@ fn diag_disk(console: &mut Console) {
             blocks, block_size
         ));
     }
+    for info in crate::drivers::ide::disks() {
+        console.print(&alloc::format!(
+            "  IDE ch{} drv{}: {} {} sectors, {} B/sect{}\n",
+            info.channel,
+            info.drive,
+            info.model,
+            info.sectors,
+            info.sector_size,
+            if info.lba48 { ", LBA48" } else { ", LBA28" }
+        ));
+    }
+    let dma_failures = crate::memory::paging::translate_failures();
+    if dma_failures != 0 {
+        console.print_colored(
+            &alloc::format!("  DMA: {} address translation failure(s)\n", dma_failures),
+            crate::framebuffer::COLOR_RED,
+        );
+    }
 
     let mgr = crate::fs::get_disk_manager().lock();
     if mgr.count() == 0 {

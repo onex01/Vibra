@@ -75,6 +75,10 @@ pub fn poll_cancel() -> bool {
     if let Some(key) = serial::poll_key().or_else(keyboard::poll_key) {
         if matches!(key, keyboard::Key::Char('\x03') | keyboard::Key::Char('\x1A')) {
             request_cancel();
+        } else {
+            // Не отмена: вернуть клавишу в очередь, иначе набранный во время
+            // команды текст теряется.
+            keyboard::push_back(key);
         }
     }
     is_cancelled()
@@ -458,9 +462,10 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
             console.print_colored("'. Type 'help'.\n", framebuffer::COLOR_RED);
         }
 
-        // Журнал shell сохраняется после каждой команды: даже если машина
-        // зависнет или её выключат, последняя сессия останется на диске.
-        crate::boot_log::flush_all_files();
+        // Журнал дописывается после каждой команды, но только порциями по
+        // 16 КиБ: полная перезапись 256 КиБ на каждую команду заметно
+        // тормозила на реальном железе. Диск получает данные инкрементально.
+        crate::boot_log::refresh_files();
         crate::boot_log::checkpoint();
     }
 }
@@ -490,8 +495,64 @@ fn alloc_error(layout: core::alloc::Layout) -> ! {
     if let Some(addr) = bad {
         println!("[HEAP] free-list CORRUPT at {:#x}", addr);
     }
-    boot_log::flush_to_file("/var/log/error.log");
+    // Никаких flush_to_file: он аллоцирует Vec из кольца лога, а мы уже
+    // внутри обработчика нехватки памяти.
+    boot_log::panic_flush();
     panic!("kernel heap exhausted ({} bytes requested)", layout.size());
+}
+
+/// Запись без аллокаций: `format_args!` в `Console` пишет посимвольно.
+struct NoAllocWriter<'a> {
+    console: &'a mut framebuffer::Console,
+}
+
+impl core::fmt::Write for NoAllocWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for ch in s.chars() {
+            self.console.put_char(ch);
+        }
+        Ok(())
+    }
+}
+
+fn write_display(console: &mut framebuffer::Console, args: core::fmt::Arguments) {
+    use core::fmt::Write;
+    let _ = NoAllocWriter { console }.write_fmt(args);
+}
+
+/// Hex с фиксированной шириной 18 символов — без `alloc::format!`.
+fn print_hex(console: &mut framebuffer::Console, value: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    console.print("0x");
+    let mut started = false;
+    for shift in (0..16).rev() {
+        let digit = ((value >> (shift * 4)) & 0xF) as usize;
+        if digit != 0 {
+            started = true;
+        }
+        if started || shift == 0 {
+            console.put_char(HEX[digit] as char);
+        }
+    }
+    console.put_char('\n');
+}
+
+fn print_dec(console: &mut framebuffer::Console, mut value: usize) {
+    let mut buf = [0u8; 20];
+    let mut len = 0usize;
+    if value == 0 {
+        console.put_char('0');
+        return;
+    }
+    while value > 0 && len < buf.len() {
+        buf[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    while len > 0 {
+        len -= 1;
+        console.put_char(buf[len] as char);
+    }
 }
 
 #[panic_handler]
@@ -510,54 +571,55 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     println!("{}", info);
 
-    // Пытаемся показать на framebuffer (если он доступен)
-    if let Some(fb_resp) = FRAMEBUFFER_REQUEST.response() {
-        if let Some(fb) = fb_resp.framebuffers().first() {
-            let mut console = framebuffer::Console::new(fb);
-            const SCREEN_BLUE: u32 = 0x001B4F8A;
-            const PANEL_BLUE: u32 = 0x00123768;
-            const TEXT_WHITE: u32 = 0x00FFFFFF;
-            const TEXT_CYAN: u32 = 0x00C8E8FF;
-            let width = console.fb_width();
-            let height = console.fb_height();
-            console.fill_rect(0, 0, width, height, SCREEN_BLUE);
-            if width > 48 && height > 48 {
-                console.fill_rect(24, 24, width - 48, height - 48, PANEL_BLUE);
-            }
+    // Экран: консоль без RAM-тени. `Console::new` аллоцирует Vec под сетку,
+    // а паника вполне может случиться из-за испорченной кучи — тогда паника
+    // рекурсивно упала бы в аллокаторе и отчёта не было бы вовсе.
+    if let Some(fb) = FRAMEBUFFER_REQUEST
+        .response()
+        .and_then(|resp| resp.framebuffers().first())
+    {
+        let mut console = framebuffer::Console::new_unbuffered(fb);
+        const SCREEN_BLUE: u32 = 0x001B4F8A;
+        const PANEL_BLUE: u32 = 0x00123768;
+        const TEXT_WHITE: u32 = 0x00FFFFFF;
+        const TEXT_CYAN: u32 = 0x00C8E8FF;
 
-            console.set_cursor(5, 3);
-            console.print_colored("VIBRA KERNEL STOP SCREEN\n\n", TEXT_WHITE);
-            console.print_colored("The kernel stopped after an unrecoverable error.\n\n", TEXT_WHITE);
-            console.print_colored("Stop code: KERNEL_PANIC\n", TEXT_CYAN);
-            console.print_colored("Version: ", TEXT_CYAN);
-            console.print(version::KERNEL_VERSION);
-            console.print(" (");
-            console.print(version::KERNEL_CODENAME);
-            console.print(")\n");
-            console.print_colored("RSP: ", TEXT_CYAN);
-            console.print(&alloc::format!("{:#018x}\n", stack_pointer));
-            console.print_colored("RFLAGS: ", TEXT_CYAN);
-            console.print(&alloc::format!("{:#018x}\n", rflags));
-            if let Some(location) = info.location() {
-                console.print_colored("Location: ", TEXT_CYAN);
-                console.print(&alloc::format!("{}:{}:{}\n", location.file(), location.line(), location.column()));
-            }
-            console.print_colored("\nMessage:\n", TEXT_CYAN);
-            let msg = alloc::format!("{}", info);
-            for ch in msg.chars() {
-                if ch == '\n' {
-                    console.print("\n");
-                } else {
-                    console.put_char(ch);
-                }
-            }
-            console.print_colored("\n\nThe system has halted. Restart the machine.\n", TEXT_WHITE);
+        let width = console.fb_width();
+        let height = console.fb_height();
+        console.fill_rect(0, 0, width, height, SCREEN_BLUE);
+        if width > 48 && height > 48 {
+            console.fill_rect(24, 24, width - 48, height - 48, PANEL_BLUE);
         }
+
+        console.set_cursor(5, 3);
+        console.print_colored("VIBRA KERNEL STOP SCREEN\n\n", TEXT_WHITE);
+        console.print_colored("The kernel stopped after an unrecoverable error.\n\n", TEXT_WHITE);
+        console.print_colored("Stop code: KERNEL_PANIC\n", TEXT_CYAN);
+        console.print_colored("Version: ", TEXT_CYAN);
+        console.print(version::KERNEL_VERSION);
+        console.print(" (");
+        console.print(version::KERNEL_CODENAME);
+        console.print(")\n");
+        console.print_colored("RSP: ", TEXT_CYAN);
+        print_hex(&mut console, stack_pointer);
+        console.print_colored("RFLAGS: ", TEXT_CYAN);
+        print_hex(&mut console, rflags);
+        if let Some(location) = info.location() {
+            console.print_colored("Location: ", TEXT_CYAN);
+            console.print(location.file());
+            console.print(":");
+            print_dec(&mut console, location.line() as usize);
+            console.print(":");
+            print_dec(&mut console, location.column() as usize);
+            console.print("\n");
+        }
+        console.print_colored("\nMessage:\n", TEXT_CYAN);
+        write_display(&mut console, format_args!("{}", info));
+        console.print_colored("\n\nThe system has halted. Restart the machine.\n", TEXT_WHITE);
     }
 
-    boot_log::flush_to_file("/var/log/error.log");
-    boot_log::flush_to_file("/var/log/boot.log");
-    // Последний шанс увидеть панику на машине без COM-порта.
+    // Не используем flush_to_file: он собирает Vec из кольца и снова
+    // обращается к куче/VFS. panic_flush пишет порцию без аллокаций.
     boot_log::panic_flush();
 
     loop { halt(); }

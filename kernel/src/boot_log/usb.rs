@@ -323,7 +323,9 @@ fn prepare(mut fs: Fat32Fs, file: &str, shell: bool) -> Option<Sink> {
 /// расходуется — иначе однократный «not found» на шаге 4 навсегда выключал бы
 /// запись на флешку.
 pub fn attach() -> bool {
-    if BOOT_SINK.lock().is_some() {
+    // Уже на VIBRALOG — искать нечего.
+    let current = *VOLUME_TARGET.lock();
+    if BOOT_SINK.lock().is_some() && current == Some(Target::LogVolume) {
         return true;
     }
 
@@ -348,9 +350,37 @@ pub fn attach() -> bool {
         return false;
     }
 
-    // Первый проход: ищем VIBRALOG. Второй: любой загрузочный том.
-    for target in [Target::LogVolume, Target::BootVolume] {
-        for window in &windows {
+    // Сначала всегда VIBRALOG. Загрузочный том — только запасной вариант
+    // и только после входа в shell.
+    //
+    // Раньше порядок был «для каждого тома: VIBRALOG, иначе boot volume».
+    // На машине с диском (KERNEL.ELF) и отдельной флешкой VIBRALOG первый
+    // же checkpoint до USB-enumeration привязывал лог к загрузочному тому,
+    // и найденный позже VIBRALOG игнорировался навсегда.
+    if try_attach(&windows, Target::LogVolume) {
+        return true;
+    }
+    if BOOT_SINK.lock().is_some() {
+        return true;
+    }
+    if !super::boot_finished() {
+        // Диски/USB появляются на шаге 8.5; до shell не фиксируем
+        // загрузочный том, иначе более подходящий VIBRALOG уже не выбрать.
+        report_missing("VIBRALOG not visible yet");
+        return false;
+    }
+    if try_attach(&windows, Target::BootVolume) {
+        return true;
+    }
+
+    report_missing("no FAT32 volume with VIBRALOG or KERNEL.ELF");
+    false
+}
+
+/// Подключить первый подходящий том для указанной цели.
+fn try_attach(windows: &[Window], target: Target) -> bool {
+    {
+        for window in windows {
             let fs = match Fat32Fs::new_rw(window.open()) {
                 Ok(fs) => fs,
                 Err(_) => continue,
@@ -413,7 +443,6 @@ pub fn attach() -> bool {
         }
     }
 
-    report_missing("no FAT32 volume with VIBRALOG or KERNEL.ELF");
     false
 }
 

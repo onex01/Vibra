@@ -615,7 +615,12 @@ pub fn poll_key() -> Option<Key> {
     // Лок делится с ISR — берём его только с выключенными прерываниями,
     // иначе IRQ1 во время удержания лока приведёт к дедлоку.
     crate::interrupts::without_interrupts(|| {
-        // Сначала проверяем очередь HID (usb) — она хранит уже распарсенные Key
+        // Отложенные клавиши идут раньше новых: их порядок задан вводом.
+        if let Some(key) = pop_back() {
+            return Some(key);
+        }
+
+        // Затем очередь HID (usb) — она хранит уже распарсенные Key
         {
             let mut hid_q = HID_QUEUE.lock();
             if !hid_q.is_empty() {
@@ -641,6 +646,32 @@ static HID_QUEUE: Mutex<Vec<Key>> = Mutex::new(Vec::new());
 pub fn inject_key(k: Key) {
     let mut q = HID_QUEUE.lock();
     q.push(k);
+}
+
+/// Клавиши, прочитанные длинной командой, но не являющиеся отменой.
+///
+/// `poll_cancel()` обязан забирать ввод, чтобы увидеть Ctrl+C. Раньше он
+/// просто выбрасывал остальные клавиши: набранный во время `cat`/`tree`
+/// текст терялся (в тесте команда `diag ...` приходила как `iag ...`).
+/// Теперь всё, что не отмена, возвращается в очередь ввода.
+static TYPEAHEAD: Mutex<Vec<Key>> = Mutex::new(Vec::new());
+const TYPEAHEAD_MAX: usize = 64;
+
+pub fn push_back(key: Key) {
+    let mut q = TYPEAHEAD.lock();
+    if q.len() < TYPEAHEAD_MAX {
+        q.push(key);
+    }
+}
+
+/// Забрать клавишу, отложенную `poll_cancel()`.
+fn pop_back() -> Option<Key> {
+    let mut q = TYPEAHEAD.lock();
+    if q.is_empty() {
+        None
+    } else {
+        Some(q.remove(0))
+    }
 }
 
 /// Снимок состояния драйвера для `diag keyboard`.

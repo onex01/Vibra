@@ -1,9 +1,8 @@
 // fs/blockdev.rs — обнаружение блочных устройств и их разделов.
 //
-// Связывает драйверы (AHCI + USB mass storage) с VFS: создаёт по одному
-// диску на активный SATA-порт и на каждый найденный USB-накопитель, читает
-// таблицу разделов (MBR/GPT) и регистрирует в DiskManager как `sda`, `sda1`,
-// `sdb`, ...
+// Связывает драйверы (AHCI, IDE/PATA, NVMe, ATAPI, USB mass storage) с VFS:
+// создаёт по одному диску на найденное устройство, читает таблицу разделов
+// (MBR/GPT) и регистрирует в DiskManager как `sda`, `sda1`, `sdb`, ...
 //
 // Порядок имён: сначала SATA (`sda`...), затем USB продолжает буквы. На
 // ThinkPad T450 внутренний SSD — sda, загрузочная флешка — sdb.
@@ -20,9 +19,53 @@ use spin::Mutex;
 /// Возвращает количество добавленных записей (диски + разделы).
 pub fn probe(mgr: &mut DiskManager) -> usize {
     let (added, disks) = probe_ahci(mgr);
-    let (nvme_added, nvme_disks) = probe_nvme(mgr, disks);
-    let (atapi_added, atapi_count) = probe_atapi(mgr, disks + nvme_disks);
-    added + nvme_added + atapi_added + probe_usb(mgr, disks + nvme_disks + atapi_count)
+    let (ide_added, ide_disks) = probe_ide(mgr, disks);
+    let nvme_first = disks + ide_disks;
+    let (nvme_added, nvme_disks) = probe_nvme(mgr, nvme_first);
+    let atapi_first = nvme_first + nvme_disks;
+    let (atapi_added, atapi_count) = probe_atapi(mgr, atapi_first);
+    added
+        + ide_added
+        + nvme_added
+        + atapi_added
+        + probe_usb(mgr, atapi_first + atapi_count)
+}
+
+/// IDE/PATA-диски (BIOS держит SATA в legacy-режиме).
+///
+/// Драйвер `drivers/ide` опрашивает порты 0x1F0/0x170 и умеет только
+/// читать. Раньше он был подключён лишь как приёмник boot-лога: `probe()`
+/// его не вызывал, поэтому на машине с IDE-режимом `disks`/`mount` диск не
+/// видели вообще.
+fn probe_ide(mgr: &mut DiskManager, first_index: usize) -> (usize, usize) {
+    let infos = crate::drivers::ide::disks();
+    let mut added = 0usize;
+    let mut disks = 0usize;
+
+    for (offset, info) in infos.iter().enumerate() {
+        let Some(disk) = crate::drivers::ide::open(offset) else {
+            continue;
+        };
+        if info.sectors == 0 {
+            continue;
+        }
+
+        let letter = (b'a' + ((first_index + offset) % 26) as u8) as char;
+        let disk_name = alloc::format!("sd{}", letter);
+        crate::println!(
+            "[BLK] {}: {} секторов ({} МиБ) [IDE {}]",
+            disk_name,
+            info.sectors,
+            (info.sectors * 512) / (1024 * 1024),
+            info.model
+        );
+
+        let shared: Arc<Mutex<Box<dyn DiskIo>>> = Arc::new(Mutex::new(disk));
+        added += register(mgr, &disk_name, shared, info.sectors);
+        disks += 1;
+    }
+
+    (added, disks)
 }
 
 /// ATAPI CD/DVD: `sr0`, `sr1`, ... (логические блоки 2048 байт).
