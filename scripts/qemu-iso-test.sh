@@ -8,7 +8,7 @@
 #   * имена Joliet/Rock Ridge (нижний регистр, длинные имена);
 #   * файл в подкаталоге и размер extent'а (файл не влезает в один блок).
 #
-# Требования: qemu-system-x86_64, genisoimage.
+# Требования: qemu-system-x86_64, genisoimage (или xorriso -as mkisofs).
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,12 +22,20 @@ iso="$log_dir/iso-test.iso"
 serial_log="$log_dir/qemu-iso.log"
 src_dir="$log_dir/iso-test-src"
 
-for tool in "$qemu" genisoimage; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "missing required tool: $tool" >&2
-        exit 127
-    fi
-done
+if ! command -v "$qemu" >/dev/null 2>&1; then
+    echo "missing required tool: $qemu" >&2
+    exit 127
+fi
+# genisoimage или его совместимый режим в xorriso (`-as mkisofs`): в CI
+# стоит только xorriso.
+if command -v genisoimage >/dev/null 2>&1; then
+    ISO_TOOL=(genisoimage)
+elif command -v xorriso >/dev/null 2>&1; then
+    ISO_TOOL=(xorriso -as mkisofs)
+else
+    echo "missing required tool: genisoimage or xorriso" >&2
+    exit 127
+fi
 for file in "$image" "$repo_root/OVMF.fd"; do
     if [[ ! -f "$file" ]]; then
         echo "missing $file (run ./build.sh setup && make build)" >&2
@@ -42,7 +50,7 @@ printf 'hello from iso9660\n' > "$src_dir/hello.txt"
 printf 'nested iso file\n' > "$src_dir/docs/nested.txt"
 # 100 КиБ: extent больше одного 2048-байтного блока, размер проверяем через `ls -l`.
 head -c 102400 /dev/zero | tr '\0' 'B' > "$src_dir/docs/blob.bin"
-genisoimage -quiet -R -J -V ISOVOL -o "$iso" "$src_dir"
+"${ISO_TOOL[@]}" -quiet -R -J -V ISOVOL -o "$iso" "$src_dir" >/dev/null
 
 qemu_key() {
     case "$1" in
