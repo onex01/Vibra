@@ -463,9 +463,12 @@ pub unsafe fn pci_read_u32_config(bus: u8, dev: u8, func: u8, offset: u8) -> u32
 
 /// Включить Bus Master (bit 2) для PCI устройства — необходимо для DMA
 pub unsafe fn enable_bus_master(bus: u8, dev: u8, func: u8) {
-    let mut command = pci_read_u32(bus, dev, func, 0x04);
-    command |= (1 << 2) | (1 << 1); // Bus Master + Memory Space
-    pci_write_u32(bus, dev, func, 0x04, command);
+    // 0x04 — command (16 бит) + status (16 бит, W1C). Читать/писать 32 бита
+    // нельзя: запись вернула бы прочитанный статус и сбросила его биты
+    // (включая «capability list»), после чего MSI/PCIe-capabilities терялись.
+    let command = pci_read_u16(bus, dev, func, 0x04);
+    let updated = command | (1 << 2) | (1 << 1); // Bus Master + Memory Space
+    pci_write_u16(bus, dev, func, 0x04, updated);
 }
 
 /// Найти все устройства по class/subclass

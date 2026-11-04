@@ -722,7 +722,9 @@ pub fn dump_pending() {
 }
 
 pub fn irq_count() -> u64 {
-    KEYBOARD_STATE.lock().irq_count
+    // Лок делится с IRQ1: без cli прерывание между lock() и drop() повесит
+    // машину на том же локе.
+    crate::interrupts::without_interrupts(|| KEYBOARD_STATE.lock().irq_count)
 }
 
 

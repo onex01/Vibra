@@ -68,26 +68,20 @@ fn hhdm_virt(phys: u64) -> u64 {
     crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed) + phys
 }
 
+/// MMIO читается/пишется как volatile.
+///
+/// Раньше здесь был inline-asm с `options(nomem)`: для MMIO это неверно —
+/// компилятор вправе кешировать и переупорядочивать такие обращения.
+/// Потерянный или отложенный EOI на реальной машине останавливает доставку
+/// прерываний.
 unsafe fn lapic_read(reg: u64) -> u32 {
     let addr = hhdm_virt(LAPIC_BASE_PHYS.load(Ordering::Relaxed)) + reg;
-    let val: u32;
-    core::arch::asm!(
-        "mov rax, [rdi]",
-        out("rax") val,
-        in("rdi") addr,
-        options(nostack, nomem),
-    );
-    val
+    core::ptr::read_volatile(addr as *const u32)
 }
 
 unsafe fn lapic_write(reg: u64, val: u32) {
     let addr = hhdm_virt(LAPIC_BASE_PHYS.load(Ordering::Relaxed)) + reg;
-    core::arch::asm!(
-        "mov [rdi], eax",
-        in("rdi") addr,
-        in("eax") val,
-        options(nostack, nomem),
-    );
+    core::ptr::write_volatile(addr as *mut u32, val);
 }
 
 unsafe fn ioapic_read(reg: u64) -> u32 {
