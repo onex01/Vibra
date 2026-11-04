@@ -95,7 +95,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test shell-test check boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
+.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test iso-test shell-test check boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
 
 all: run
 
@@ -150,6 +150,10 @@ nvme-test: build
 # Большие тома: NTFS 2T, GPT выше 2T, MBR на 4Kn.
 big-fs-test: build
 	@QEMU="$(QEMU)" bash scripts/qemu-fs-big-test.sh
+
+# ISO9660 с CD-ROM через ATAPI: монтирование, имена Joliet/Rock Ridge.
+iso-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-iso-test.sh
 
 # Интерактивный shell: Tab, история, help, объединённый test.
 shell-test: build

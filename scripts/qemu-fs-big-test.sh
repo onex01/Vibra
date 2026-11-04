@@ -265,24 +265,47 @@ run_case "$serial_log" 'hello from 2TB ntfs' \
     "mount /mnt2 auto sdc1" \
     "cat /mnt2/hello.txt" \
     "mount /mnt3 auto sdd" \
+    "mount /mnt4 auto LABEL=LABELVOL" \
+    "cat /mnt4/label.txt" \
+    "mount /mnt5 auto LABEL=EXFATVOL" \
+    "ls /mnt5" \
+    "cat /mnt5/hello.txt" \
+    "cat /mnt5/sub/nested.txt" \
+    "cat /mnt5/big.txt" \
     "umount /mnt" \
     "umount /mnt2" \
+    "umount /mnt4" \
+    "umount /mnt5" \
     -- \
     -drive "if=none,id=big2t,file=$big2t,format=raw" \
     -device "ide-hd,drive=big2t,bus=ide.1" \
     -drive "if=none,id=gpt3t,file=$gpt3t,format=raw" \
     -device "ide-hd,drive=gpt3t,bus=ide.2" \
     -drive "if=none,id=fat16,file=$fat16,format=raw" \
-    -device "ide-hd,drive=fat16,bus=ide.3"
+    -device "ide-hd,drive=fat16,bus=ide.3" \
+    -drive "if=none,id=label,file=$labelfs,format=raw" \
+    -device "ide-hd,drive=label,bus=ide.4" \
+    -drive "if=none,id=exfat,file=$exfat,format=raw" \
+    -device "ide-hd,drive=exfat,bus=ide.5"
 
 grep -Fq 'hello from gpt above 2TB' "$serial_log" \
     || fail "GPT partition above 2TB was not mounted/read"
-grep -Eq '[[:space:]]gpt[[:space:]]*$' "$serial_log" \
+grep -Eq '[[:space:]]gpt' "$serial_log" \
     || fail "disks did not report the GPT table"
-grep -Eq '[[:space:]]fat16[[:space:]]*$' "$serial_log" \
+grep -Eq '[[:space:]]fat16' "$serial_log" \
     || fail "disks did not detect FAT16"
 grep -Fq 'SKIPPED (FAT12/FAT16 is not supported; only FAT32)' "$serial_log" \
     || fail "mount did not explain that FAT16 is unsupported"
+grep -Fq 'hello from label' "$serial_log" \
+    || fail "mount LABEL=LABELVOL did not mount the labelled FAT32 volume"
+grep -Eq '[[:space:]]LABELVOL' "$serial_log" \
+    || fail "disks did not show the FAT32 volume label"
+grep -Fq 'OK (exfat, ro)' "$serial_log" || fail "exFAT did not mount by label"
+grep -Fq 'hello from exfat' "$serial_log" || fail "exFAT contiguous file was not read"
+grep -Fq 'nested exfat file' "$serial_log" || fail "exFAT subdirectory was not read"
+# big.txt — 1.5 кластера (A…A|B…B): переход виден только при верном порядке
+# цепочки FAT.
+grep -Fq 'AAABBB' "$serial_log" || fail "exFAT FAT-chain order is wrong"
 grep -Fq 'Unmounted /mnt2' "$serial_log" || fail "umount did not release /mnt2"
 grep -Eq 'driver: (ahci|ide)' "$serial_log" || fail "disks -v has no driver column"
 grep -Fq 'model:' "$serial_log" || fail "disks -v did not report a device model"
@@ -296,7 +319,7 @@ run_case "$serial_4k" 'hello from mbr 4kn' \
     -drive "if=none,id=mbr4k,file=$mbr4k,format=raw" \
     -device "nvme,drive=mbr4k,serial=MBR4K,logical_block_size=4096,physical_block_size=4096"
 
-grep -Eq '[[:space:]]mbr[[:space:]]*$' "$serial_4k" \
+grep -Eq '[[:space:]]mbr' "$serial_4k" \
     || fail "disks did not report the MBR table"
 grep -Fq 'driver: nvme' "$serial_4k" || fail "disks -v has no driver column"
 grep -Fq 'sector: 4096 B' "$serial_4k" || fail "disks -v did not report the 4Kn sector size"

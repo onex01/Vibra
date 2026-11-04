@@ -2,7 +2,7 @@
 
 ## Область действия
 
-Vibra Kernel 0.2.0-rc.13 — экспериментальное модульное монолитное ядро для
+Vibra Kernel 0.2.0-rc.14 — экспериментальное модульное монолитное ядро для
 `x86_64-unknown-none`. Оно загружается Limine в UEFI и использует QEMU как
 основной тестовый стенд. Реальное оборудование пока не считается
 поддержанным; каждый драйвер должен получить отдельную hardware-валидацию.
@@ -80,7 +80,7 @@ CMOS), `diag apic`, `uptime`.
 | `timer` | TSC/HPET/PIT часы, CMOS RTC, wall clock | TSC + HPET, RTC синхронизирован; IRQ-тики измеряются |
 | `drivers/pci`, `acpi` | обнаружение x86-оборудования | PCI + ACPI; BAR выше 4 ГБ переносятся в низкое MMIO-окно |
 | `drivers/usb` | xHCI lifecycle + HID boot keyboard | enumeration и HID-отчёты работают в QEMU |
-| `fs` | RamFS, VFS, block layer, FAT32 (rw для `VIBRALOG`), ext2/3/4 (ro), NTFS (ro), exFAT (ro) | block layer + MBR/EBR/GPT + ext4 extents + exFAT работают в QEMU |
+| `fs` | RamFS, VFS, block layer, FAT32 (rw для `VIBRALOG`), ext2/3/4 (ro), NTFS (ro), exFAT/ISO9660 (ro) | block layer + MBR/EBR/GPT + ext4 extents + exFAT/ISO9660 работают в QEMU |
 | `drivers/ahci` | SATA + ATAPI CD | ATA read/write и ATAPI `PACKET`/`READ(10)` работают в QEMU |
 | `drivers/ide` | PATA/IDE (BIOS legacy) | только чтение, регистрируется в block layer |
 | `drivers/usb` | xHCI + UHCI + HID + mass storage | QEMU; EHCI/OHCI нет |
@@ -95,7 +95,7 @@ CMOS), `diag apic`, `uptime`.
   арифметикой `virt - hhdm`.
 - Нет единого driver lifecycle: AHCI/NVMe/ATAPI/xHCI инициализируются разными
   путями. Запись поддерживает только FAT32 (явный `rw`, используется для
-  `VIBRALOG`); ext2/3/4, NTFS и exFAT — read-only.
+  `VIBRALOG`); ext2/3/4, NTFS, exFAT и ISO9660 — read-only.
 - SMP не включён: работает только BSP, `top` показывает агрегированную
   загрузку и помечает остальные логические CPU как неактивные.
 - GUI и `vibra/` не являются ядром release scope.

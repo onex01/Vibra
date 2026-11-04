@@ -296,6 +296,7 @@ fn fs_label(disk: &mut dyn DiskIo, fs: &str) -> alloc::string::String {
     match fs {
         "fat12" | "fat16" | "fat32" => fat_label(disk),
         "exfat" => super::exfat::volume_label(disk).unwrap_or_default(),
+        "iso9660" => super::iso9660::volume_label(disk).unwrap_or_default(),
         _ => alloc::string::String::new(),
     }
 }

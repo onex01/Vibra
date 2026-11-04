@@ -508,6 +508,13 @@ pub fn detect_fs_type(disk: &mut dyn DiskIo) -> &'static str {
         }
     }
 
+    // ISO9660: Primary Volume Descriptor в LBA 16 (2048 байт) начинается с
+    // "CD001" по смещению 1. Первых 2 КиБ для этого мало — читаем отдельно.
+    let mut pvd = [0u8; 2048];
+    if disk.read(64, &mut pvd).is_ok() && &pvd[1..6] == b"CD001" {
+        return "iso9660";
+    }
+
     // Раздел-таблица без ФС: показываем её тип, а не "unknown". Раньше
     // `disks` писал `unknown` для диска с GPT/MBR, и было непонятно, что
     // монтировать нужно раздел (`sdb1`), а не сам диск.

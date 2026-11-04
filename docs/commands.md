@@ -34,6 +34,8 @@
 | `mount <path> fat32 <dev> [rw]` | FAT32; запись только с явным `rw` |
 | `mount <path> ext4 <dev>` | ext2/3/4, только чтение |
 | `mount <path> ntfs <dev>` | NTFS, только чтение |
+| `mount <path> exfat <dev>` | exFAT, только чтение |
+| `mount <path> iso9660 <dev>` | ISO9660 (CD/DVD, `sr0`), только чтение |
 | `mount <path> ramfs` | смонтировать RAMFS |
 | `mount <path> auto LABEL=<метка>` | найти том по метке (`LABEL=VIBRALOG`) |
 | `mount /dev/sdb1 /mnt [rw]` | Linux-подобная форма |
@@ -43,6 +45,9 @@
 
 Имена устройств: `sda`, `sda1`, `sdb1`… — AHCI, IDE/PATA, NVMe и USB
 mass storage нумеруются подряд; CD/DVD — `sr0`, `sr1`.
+
+`ISO9660` (CD/DVD, `sr0`) монтируется только для чтения: PVD, Joliet,
+Rock Ridge `NM`, подкаталоги. Multi-extent и UDF не поддержаны.
 
 `exFAT` монтируется только для чтения: boot sector, FAT-цепочки,
 contiguous-файлы и каталоги. Запись не реализована.

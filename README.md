@@ -13,7 +13,7 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.13`
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.14`
 обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 
@@ -34,7 +34,8 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 - PS/2-клавиатура, ACPI и PCI-инвентаризация;
 - AHCI/NVMe/ATAPI (CD), IDE/PATA, e1000/RTL8139, xHCI и UHCI (USB 1.1);
 - FAT32 (rw для `VIBRALOG`), ext2/3/4 (ro, включая extents и 64bit),
-  NTFS (ro) и exFAT (ro, включая contiguous-файлы и FAT-цепочки);
+  NTFS (ro), exFAT (ro, включая contiguous-файлы и FAT-цепочки) и ISO9660
+  на CD/DVD (ro, Joliet/Rock Ridge);
 - RAM-файловая система, встроенная shell, `vktst` и `disks` для диагностики.
 
 Это не подтверждает работу соответствующих драйверов на реальном железе.
@@ -121,6 +122,7 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh bad-fs-test    проверить устойчивость к повреждённым ФС
 ./build.sh fs-test        проверить FAT32/ext2/ext4/NTFS, MBR-раздел, sync/umount
 ./build.sh big-fs-test    проверить NTFS 2 ТБ, GPT выше 2 ТБ, MBR на 4Kn, exFAT
+./build.sh iso-test       смонтировать ISO9660 с CD-ROM (sr0) и прочитать файлы
 ./build.sh vktst-test     проверить vktst, top, free и tree
 ./build.sh debug-image-test  проверить 3 раздела USB debug-образа и запись лога
 ./build.sh iso-debug-test проверить debug ISO, записанный на USB
@@ -139,13 +141,13 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 данными и не тестируйте операции записи драйверов на ценных дисках.
 
 Монтирование дисков по умолчанию **read-only**. Запись включается только явным
-аргументом: `mount /mnt fat32 sda1 rw`. ext2/3/4, NTFS и exFAT остаются
-read-only:
+аргументом: `mount /mnt fat32 sda1 rw`. ext2/3/4, NTFS, exFAT и ISO9660
+остаются read-only:
 драйверы не поддерживают запись. Boot-лог пишется на FAT32-раздел `VIBRALOG`.
 
 Имена образов содержат дату и версию, например
-`vibra_2026-10-31_0.2.0-rc.13.iso` и
-`vibra-debug_2026-10-31_0.2.0-rc.13.iso`; для совместимости создаются
+`vibra_2026-10-31_0.2.0-rc.14.iso` и
+`vibra-debug_2026-10-31_0.2.0-rc.14.iso`; для совместимости создаются
 симлинки `build/vibra.iso` и `build/vibra-debug.iso`.
 
 ## CI

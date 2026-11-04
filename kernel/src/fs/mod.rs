@@ -5,6 +5,7 @@ pub mod fat32;
 pub mod ext2;
 pub mod ntfs;
 pub mod exfat;
+pub mod iso9660;
 pub mod disk;
 pub mod partition;
 pub mod blockdev;
@@ -19,6 +20,7 @@ pub use fat32::Fat32Fs;
 pub use ext2::Ext2Fs;
 pub use ntfs::NtfsFs;
 pub use exfat::ExfatFs;
+pub use iso9660::IsoFs;
 pub use disk::DiskIo;
 pub use disk_manager::DiskManager;
 
@@ -475,6 +477,13 @@ pub fn mount_ntfs(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
     mount_fs(path, Box::new(ntfs), true)
 }
 
+/// Смонтировать ISO9660 (CD/DVD, только чтение).
+pub fn mount_iso(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
+    let mut iso = IsoFs::new(disk)?;
+    iso.mount()?;
+    mount_fs(path, Box::new(iso), true)
+}
+
 /// Смонтировать exFAT (только чтение).
 pub fn mount_exfat(path: &str, disk: Box<dyn DiskIo>) -> Result<(), FsError> {
     let mut exfat = ExfatFs::new(disk)?;
@@ -555,6 +564,15 @@ fn mount_auto_mode(path: &str, disk_id: usize, write: bool) -> Result<&'static s
             fs.mount()?;
             mount_fs(path, Box::new(fs), true)?;
             Ok("exfat")
+        }
+        "iso9660" => {
+            if write {
+                return Err(FsError::ReadOnly);
+            }
+            let mut fs = IsoFs::new(disk)?;
+            fs.mount()?;
+            mount_fs(path, Box::new(fs), true)?;
+            Ok("iso9660")
         }
         // FAT12/16 не поддерживаются: драйвер работает только с FAT32.
         "fat12" | "fat16" => Err(FsError::NotSupported),

@@ -186,6 +186,10 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                     Some(disk) => fs::mount_ntfs(path, disk).map(|_| format!("OK (ntfs, ro)")),
                     None => Err(fs::FsError::NotFound),
                 },
+                "iso9660" => match fs::get_disk_manager().lock().open(disk_id) {
+                    Some(disk) => fs::mount_iso(path, disk).map(|_| format!("OK (iso9660, ro)")),
+                    None => Err(fs::FsError::NotFound),
+                },
                 "exfat" => match fs::get_disk_manager().lock().open(disk_id) {
                     Some(disk) => fs::mount_exfat(path, disk).map(|_| format!("OK (exfat, ro)")),
                     None => Err(fs::FsError::NotFound),
