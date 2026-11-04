@@ -40,5 +40,5 @@ make iso-debug         # debug ISO: ESP / VIBRA / VIBRALOG
 make usb-debug         # USB debug-образ с тремя разделами
 ```
 
-Документация: `docs/ext4.md`, `docs/vktst.md`, `docs/release.md`,
-`docs/testing.md`, `CHANGELOG.md`.
+Документация: `docs/commands.md`, `docs/ext4.md`, `docs/vktst.md`,
+`docs/release.md`, `docs/testing.md`, `CHANGELOG.md`.

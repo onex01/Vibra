@@ -87,6 +87,7 @@ ISO, UEFI/USB образы, `SHA256SUMS` и GitHub Release. Подробност
 ## Документы
 
 - `architecture.md` — фактическая архитектура и ограничения.
+- `commands.md` — справочник команд shell и горячих клавиш.
 - `ext4.md` — чтение ext2/3/4: extents, 64bit, ограничения.
 - `vktst.md` — Vibra Kernel Tests: группы, режимы, отчёт.
 - `release.md` — версии, имена образов, release workflow.
