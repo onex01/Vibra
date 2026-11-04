@@ -139,6 +139,9 @@ pub struct NvmeController {
     // Буфер для идентификации
     id_buf: *mut u8,
     id_buf_phys: u64,
+    /// Identify Controller: модель и серийник для `disks`/`diag disk`.
+    model: alloc::string::String,
+    serial: alloc::string::String,
 }
 
 unsafe impl Send for NvmeController {}
@@ -290,6 +293,8 @@ impl NvmeController {
                 let model_end = model_raw.iter().rposition(|&b| b != b' ' && b != 0).map_or(0, |i| i + 1);
                 let model = alloc::string::String::from_utf8_lossy(&model_raw[..model_end]);
 
+                self.model = alloc::string::String::from(model.as_ref());
+                self.serial = alloc::string::String::from(serial.as_ref());
                 println!("[NVMe] Controller: {}", model);
                 println!("[NVMe] Serial number: {}", serial);
                 println!("[NVMe] Maximum queue entries: {}", data[256] as u32 + 1);
@@ -616,6 +621,8 @@ pub fn init() {
             ns_id: 1,
             id_buf: core::ptr::null_mut(),
             id_buf_phys: 0,
+            model: alloc::string::String::new(),
+            serial: alloc::string::String::new(),
         };
 
         // Identify Controller
@@ -899,6 +906,12 @@ pub fn create_disk() -> Option<crate::alloc::boxed::Box<dyn crate::fs::disk::Dis
 /// Проверить, доступен ли NVMe контроллер
 pub fn is_available() -> bool {
     NVME_CONTROLLER.lock().is_some()
+}
+
+/// Модель и серийный номер контроллера (для `disks`).
+pub fn metadata() -> Option<(alloc::string::String, alloc::string::String)> {
+    let ctrl = NVME_CONTROLLER.lock();
+    ctrl.as_ref().map(|c| (c.model.clone(), c.serial.clone()))
 }
 
 /// Получить информацию о диске

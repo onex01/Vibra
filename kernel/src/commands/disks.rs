@@ -51,15 +51,31 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
 
         match entry.fs_type {
             "unknown" => console.print_colored(entry.fs_type, COLOR_RED),
-            "exfat" => console.print_colored(entry.fs_type, COLOR_YELLOW),
+            "exfat" | "fat12" | "fat16" => console.print_colored(entry.fs_type, COLOR_YELLOW),
             _ => console.print_colored(entry.fs_type, COLOR_GREEN),
         }
         console.put_char('\n');
 
-        if verbose && entry.sectors > 0 {
-            console.print_colored("          sectors: ", COLOR_DARK_GRAY);
-            console.print_num(entry.sectors as usize);
+        if verbose {
+            console.print_colored("          driver: ", COLOR_DARK_GRAY);
+            console.print(entry.driver);
+            console.print_colored("  sector: ", COLOR_DARK_GRAY);
+            console.print_num(entry.sector_size);
+            console.print_colored(" B", COLOR_DARK_GRAY);
+            if !entry.model.is_empty() {
+                console.print_colored("  model: ", COLOR_DARK_GRAY);
+                console.print(&entry.model);
+            }
+            if !entry.serial.is_empty() {
+                console.print_colored("  serial: ", COLOR_DARK_GRAY);
+                console.print(&entry.serial);
+            }
             console.put_char('\n');
+            if entry.sectors > 0 {
+                console.print_colored("          sectors: ", COLOR_DARK_GRAY);
+                console.print_num(entry.sectors as usize);
+                console.put_char('\n');
+            }
         }
     }
 

@@ -138,6 +138,13 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
                 );
                 return CmdResult::Ok;
             }
+            if matches!(detected, Some("fat12") | Some("fat16")) {
+                console.print_colored(
+                    "SKIPPED (FAT12/FAT16 is not supported; only FAT32)\n",
+                    COLOR_RED,
+                );
+                return CmdResult::Ok;
+            }
             if detected == Some("exfat") {
                 console.print_colored("SKIPPED (exFAT is not supported)\n", COLOR_RED);
                 console.print_colored("  Use a FAT32/NTFS volume or convert the disk.\n", COLOR_YELLOW);

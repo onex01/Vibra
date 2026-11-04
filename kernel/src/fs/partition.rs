@@ -429,6 +429,61 @@ pub fn read_partitions(disk: &mut dyn DiskIo) -> Vec<Partition> {
     Vec::new()
 }
 
+/// Семейство FAT по BPB: `fat12`, `fat16` или `fat32`.
+///
+/// Классификация — по числу кластеров в data-области (как в спецификации):
+/// < 4085 — FAT12, < 65525 — FAT16, иначе FAT32. Строка `FAT32` в BPB
+/// ненадёжна и используется только как подсказка.
+fn fat_family(s: &[u8]) -> Option<&'static str> {
+    if s.len() < 512 { return None; }
+    let bps = u16::from_le_bytes([s[11], s[12]]) as u64;
+    let spc = s[13] as u64;
+    let reserved = u16::from_le_bytes([s[14], s[15]]) as u64;
+    let fat_count = s[16] as u64;
+    let root_entries = u16::from_le_bytes([s[17], s[18]]) as u64;
+    let total16 = u16::from_le_bytes([s[19], s[20]]) as u64;
+    let fat16 = u16::from_le_bytes([s[22], s[23]]) as u64;
+    let total32 = u32::from_le_bytes([s[32], s[33], s[34], s[35]]) as u64;
+    let fat32 = u32::from_le_bytes([s[36], s[37], s[38], s[39]]) as u64;
+
+    if !matches!(bps, 512 | 1024 | 2048 | 4096) || spc == 0 || !spc.is_power_of_two() {
+        return None;
+    }
+    if reserved == 0 || fat_count == 0 || fat_count > 4 {
+        return None;
+    }
+    let fat_size = if fat16 != 0 { fat16 } else { fat32 };
+    if fat_size == 0 { return None; }
+
+    let total = if total16 != 0 { total16 } else { total32 };
+    if total < reserved {
+        return None;
+    }
+
+    // FAT32 определяется самой раскладкой BPB: нет 16-битного размера FAT
+    // и нет фиксированного корневого каталога. Считать кластеры здесь нельзя:
+    // `mkfs.fat -F 32` на маленьком томе (20–128 МиБ) даёт меньше 65525
+    // кластеров, и такая ФС всё равно остаётся FAT32.
+    if fat16 == 0 && fat32 != 0 && root_entries == 0 {
+        return Some("fat32");
+    }
+
+    let root_dir_sectors = (root_entries * 32 + bps - 1) / bps;
+    let data_start = reserved + fat_count * fat_size + root_dir_sectors;
+    if data_start >= total {
+        return None;
+    }
+    let clusters = (total - data_start) / spc;
+
+    Some(if clusters < 4085 {
+        "fat12"
+    } else if clusters < 65525 {
+        "fat16"
+    } else {
+        "fat32"
+    })
+}
+
 /// Определить тип ФС по первым секторам раздела.
 pub fn detect_fs_type(disk: &mut dyn DiskIo) -> &'static str {
     // Читаем 2 КиБ: NTFS/FAT/exFAT signature находятся в первом секторе,
@@ -444,8 +499,14 @@ pub fn detect_fs_type(disk: &mut dyn DiskIo) -> &'static str {
     // exFAT: "EXFAT   " по смещению 3.
     if &s[3..11] == b"EXFAT   " { return "exfat"; }
 
-    // FAT32: сигнатура 0x55AA + "FAT32" в поле типа ФС (offset 82).
-    if s[510] == 0x55 && s[511] == 0xAA && &s[82..87] == b"FAT32" { return "fat32"; }
+    // FAT: определяем семейство по BPB, а не по строке "FAT32" в поле
+    // типа ФС. Некоторые тома объявляют её неверно, а FAT12/16 раньше
+    // выглядели как `unknown`, и было непонятно, почему `mount` не работает.
+    if s[510] == 0x55 && s[511] == 0xAA {
+        if let Some(family) = fat_family(&s) {
+            return family;
+        }
+    }
 
     // Раздел-таблица без ФС: показываем её тип, а не "unknown". Раньше
     // `disks` писал `unknown` для диска с GPT/MBR, и было непонятно, что

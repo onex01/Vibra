@@ -25,8 +25,17 @@ pub struct DiskEntry {
     pub sectors: u64,
     /// Начало окна в секторах родительского устройства.
     pub offset: u64,
-    /// Определённый тип ФС: `fat32`, `ntfs`, `ext2`, `unknown`.
+    /// Определённый тип ФС: `fat32`, `ntfs`, `ext2`, `gpt`, `mbr`, `unknown`.
     pub fs_type: &'static str,
+    /// Драйвер, который нашёл устройство: `ahci`, `ide`, `nvme`, `atapi`,
+    /// `usb`, `ram`.
+    pub driver: &'static str,
+    /// Модель устройства (пусто, если драйвер её не сообщает).
+    pub model: String,
+    /// Серийный номер (пусто, если недоступен).
+    pub serial: String,
+    /// Размер логического сектора устройства (512 или 4096).
+    pub sector_size: usize,
     /// Общее устройство ввода-вывода.
     pub disk: Arc<Mutex<Box<dyn DiskIo>>>,
 }

@@ -27,6 +27,7 @@ ready_timeout="${BOOT_READY_TIMEOUT:-60}"
 QEMU="${QEMU:-qemu-system-x86_64}"
 
 big2t="$log_dir/fs-big-2t.img"
+fat16="$log_dir/fs-big-fat16.img"
 gpt3t="$log_dir/fs-big-gpt3t.img"
 mbr4k="$log_dir/fs-big-mbr4k.img"
 
@@ -44,7 +45,7 @@ for file in "$hdd" "$repo_root/OVMF.fd"; do
 done
 
 cleanup() {
-    rm -f "$big2t" "$gpt3t" "$mbr4k"
+    rm -f "$big2t" "$gpt3t" "$mbr4k" "$fat16"
 }
 trap cleanup EXIT
 
@@ -209,7 +210,9 @@ run_case() {
             fi
             sleep 1
         done
-        sleep 2
+        # Даём дискам доинициализироваться: NVMe/IDE отвечают несколько
+        # медленнее, и первые клавиши иначе теряются.
+        sleep 4
         for cmd in "${cmds[@]}"; do
             send_text "$cmd"
             send_text $'\n'
@@ -235,30 +238,43 @@ run_case() {
     fi
 }
 
+echo "==> Preparing FAT16 volume (must be detected, not mounted)"
+truncate -s 64M "$fat16"
+mkfs.fat -F 16 -n FSTEST16 "$fat16" >/dev/null
+
 echo "==> Case 1: 2T NTFS whole disk + GPT partition above 2T (SATA)"
 run_case "$serial_log" 'hello from 2TB ntfs' \
-    "disks" \
+    "disks -v" \
     "mount /mnt auto sdb" \
     "cat /mnt/hello.txt" \
     "mount /mnt2 auto sdc1" \
     "cat /mnt2/hello.txt" \
+    "mount /mnt3 auto sdd" \
     "umount /mnt" \
     "umount /mnt2" \
     -- \
     -drive "if=none,id=big2t,file=$big2t,format=raw" \
     -device "ide-hd,drive=big2t,bus=ide.1" \
     -drive "if=none,id=gpt3t,file=$gpt3t,format=raw" \
-    -device "ide-hd,drive=gpt3t,bus=ide.2"
+    -device "ide-hd,drive=gpt3t,bus=ide.2" \
+    -drive "if=none,id=fat16,file=$fat16,format=raw" \
+    -device "ide-hd,drive=fat16,bus=ide.3"
 
 grep -Fq 'hello from gpt above 2TB' "$serial_log" \
     || fail "GPT partition above 2TB was not mounted/read"
 grep -Eq '[[:space:]]gpt[[:space:]]*$' "$serial_log" \
     || fail "disks did not report the GPT table"
+grep -Eq '[[:space:]]fat16[[:space:]]*$' "$serial_log" \
+    || fail "disks did not detect FAT16"
+grep -Fq 'SKIPPED (FAT12/FAT16 is not supported; only FAT32)' "$serial_log" \
+    || fail "mount did not explain that FAT16 is unsupported"
 grep -Fq 'Unmounted /mnt2' "$serial_log" || fail "umount did not release /mnt2"
+grep -Eq 'driver: (ahci|ide)' "$serial_log" || fail "disks -v has no driver column"
+grep -Fq 'model:' "$serial_log" || fail "disks -v did not report a device model"
 
 echo "==> Case 2: MBR on a 4Kn device (NVMe, 4096-byte sectors)"
 run_case "$serial_4k" 'hello from mbr 4kn' \
-    "disks" \
+    "disks -v" \
     "mount /mnt auto sdb1" \
     "cat /mnt/hello.txt" \
     -- \
@@ -267,5 +283,7 @@ run_case "$serial_4k" 'hello from mbr 4kn' \
 
 grep -Eq '[[:space:]]mbr[[:space:]]*$' "$serial_4k" \
     || fail "disks did not report the MBR table"
+grep -Fq 'driver: nvme' "$serial_4k" || fail "disks -v has no driver column"
+grep -Fq 'sector: 4096 B' "$serial_4k" || fail "disks -v did not report the 4Kn sector size"
 
 echo "big filesystem test passed; logs: $serial_log, $serial_4k"

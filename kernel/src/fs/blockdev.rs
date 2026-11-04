@@ -61,7 +61,18 @@ fn probe_ide(mgr: &mut DiskManager, first_index: usize) -> (usize, usize) {
         );
 
         let shared: Arc<Mutex<Box<dyn DiskIo>>> = Arc::new(Mutex::new(disk));
-        added += register(mgr, &disk_name, shared, info.sectors);
+        added += register(
+            mgr,
+            &disk_name,
+            shared,
+            info.sectors,
+            DiskMeta {
+                driver: "ide",
+                model: info.model.as_str(),
+                serial: info.serial.as_str(),
+                sector_size: 512,
+            },
+        );
         disks += 1;
     }
 
@@ -91,8 +102,20 @@ fn probe_atapi(mgr: &mut DiskManager, _first_index: usize) -> (usize, usize) {
             disk.sector_size()
         );
 
+        let ss = disk.sector_size();
         let shared: Arc<Mutex<Box<dyn DiskIo>>> = Arc::new(Mutex::new(Box::new(disk)));
-        added += register(mgr, &name, shared, sectors);
+        added += register(
+            mgr,
+            &name,
+            shared,
+            sectors,
+            DiskMeta {
+                driver: "atapi",
+                model: "",
+                serial: "",
+                sector_size: ss,
+            },
+        );
         count += 1;
     }
 
@@ -135,7 +158,18 @@ fn probe_ahci(mgr: &mut DiskManager) -> (usize, usize) {
                 info.as_ref().map(|i| i.sector_size).unwrap_or(512),
             ))));
 
-        added += register(mgr, &disk_name, shared, sectors);
+        added += register(
+            mgr,
+            &disk_name,
+            shared,
+            sectors,
+            DiskMeta {
+                driver: "ahci",
+                model: model.as_str(),
+                serial: info.as_ref().map(|i| i.serial.as_str()).unwrap_or(""),
+                sector_size: info.as_ref().map(|i| i.sector_size as usize).unwrap_or(512),
+            },
+        );
         disks += 1;
     }
 
@@ -171,8 +205,24 @@ fn probe_nvme(mgr: &mut DiskManager, first_index: usize) -> (usize, usize) {
         block_size
     );
 
+    let (model, serial) = crate::drivers::nvme::metadata()
+        .unwrap_or_else(|| (alloc::string::String::new(), alloc::string::String::new()));
     let shared: Arc<Mutex<Box<dyn DiskIo>>> = Arc::new(Mutex::new(disk));
-    (register(mgr, &disk_name, shared, sectors), 1)
+    (
+        register(
+            mgr,
+            &disk_name,
+            shared,
+            sectors,
+            DiskMeta {
+                driver: "nvme",
+                model: model.as_str(),
+                serial: serial.as_str(),
+                sector_size: block_size as usize,
+            },
+        ),
+        1,
+    )
 }
 
 /// USB-накопители (mass storage). Нумерация продолжает SATA.
@@ -199,19 +249,39 @@ fn probe_usb(mgr: &mut DiskManager, first_index: usize) -> usize {
             info.model()
         );
 
+        let model = alloc::format!("{} {}", info.vendor, info.product);
         let shared: Arc<Mutex<Box<dyn DiskIo>>> = Arc::new(Mutex::new(disk));
-        added += register(mgr, &disk_name, shared, info.sectors);
+        added += register(
+            mgr,
+            &disk_name,
+            shared,
+            info.sectors,
+            DiskMeta {
+                driver: "usb",
+                model: model.as_str(),
+                serial: "",
+                sector_size: 512,
+            },
+        );
     }
 
     added
 }
 
 /// Регистрирует диск и его разделы. Возвращает число добавленных записей.
+struct DiskMeta<'a> {
+    driver: &'static str,
+    model: &'a str,
+    serial: &'a str,
+    sector_size: usize,
+}
+
 fn register(
     mgr: &mut DiskManager,
     disk_name: &str,
     shared: Arc<Mutex<Box<dyn DiskIo>>>,
     sectors: u64,
+    meta: DiskMeta<'_>,
 ) -> usize {
     let mut added = 0usize;
 
@@ -227,6 +297,10 @@ fn register(
         sectors,
         offset: 0,
         fs_type: disk_fs,
+        driver: meta.driver,
+        model: alloc::string::String::from(meta.model),
+        serial: alloc::string::String::from(meta.serial),
+        sector_size: meta.sector_size.max(512),
         disk: shared.clone(),
     });
     added += 1;
@@ -260,6 +334,10 @@ fn register(
             sectors: p.sectors,
             offset: p.start_lba,
             fs_type,
+            driver: meta.driver,
+            model: alloc::string::String::from(meta.model),
+            serial: alloc::string::String::from(meta.serial),
+            sector_size: meta.sector_size.max(512),
             disk: shared.clone(),
         });
         added += 1;

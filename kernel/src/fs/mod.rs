@@ -539,6 +539,8 @@ fn mount_auto_mode(path: &str, disk_id: usize, write: bool) -> Result<&'static s
             Ok("ntfs")
         }
         "exfat" => Err(FsError::NotSupported),
+        // FAT12/16 не поддерживаются: драйвер работает только с FAT32.
+        "fat12" | "fat16" => Err(FsError::NotSupported),
         // Таблица разделов: монтировать нужно раздел, а не диск целиком.
         "gpt" | "mbr" => Err(FsError::NotFound),
         _ => Err(FsError::NotSupported),
