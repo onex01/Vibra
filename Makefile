@@ -100,7 +100,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test iso-test shell-test noserial-test serial-input-test check dist release-notes debug-variants iso-debug-noserial usb-debug-noserial boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
+.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test iso-test shell-test noserial-test serial-input-test check dist release-notes debug-variants iso-debug-noserial usb-debug-noserial build-script-test boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
 
 all: run
 
@@ -177,6 +177,7 @@ check:
 	@$(MAKE) kernel
 	@$(MAKE) kernel SERIAL_DEBUG=0
 	@python3 scripts/check-warning-budget.py
+	@$(MAKE) build-script-test
 
 # Локальная сборка релиза: все образы текущей версии, контрольные суммы,
 # манифест и текст описания релиза — в `dist/`. То же самое делает
@@ -209,6 +210,11 @@ dist:
 # Только текст описания релиза (без сборки образов).
 release-notes:
 	@scripts/release-notes.sh --tag "v$(VERSION)" --dist $(BUILD_DIR)/dist
+
+# Проверка хостового интерфейса ./build.sh: таблица команд, меню, соответствие
+# команд, которые зовёт CI, и существование make-целей.
+build-script-test:
+	@bash scripts/test-build-sh.sh
 
 # Проверка загрузки собранного ISO: UEFI (OVMF) и BIOS (SeaBIOS) через El Torito.
 iso-smoke: iso

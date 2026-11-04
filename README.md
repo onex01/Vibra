@@ -13,7 +13,7 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.16`
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.17`
 обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 
@@ -44,6 +44,18 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 физическом железе не подтверждён. Подробности и критерии готовности — в
 [roadmap](docs/roadmap.md).
 
+## Быстрый старт
+
+Без аргументов `build.sh` открывает интерактивное меню (на английском, чтобы
+не зависеть от локали терминала): сборка, запуск в QEMU, образы, тесты и
+диагностика. Полный список команд остаётся доступен напрямую — им пользуются
+скрипты и CI.
+
+```sh
+./build.sh            # меню
+./build.sh list       # все команды
+```
+
 ## Быстрый старт: QEMU
 
 ```sh
@@ -66,7 +78,11 @@ Serial остаётся доступен для ввода команд; лог�
 `clock-test` проверяет монотонные часы и RTC: `date`, `uptime`, `diag timer`,
 `/proc/uptime` и отсутствие удалённых каталогов (`/os`, `/apps`, `/lib`) в рамфс.
 `debug` включает serial shell. Не используйте его на открытом физическом
-serial-порту. Для образа без serial-ввода используйте `./build.sh secure`.
+serial-порту: для сборки без serial-ввода используйте `./build.sh secure`, а
+для debug-образа с логом на носителе, но без COM1 — `iso-debug-noserial` или
+`usb-debug-noserial`. Каждый символ в COM1 при 115200 стоит ~87 мкс, поэтому
+на длинном выводе вариант без serial заметно быстрее, а диагностика остаётся
+в `/VIBRA.LOG` на разделе `VIBRALOG`.
 `uefi-usb` создаёт GPT-образ с FAT32 EFI System Partition. Для bundled Limine
 отключите Secure Boot. Команда создаёт только файл образа и ничего не пишет на
 физический носитель.
@@ -124,8 +140,14 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh big-fs-test    проверить NTFS 2 ТБ, GPT выше 2 ТБ, MBR на 4Kn, exFAT
 ./build.sh iso-test       смонтировать ISO9660 с CD-ROM (sr0) и прочитать файлы
 ./build.sh noserial-test  загрузка без COM1 (регрессия зависания на Step 4)
-make iso-debug-noserial   debug-образ без serial: быстро + лог на VIBRALOG
-make dist                 собрать все релизные образы + SHA256SUMS + release notes
+./build.sh serial-input-test  ввод через COM1, а не через monitor
+./build.sh build-script-test  проверить сам build.sh (таблица, меню, цели)
+./build.sh iso-debug      debug ISO: serial-лог + раздел VIBRALOG
+./build.sh iso-debug-noserial  то же без COM1: скорость release, лог на месте
+./build.sh usb-debug      флешка с тремя разделами (ESP, VIBRA, VIBRALOG)
+./build.sh usb-debug-noserial  то же без COM1
+./build.sh debug-variants собрать все четыре debug-образа
+./build.sh dist           все релизные образы + SHA256SUMS + описание релиза
 ./build.sh vktst-test     проверить vktst, top, free и tree
 ./build.sh debug-image-test  проверить 3 раздела USB debug-образа и запись лога
 ./build.sh iso-debug-test проверить debug ISO, записанный на USB
@@ -149,8 +171,8 @@ make dist                 собрать все релизные образы + 
 драйверы не поддерживают запись. Boot-лог пишется на FAT32-раздел `VIBRALOG`.
 
 Имена образов содержат дату и версию, например
-`vibra_2026-10-31_0.2.0-rc.16.iso` и
-`vibra-debug_2026-10-31_0.2.0-rc.16.iso`; для совместимости создаются
+`vibra_2026-10-31_0.2.0-rc.17.iso` и
+`vibra-debug_2026-10-31_0.2.0-rc.17.iso`; для совместимости создаются
 симлинки `build/vibra.iso` и `build/vibra-debug.iso`.
 
 ## CI
