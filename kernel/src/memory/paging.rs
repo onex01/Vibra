@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub(crate) const ENTRY_PRESENT: u64 = 1 << 0;
 pub(crate) const ENTRY_WRITABLE: u64 = 1 << 1;
 pub(crate) const ENTRY_USER: u64 = 1 << 2;
-pub(crate) const ENTRY_PCD: u64 = 1 << 3;
+pub(crate) const ENTRY_PWT: u64 = 1 << 3;
 pub(crate) const ENTRY_HUGE_PAGE: u64 = 1 << 7;
 pub(crate) const ENTRY_NX: u64 = 1 << 63;
 pub(crate) const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
@@ -309,6 +309,166 @@ pub fn validate_space(root_phys: u64, regions: &[(&'static str, u64)]) -> (usize
     }
 
     (mapped, failed)
+}
+
+// ==========================================
+// Write-combining для MMIO (фреймбуфер)
+// ==========================================
+
+/// Индекс записи PAT (биты 32..39), которую переводим в write-combining.
+const PAT_WC_INDEX: u32 = 4;
+
+/// MSR, задающий типы памяти для PAT-индексов.
+const IA32_PAT: u32 = 0x277;
+
+/// Бит PAT в 4-КиБ PTE.
+const PTE_PAT: u64 = 1 << 7;
+/// Page-level write-through (бит 3). Вместе с PCD/PAT образует индекс PAT.
+const PTE_PWT: u64 = 1 << 3;
+/// Page-level cache disable (бит 4).
+const PTE_PCD: u64 = 1 << 4;
+/// Бит PAT в 2-МиБ/1-ГиБ PDE/PDPTE (там он занимает место бита 12).
+const HUGE_PAT: u64 = 1 << 12;
+
+unsafe fn rdmsr(msr: u32) -> u64 {
+    let (low, high): (u32, u32);
+    core::arch::asm!(
+        "rdmsr",
+        in("ecx") msr,
+        out("eax") low,
+        out("edx") high,
+        options(nostack, preserves_flags)
+    );
+    ((high as u64) << 32) | low as u64
+}
+
+unsafe fn wrmsr(msr: u32, value: u64) {
+    core::arch::asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") value as u32,
+        in("edx") (value >> 32) as u32,
+        options(nostack, preserves_flags)
+    );
+}
+
+/// Настроить PAT-запись `PAT_WC_INDEX` как write-combining (тип 0x01).
+///
+/// По умолчанию PAT[4] — это WB, поэтому одного бита PAT в PTE недостаточно:
+/// нужно перепрограммировать MSR. Цикл настройки PAT поддерживают все CPU с
+/// PAE/NX (то есть любая x86_64), но читаем и пишем аккуратно.
+pub fn enable_pat_write_combining() -> bool {
+    unsafe {
+        let pat = rdmsr(IA32_PAT);
+        let shift = PAT_WC_INDEX * 8;
+        let current = (pat >> shift) & 0xFF;
+        if current == 0x01 {
+            return true;
+        }
+        let updated = (pat & !(0xFFu64 << shift)) | (0x01u64 << shift);
+        wrmsr(IA32_PAT, updated);
+        // Перечитать: если запись не принялась (или CPU игнорирует), лучше
+        // знать об этом, чем молча получить UC вместо WC.
+        ((rdmsr(IA32_PAT) >> shift) & 0xFF) == 0x01
+    }
+}
+
+/// Пометить диапазон `[virt, virt + len)` как write-combining.
+///
+/// Возвращает число изменённых страниц (0 — не удалось). Затрагиваются только
+/// уже существующие отображения: новые страницы здесь не создаются, потому
+/// что функция вызывается для MMIO, который прошивка уже отобразила.
+///
+/// Работает и с 4-КиБ страницами, и с huge-page (2 МиБ/1 ГиБ): у них бит PAT
+/// лежит в разных позициях, и перепутать их значит получить вместо WC
+/// неизменяемое поведение или UC.
+pub struct WcReport {
+    pub changed: usize,
+    pub already: usize,
+    pub unmapped: usize,
+    /// Флаги листа (PWT/PCD/PAT) до изменения — для диагностики.
+    pub leaf_flags: u64,
+}
+
+pub fn set_write_combining(virt: u64, len: u64) -> WcReport {
+    let mut report = WcReport { changed: 0, already: 0, unmapped: 0, leaf_flags: 0 };
+    if len == 0 {
+        return report;
+    }
+    let start = virt & !0xfff;
+    let end = (virt + len + 0xfff) & !0xfff;
+    let mut address = start;
+
+    while address < end {
+        unsafe {
+            let Some(mapping) = translate(address) else {
+                // Дыра в отображении: пропускаем страницу, а не выходим.
+                report.unmapped += 1;
+                address += 4096;
+                continue;
+            };
+            let page_size = match mapping.page_size {
+                PageSize::Size4KiB => 4096u64,
+                PageSize::Size2MiB => 2 * 1024 * 1024,
+                PageSize::Size1GiB => 1024 * 1024 * 1024,
+            };
+
+            // Находим запись, которую нужно изменить, и её бит PAT.
+            let root = current_root_phys();
+            let Some((table_phys, entry_index, pat_bit)) = find_entry_for(root, address) else {
+                address += page_size;
+                continue;
+            };
+
+            let existing = read_raw_entry(table_phys, entry_index);
+            if report.leaf_flags == 0 {
+                report.leaf_flags = existing;
+            }
+            if existing & pat_bit != 0 {
+                // Запись уже помечена: второй раз не трогаем.
+                report.already += 1;
+                address = (address / page_size + 1) * page_size;
+                continue;
+            }
+
+            let mut entry = existing;
+            // PAT=1 при PCD=PWT=0 -> индекс 4 (настроен как WC выше).
+            entry |= pat_bit;
+            // PWT и PCD оба должны стать 0 — иначе индекс PAT будет 5/7,
+            // а не 4, и вместо write-combining получится WT/UC.
+            entry &= !PTE_PWT;
+            entry &= !PTE_PCD;
+            write_entry(table_phys, entry_index, entry);
+            core::arch::asm!("invlpg [{}]", in(reg) address, options(nostack));
+            report.changed += 1;
+
+            address = (address / page_size + 1) * page_size;
+        }
+    }
+
+    report
+}
+
+/// Найти таблицу, индекс и позицию бита PAT для конкретного адреса.
+unsafe fn find_entry_for(root_phys: u64, address: u64) -> Option<(u64, usize, u64)> {
+    let root_phys = if la57_enabled() {
+        read_entry(root_phys, index(address, 48))? & ADDRESS_MASK
+    } else {
+        root_phys
+    };
+
+    let pml4e = read_entry(root_phys, index(address, 39))?;
+    let pdpte = read_entry(pml4e & ADDRESS_MASK, index(address, 30))?;
+    if pdpte & ENTRY_HUGE_PAGE != 0 {
+        return Some((pml4e & ADDRESS_MASK, index(address, 30), HUGE_PAT));
+    }
+
+    let pde = read_entry(pdpte & ADDRESS_MASK, index(address, 21))?;
+    if pde & ENTRY_HUGE_PAGE != 0 {
+        return Some((pdpte & ADDRESS_MASK, index(address, 21), HUGE_PAT));
+    }
+
+    Some((pde & ADDRESS_MASK, index(address, 12), PTE_PAT))
 }
 
 #[inline]

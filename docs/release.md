@@ -5,8 +5,8 @@
 Единственный источник версии — `kernel/src/version.rs`:
 
 ```rust
-pub const KERNEL_VERSION: &str = "0.2.0-rc.15";
-pub const KERNEL_CODENAME: &str = "Foundation RC15";
+pub const KERNEL_VERSION: &str = "0.2.0-rc.16";
+pub const KERNEL_CODENAME: &str = "Foundation RC16";
 ```
 
 `Makefile` читает `KERNEL_VERSION` из этого файла, `kernel/build.rs` добавляет
@@ -105,6 +105,28 @@ make dist              # все образы + dist/{SHA256SUMS,MANIFEST.txt,REL
 make release-notes     # только текст описания для build/dist
 ```
 
+### С serial или без
+
+Debug-образ существует в двух вариантах, разница — только в наличии канала
+COM1:
+
+| Образ | Когда брать |
+|---|---|
+| `vibra-debug_*` | есть COM-порт и нужен полный serial-лог (или QEMU с `-serial`) |
+| `vibra-debug-noserial_*` | COM-порта нет **или** важна скорость: каждый символ в UART при 115200 занимает 87 мкс, и на длинном выводе это заметно |
+| `vibra-release_*` | нужна только скорость, раздел логов не нужен |
+
+Boot-лог в обоих debug-вариантах пишется в `/VIBRA.LOG` на разделе
+`VIBRALOG`, поэтому `noserial` не теряет диагностику — только мгновенный
+поток в терминал.
+
+```sh
+make iso-debug-noserial     # build/vibra-debug-noserial_<DATE>_<VERSION>.iso
+make usb-debug-noserial     # build/vibra-usb-debug-noserial_<DATE>_<VERSION>.img
+make debug-variants         # все четыре debug-образа
+NOSERIAL=1 bash scripts/qemu-debug-image-test.sh <образ>   # проверка по /VIBRA.LOG
+```
+
 ### Выпуск версии
 
 ```sh
@@ -113,11 +135,11 @@ make check
 ./build.sh smoke
 ./build.sh fs-test
 git add -A
-git commit -m "release: 0.2.0-rc.15"
+git commit -m "release: 0.2.0-rc.16"
 git push origin main      # этого достаточно: тег и релиз создаст CI
 ```
 
-Тег можно поставить и руками (`git tag v0.2.0-rc.15 && git push --tags`) —
+Тег можно поставить и руками (`git tag v0.2.0-rc.16 && git push --tags`) —
 тогда `release.yml` пересоберёт и перезальёт релиз, а не создаст дубликат.
 
 ### Что попадает в релиз
@@ -128,6 +150,8 @@ git push origin main      # этого достаточно: тег и рели�
 | `vibra-debug_<DATE>_<VERSION>.iso` | отладочный ISO: serial-лог, разделы `VIBRA` и `VIBRALOG` |
 | `vibra-usb_<DATE>_<VERSION>.img` | образ для флешки, GPT+ESP |
 | `vibra-usb-debug_<DATE>_<VERSION>.img` | флешка с тремя разделами для разбора проблем на железе |
+| `vibra-debug-noserial_<DATE>_<VERSION>.iso` | то же без COM1: скорость release, лог на `VIBRALOG` |
+| `vibra-usb-debug-noserial_<DATE>_<VERSION>.img` | то же на флешке |
 | `vibra-uefi_<DATE>_<VERSION>.img` | минимальный GPT/ESP-образ |
 | `SHA256SUMS` | контрольные суммы всех файлов |
 | `MANIFEST.txt` | версия, коммит, дата, тулчейн, SHA256 `OVMF.fd` |

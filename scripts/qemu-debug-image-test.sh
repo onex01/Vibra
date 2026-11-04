@@ -9,6 +9,10 @@
 # Использование:
 #   bash scripts/qemu-debug-image-test.sh <image>
 #
+# NOSERIAL=1 — образ собран без serial (`make iso-debug-noserial`). Тогда
+# serial-лог пуст по определению, и проверки идут только по файлу
+# /VIBRA.LOG внутри образа: это независимый путь и он же важнее для железа.
+#
 # Для ISO тот же скрипт работает, если образ записан на USB: QEMU
 # подключает его как обычный диск (`-drive file=...`), поэтому запись
 # в VIBRALOG сохраняется.
@@ -89,15 +93,19 @@ check() {
 }
 
 echo "==> Checking kernel view"
-# ESP в ISO называется "EFI boot partition", а в USB-образе — VIBRA-ESP,
-# поэтому проверяем только метку kernel-раздела и самого лога.
-check "VIBRA"
-check "/VIBRA.LOG"
-check "writing logs to VIBRALOG"
-check "vibra:/>"
-check "Kernel v$version"
+if [[ "${NOSERIAL:-0}" == "1" ]]; then
+    echo "  (NOSERIAL=1: serial disabled in this image, checking /VIBRA.LOG only)"
+else
+    # ESP в ISO называется "EFI boot partition", а в USB-образе — VIBRA-ESP,
+    # поэтому проверяем только метку kernel-раздела и самого лога.
+    check "VIBRA"
+    check "/VIBRA.LOG"
+    check "writing logs to VIBRALOG"
+    check "vibra:/>"
+    check "Kernel v$version"
+fi
 
-if grep -Fq "KERNEL PANIC" "$log_file"; then
+if [[ "${NOSERIAL:-0}" != "1" ]] && grep -Fq "KERNEL PANIC" "$log_file"; then
     echo "  [FAIL] kernel panic detected" | tee -a "$report" >&2
     failed=1
 fi
@@ -118,6 +126,22 @@ fi
 # Лог обязан начинаться с самого начала, а не с нулей/середины записи.
 # Регрессия rc.8: DMA-адрес статического CHUNK_BUF считался как `virt - hhdm`,
 # первые 3 КиБ кластера оставались нулями, и ранний boot терялся.
+if [[ "${NOSERIAL:-0}" == "1" && -s "$repo_root/build/debug-image-boot.log" ]]; then
+    # Без serial это единственный источник правды о загрузке.
+    for marker in "[BOOT]" "Step 4" "Step 9"; do
+        if grep -Fq "$marker" "$repo_root/build/debug-image-boot.log"; then
+            echo "  [ OK ] /VIBRA.LOG contains '$marker'" | tee -a "$report"
+        else
+            echo "  [FAIL] /VIBRA.LOG has no '$marker'" | tee -a "$report" >&2
+            failed=1
+        fi
+    done
+    if grep -Fq "KERNEL PANIC" "$repo_root/build/debug-image-boot.log"; then
+        echo "  [FAIL] kernel panic recorded in /VIBRA.LOG" | tee -a "$report" >&2
+        failed=1
+    fi
+fi
+
 if [[ -s "$repo_root/build/debug-image-boot.log" ]]; then
     if head -c 6 "$repo_root/build/debug-image-boot.log" | grep -q '^\[BOOT'; then
         echo "  [ OK ] boot log starts at the beginning" | tee -a "$report"

@@ -1,6 +1,6 @@
 [package]
 name = "vibra-kernel"
-version = "0.2.0-rc.15"
+version = "0.2.0-rc.16"
 edition = "2021"
 
 [dependencies]
@@ -26,8 +26,4 @@ path = "src/lib.rs"
 name = "vibra"
 path = "src/main.rs"
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
+# Профили задаются в корневом Cargo.toml: здесь они игнорируются.

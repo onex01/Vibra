@@ -16,6 +16,10 @@ RELEASE_ARTIFACT := vibra-release_$(BUILD_DATE)_$(VERSION)
 ISO_IMAGE ?= $(BUILD_DIR)/$(ARTIFACT).iso
 DEBUG_ISO_IMAGE ?= $(BUILD_DIR)/$(DEBUG_ARTIFACT).iso
 RELEASE_ISO_IMAGE ?= $(BUILD_DIR)/$(RELEASE_ARTIFACT).iso
+# Вариант «без serial»: тот же debug-образ, но без COM1 — быстрее и не
+# зависит от наличия UART. Лог при этом всё равно пишется на VIBRALOG.
+NOSERIAL_ISO_IMAGE ?= $(BUILD_DIR)/vibra-debug-noserial_$(BUILD_DATE)_$(VERSION).iso
+NOSERIAL_USB_IMAGE ?= $(BUILD_DIR)/vibra-usb-debug-noserial_$(BUILD_DATE)_$(VERSION).img
 UEFI_IMG ?= $(BUILD_DIR)/vibra-uefi_$(BUILD_DATE)_$(VERSION).img
 USB_IMG ?= $(BUILD_DIR)/vibra-usb_$(BUILD_DATE)_$(VERSION).img
 USB_DEBUG_IMG ?= $(BUILD_DIR)/vibra-usb-debug_$(BUILD_DATE)_$(VERSION).img
@@ -96,7 +100,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test iso-test shell-test noserial-test serial-input-test check dist release-notes boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
+.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test iso-test shell-test noserial-test serial-input-test check dist release-notes debug-variants iso-debug-noserial usb-debug-noserial boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
 
 all: run
 
@@ -522,6 +526,24 @@ debug-image-test: usb-debug
 	@bash scripts/qemu-debug-image-test.sh "$(USB_DEBUG_IMG)"
 
 # То же для debug ISO, записанного на USB (QEMU подключает его как диск).
+# Debug-образ без serial: скорость как у release, но с разделом VIBRALOG,
+# поэтому диагностика на железе остаётся.
+iso-debug-noserial:
+	@$(MAKE) SERIAL_DEBUG=0 iso-debug DEBUG_ISO_IMAGE=$(NOSERIAL_ISO_IMAGE)
+	@ln -sf $(notdir $(NOSERIAL_ISO_IMAGE)) $(BUILD_DIR)/vibra-debug-noserial.iso
+
+usb-debug-noserial:
+	@$(MAKE) SERIAL_DEBUG=0 usb-debug USB_DEBUG_IMG=$(NOSERIAL_USB_IMAGE)
+	@ln -sf $(notdir $(NOSERIAL_USB_IMAGE)) $(BUILD_DIR)/vibra-usb-debug-noserial.img
+
+# Что выбрать на реальной машине:
+#   vibra-debug_*        — есть COM-порт и нужен полный serial-лог;
+#   vibra-debug-noserial — serial нет или важна скорость вывода (каждый
+#                          символ в COM1 стоит ~87 мкс при 115200);
+#   vibra-release_*      — только скорость, без раздела логов.
+# Сам boot-лог в обоих debug-вариантах идёт в /VIBRA.LOG на разделе VIBRALOG.
+debug-variants: iso-debug usb-debug iso-debug-noserial usb-debug-noserial
+
 iso-debug-test: iso-debug
 	@bash scripts/qemu-debug-image-test.sh "$(DEBUG_ISO_IMAGE)"
 

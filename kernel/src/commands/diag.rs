@@ -47,6 +47,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "timer" => diag_timer(console),
         "apic" => diag_apic(console),
         "display" => diag_display(console),
+        "fb" => diag_fb(console),
         "heap-test" => diag_heap_test(console),
         "heap-check" => diag_heap_check(console),
         "heap-big" => diag_heap_big(console, args.get(1).copied()),
@@ -121,6 +122,155 @@ fn diag_display(console: &mut Console) {
     console.print("  pitch ");
     console.print_num(console.fb_pitch());
     console.print(" words\n");
+}
+
+/// Фреймбуфер: memory type, write-combining и реальная стоимость прокрутки.
+///
+/// Это ответ на «пока экран пустой — мгновенно, а как заполнился — тормозит».
+/// На железе без serial других чисел взять негде, поэтому замер встроен в
+/// команду: видно и режим памяти, и сколько микросекунд стоит один проход
+/// перерисовки (ровно то, что делает каждая прокрутка).
+fn diag_fb(console: &mut Console) {
+    use crate::framebuffer::COLOR_YELLOW;
+
+    console.print_colored("[FRAMEBUFFER]\n", COLOR_YELLOW);
+    console.print("  size:      ");
+    console.print_num(console.fb_width());
+    console.print("x");
+    console.print_num(console.fb_height());
+    console.print("  pitch ");
+    console.print_num(console.fb_pitch());
+    console.print(" words, ");
+    console.print_num(console.fb_cols());
+    console.print("x");
+    console.print_num(console.fb_rows());
+    console.print(" cells\n");
+
+    let (pat_ok, wc_pages, wc_already, wc_unmapped, leaf_flags) =
+        console.write_combining_state();
+    console.print("  PAT:       ");
+    console.print(if pat_ok { "write-combining index programmed" } else { "not programmed" });
+    console.print("\n  WC:        changed ");
+    console.print_num(wc_pages);
+    console.print(", already ");
+    console.print_num(wc_already);
+    console.print(", unmapped ");
+    console.print_num(wc_unmapped);
+    console.print("  (leaf flags ");
+    console.print_num((leaf_flags & 0xff) as usize);
+    console.print(")\n");
+    if wc_pages + wc_already > 0 {
+        console.print("  -> writes are combined (WC)\n");
+    } else {
+        console.print("  -> WC NOT applied: each pixel is a separate transaction\n");
+    }
+
+    // Проверка самих часов: если 20 мс ожидания меряются как не 20, то и
+    // замер прокрутки ниже недостоверен.
+    let t0 = console_uptime_us();
+    crate::timer::sleep_ms(20);
+    let slept_us = console_uptime_us().saturating_sub(t0);
+    console.print("  clock:     20 ms sleep measured as ");
+    console.print_num(slept_us as usize);
+    console.print(" us (");
+    console.print(crate::timer::current_source().name());
+    console.print(")\n");
+
+    if let Some(hz) = crate::timer::tsc_hz() {
+        console.print("  tsc:       ");
+        console.print_num((hz / 1_000_000) as usize);
+        console.print(" MHz\n");
+    }
+
+    // Нижняя граница: сколько стоит просто переписать весь экран.
+    let screen_write = console.bench_screen_write(3);
+    console.print("  write screen: ");
+    console.print_num(screen_write as usize);
+    console.print(" cycles (");
+    console.print_num((screen_write / 1000) as usize);
+    console.print("k)\n");
+
+    // Стоимость сборки строки при разной плотности текста.
+    let dense0 = console.bench_row_density(0);
+    let dense_half = console.bench_row_density(console.fb_cols() / 2);
+    let dense_full = console.bench_row_density(console.fb_cols());
+    console.print("  build row: empty ");
+    console.print_num(dense0 as usize);
+    console.print(", half ");
+    console.print_num(dense_half as usize);
+    console.print(", full ");
+    console.print_num(dense_full as usize);
+    console.print(" cycles\n");
+
+    // Разбор по частям: сборка строки против её записи.
+    let (build_c, fb_copy_c, ram_copy_c) = console.bench_row_build_and_copy(200);
+    console.print("  build row: ");
+    console.print_num(build_c as usize);
+    console.print(" cycles, copy->fb ");
+    console.print_num(fb_copy_c as usize);
+    console.print(", copy->ram ");
+    console.print_num(ram_copy_c as usize);
+    console.print("\n");
+
+    // Отдельно: одна строка в RAM против той же строки во фреймбуфер.
+    let (fb_c, ram_c) = console.bench_row_copy(200);
+    console.print("  row copy:  fb ");
+    console.print_num(fb_c as usize);
+    console.print(" cycles, ram ");
+    console.print_num(ram_c as usize);
+    console.print(" cycles  (ratio x");
+    console.print_num((fb_c / ram_c.max(1)) as usize);
+    console.print(")\n");
+
+    // Пустая тень: столько стоит прокрутка, когда экран почти пуст.
+    let (c_empty, us_empty) = console.bench_redraw(3);
+    console.print("  redraw (empty):  ");
+    console.print_num(us_empty as usize);
+    console.print(" us / ");
+    console.print_num(c_empty as usize);
+    console.print(" cycles\n");
+
+    // Заполняем половину экрана: это то, что делает `cat`/`ls -l`.
+    let rows = console.fb_rows();
+    let cols = console.fb_cols();
+    let fill_rows = rows / 2;
+    let text: alloc::string::String = core::iter::repeat('x').take(cols.saturating_sub(1)).collect();
+    for row in 0..fill_rows {
+        console.set_cursor_position(0, row);
+        console.print(&text);
+    }
+    console.set_cursor_position(0, fill_rows);
+    let (c_full, us_full) = console.bench_redraw(3);
+    console.print("  redraw (half full): ");
+    console.print_num(us_full as usize);
+    console.print(" us / ");
+    console.print_num(c_full as usize);
+    console.print(" cycles\n");
+
+    // Сквозной замер: печать строк с прокруткой — ровно то, что тормозило.
+    // Две цифры: с зеркалированием в serial (debug) и без (release на железе).
+    let (scroll_mirror, scroll_plain) = console.bench_scroll_mirror_split(120);
+    console.print("  scroll:    with serial ");
+    console.print_num(scroll_mirror as usize);
+    console.print(" cycles/line, without ");
+    console.print_num(scroll_plain as usize);
+    console.print(" cycles/line\n");
+
+    if us_full > us_empty.saturating_mul(2).max(1) {
+        console.print_colored(
+            "  -> repaint cost grows with screen fill: this is the scroll cost\n",
+            crate::framebuffer::COLOR_YELLOW,
+        );
+    }
+
+    // Возвращаем экран в нормальное состояние.
+    for _ in 0..fill_rows + 2 {
+        console.print("\n");
+    }
+}
+
+fn console_uptime_us() -> u64 {
+    crate::timer::uptime_us()
 }
 
 /// Проверка заголовков free-list: ищем перезапись магии/размера.

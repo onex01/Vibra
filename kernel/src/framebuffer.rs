@@ -341,6 +341,7 @@ struct TextCell {
 /// выполнялось сравнение бита и отдельная ветка, теперь 8 итераций
 /// чистых ALU-операций, а запись идёт парами.
 #[inline]
+#[inline(always)]
 fn expand_line(line: u8, fg: u32, bg: u32) -> [u64; 4] {
     let mut out = [0u64; 4];
     let mut pair = 0;
@@ -484,6 +485,29 @@ pub struct Console {
     // false, если экран рисовался примитивами напрямую — тогда тень устарела
     // и scroll() обязан идти медленным путём.
     cells_valid: core::cell::Cell<bool>,
+    /// Буфер одной текстовой строки в RAM: глифы собираются здесь, затем
+    /// строка уходит в фреймбуфер одной широкой записью на пиксельную строку.
+    ///
+    /// Раньше каждый пиксель писался отдельным `write_volatile`, и прокрутка
+    /// полного экрана стоила ~500 000 транзакций: в QEMU это 1 млрд циклов
+    /// (~400 мс), на железе с UC-памятью — те же десятки миллисекунд на
+    /// строку. Одна `copy_nonoverlapping` на пиксельную строку превращает это
+    /// в ~800 последовательных копий по 5 КБ.
+    staging: Vec<u64>,
+    /// До какой строки экран реально прорисован. Прокрутка перерисовывает
+    /// только эту область: если на экране 5 строк текста, нет смысла трогать
+    /// остальные 45.
+    painted_max: usize,
+    /// Отчёт о переводе фреймбуфера в write-combining (сколько страниц
+    /// изменено, сколько уже было, сколько вне отображения).
+    wc_pages: usize,
+    wc_already: usize,
+    wc_unmapped: usize,
+    wc_leaf_flags: u64,
+    /// Удалось ли перепрограммировать PAT-запись под WC.
+    pat_ok: bool,
+    /// Отчёт о WC ещё не напечатан (см. `enable_write_combining`).
+    wc_report_pending: bool,
     /// Ведёт ли фреймбуфер себя как обычная RAM (см. `probe_framebuffer_is_ram`).
     ///
     /// От этого зависит стратегия прокрутки: для RAM дешевле memmove, для
@@ -504,12 +528,30 @@ pub(crate) fn init_boot_console() {
         return;
     };
 
-    *BOOT_CONSOLE.lock() = Some(Console::new(framebuffer));
+    let mut console = Console::new(framebuffer);
+    console.enable_write_combining();
+    *BOOT_CONSOLE.lock() = Some(console);
 }
 
 /// Включить RAM-тень текстовой сетки после инициализации кучи.
 pub(crate) fn after_heap_init() {
-    with_boot_console(|console| console.rebuild_cells());
+    with_boot_console(|console| {
+        console.rebuild_cells();
+        console.alloc_staging();
+        // Теперь boot-лог уже начался с `[BOOT] Step 1`, и отчёт о WC не
+        // испортит проверку начала файла.
+        if console.wc_report_pending {
+            console.wc_report_pending = false;
+            crate::println!(
+                "[FB] memory: PAT {}, {} page(s) switched to write-combining, {} already, {} unmapped (leaf flags {:#x})",
+                if console.pat_ok { "WC" } else { "unchanged" },
+                console.wc_pages,
+                console.wc_already,
+                console.wc_unmapped,
+                console.wc_leaf_flags
+            );
+        }
+    });
 }
 
 
@@ -574,6 +616,14 @@ impl Console {
             cursor_blink_state: true,
             last_blink_ms: 0,
             cells: Vec::new(),
+            staging: Vec::new(),
+            painted_max: 0,
+            wc_pages: 0,
+            wc_already: 0,
+            wc_unmapped: 0,
+            wc_leaf_flags: 0,
+            pat_ok: false,
+            wc_report_pending: false,
             cells_valid: core::cell::Cell::new(false),
             // Без тени прокрутка идёт перерисовкой? Нет: `cells_valid=false`
             // заставляет scroll() использовать memmove по фреймбуферу — это
@@ -625,6 +675,14 @@ impl Console {
             cursor_blink_state: true,
             last_blink_ms: 0,
             cells: Vec::new(),
+            staging: Vec::new(),
+            painted_max: 0,
+            wc_pages: 0,
+            wc_already: 0,
+            wc_unmapped: 0,
+            wc_leaf_flags: 0,
+            pat_ok: false,
+            wc_report_pending: false,
             cells_valid: core::cell::Cell::new(true),
             fb_is_ram: core::cell::Cell::new(probe_framebuffer_is_ram(
                 fb_addr,
@@ -667,6 +725,45 @@ impl Console {
         self.reset_cells();
     }
 
+    /// Последняя строка, в которой есть непробельная ячейка.
+    fn last_used_row(&self) -> usize {
+        if self.cells.len() != self.cols * self.rows {
+            return self.rows.saturating_sub(1);
+        }
+        let mut row = self.rows;
+        while row > 0 {
+            row -= 1;
+            let base = row * self.cols;
+            if self.cells[base..base + self.cols]
+                .iter()
+                .any(|c| c.ch != b' ' && c.ch != 0)
+            {
+                return row;
+            }
+        }
+        0
+    }
+
+    /// Выделить буфер одной текстовой строки (FONT_HEIGHT пиксельных строк).
+    ///
+    /// Делается после инициализации кучи: до неё `Vec` недоступен, и
+    /// `redraw_from_cells` работает старым поштучным путём.
+    pub fn alloc_staging(&mut self) {
+        if self.rows == 0 || self.width == 0 {
+            return;
+        }
+        // Две пары пикселей на u64: строка шириной `width` требует width/2
+        // слов. При нечётной ширине буфер не нужен — останется медленный путь.
+        if self.width % 2 != 0 {
+            self.staging = Vec::new();
+            return;
+        }
+        let needed = FONT_HEIGHT * (self.width / 2);
+        if self.staging.len() != needed {
+            self.staging = alloc::vec![0u64; needed];
+        }
+    }
+
     /// Очищает весь экран фоновым цветом
     pub fn clear(&mut self) {
         let total_pixels = self.height * self.pitch;
@@ -679,6 +776,7 @@ impl Console {
         self.reset_cells();
         self.cursor_col = 0;
         self.cursor_row = 0;
+        self.painted_max = 0;
     }
 
     /// Рисует один символ в позиции (col, row)
@@ -957,68 +1055,435 @@ impl Console {
         self.cursor_row = self.rows - 1;
     }
 
+    /// Перевести фреймбуфер в write-combining (PAT) и запомнить результат.
+    ///
+    /// Зачем: на реальном железе GOP-фреймбуфер отображён как uncached/UC.
+    /// Прокрутка пишет ~1 млн пикселей, и при UC каждая запись уходит
+    /// отдельной транзакцией — отсюда «пока экран не заполнен, всё быстро,
+    /// а как заполнился, каждая строка тормозит». С WC записи склеиваются в
+    /// пакеты, и тот же объём уходит на порядок быстрее.
+    ///
+    /// Чтение из WC по-прежнему дорогое, поэтому `scroll()` продолжает идти
+    /// через RAM-тень `cells` и только пишет в видеопамять.
+    pub fn enable_write_combining(&mut self) {
+        if self.fb_addr.is_null() || self.pitch == 0 || self.height == 0 {
+            return;
+        }
+        self.pat_ok = crate::memory::paging::enable_pat_write_combining();
+        if !self.pat_ok {
+            return;
+        }
+        let bytes = (self.pitch * self.height * 4) as u64;
+        let report = crate::memory::paging::set_write_combining(self.fb_addr as u64, bytes);
+        self.wc_pages = report.changed;
+        self.wc_already = report.already;
+        self.wc_unmapped = report.unmapped;
+        self.wc_leaf_flags = report.leaf_flags;
+        // Печать откладывается: `init_boot_console` вызывается до
+        // `[BOOT] Step 1`, а boot-лог обязан начинаться с него (иначе не
+        // отличить норму от регрессии с нулями в начале файла).
+        self.wc_report_pending = true;
+    }
+
+    /// Состояние отрисовки для `diag fb`:
+    /// `(PAT запрограммирован, изменено, уже WC, вне отображения, флаги листа)`.
+    pub fn write_combining_state(&self) -> (bool, usize, usize, usize, u64) {
+        (self.pat_ok, self.wc_pages, self.wc_already, self.wc_unmapped, self.wc_leaf_flags)
+    }
+
+    /// Замер стоимости перерисовки экрана из текстовой тени: ровно та работа,
+    /// которую делает каждая прокрутка.
+    ///
+    /// Возвращает микросекунды на один проход. Нужен, чтобы на железе без
+    /// serial было видно, во что обходится прокрутка и помог ли WC, а не
+    /// гадать по ощущениям.
+    /// Собрать одну текстовую строку в `staging` (без записи в фреймбуфер).
+    ///
+    /// Вынесено из `redraw_from_cells`, чтобы `diag fb` мог измерить именно
+    /// стоимость сборки: если она доминирует, оптимизировать надо её, а не
+    /// память фреймбуфера.
+    fn build_row_into_staging(&mut self, row: usize, blank_word: u64) {
+        let width = self.width;
+        let words_per_row = width / 2;
+        if self.staging.len() != FONT_HEIGHT * words_per_row || row >= self.rows {
+            return;
+        }
+        let base = row * self.cols;
+        self.staging.fill(blank_word);
+
+        let mut cached_fg = u32::MAX;
+        let mut cached_bg = u32::MAX;
+        let mut native_fg = 0u32;
+        let mut native_bg = 0u32;
+
+        for col in 0..self.cols {
+            let cell = self.cells[base + col];
+            if cell.ch == b' ' || cell.ch == 0 {
+                continue;
+            }
+            let start_x = col * FONT_WIDTH;
+            if start_x >= width {
+                break;
+            }
+            if cell.fg != cached_fg || cell.bg != cached_bg {
+                cached_fg = cell.fg;
+                cached_bg = cell.bg;
+                native_fg = crate::display::color_to_native(cell.fg, self.pixel_format);
+                native_bg = crate::display::color_to_native(cell.bg, self.pixel_format);
+            }
+            let glyph = &FONT_DATA[cell.ch as usize];
+            let first_word = start_x / 2;
+            let avail = words_per_row.saturating_sub(first_word);
+            let n = (FONT_WIDTH / 2).min(avail);
+            if n == 0 {
+                break;
+            }
+            // Прямая запись по указателю: индексация `Vec` внутри двойного
+            // цикла давала проверку границ на каждое слово и в сумме стоила
+            // больше, чем вся запись строки во фреймбуфер (замер: 2 млн
+            // циклов на сборку строки против 3 тысяч на копирование).
+            // Границы проверены выше: first_word + n <= words_per_row.
+            let base_ptr = self.staging.as_mut_ptr();
+            for dy in 0..FONT_HEIGHT {
+                let words = expand_line(glyph[dy], native_fg, native_bg);
+                unsafe {
+                    let dst = base_ptr.add(dy * words_per_row + first_word);
+                    for k in 0..n {
+                        core::ptr::write(dst.add(k), words[k]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Сравнить печать с зеркалированием в serial и без него.
+    ///
+    /// `put_char` на каждый символ дополнительно пишет в COM1 (ожидание THRE)
+    /// и в журналы. В debug-сборке под QEMU это заметно, а в release на
+    /// железе serial вообще выключен — поэтому замер прокрутки обязан
+    /// показывать обе цифры, иначе легко оптимизировать не то.
+    ///
+    /// Возвращает `(с_serial, без_serial)` в циклах на строку.
+    pub fn bench_scroll_mirror_split(&mut self, lines: usize) -> (u64, u64) {
+        if lines == 0 || self.cols == 0 {
+            return (0, 0);
+        }
+        let text: alloc::string::String =
+            core::iter::repeat('7').take(self.cols.saturating_sub(1)).collect();
+
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        for _ in 0..lines {
+            self.print(&text);
+            self.print("\n");
+        }
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        let with_serial = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
+
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        for _ in 0..lines {
+            for ch in text.chars() {
+                self.put_char_from_serial(ch);
+            }
+            self.put_char_from_serial('\n');
+        }
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        let without_serial = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
+
+        (
+            with_serial / lines as u64,
+            without_serial / lines as u64,
+        )
+    }
+
+    /// Сколько стоит напечатать `lines` строк обычным путём (`put_char`).
+    ///
+    /// Это сквозной замер прокрутки: после заполнения экрана каждая строка
+    /// вызывает `scroll()`, то есть ровно тот путь, который тормозил на
+    /// ноутбуке. Возвращает `(cycles, us)` на строку.
+    pub fn bench_scroll(&mut self, lines: usize) -> (u64, u64) {
+        if lines == 0 || self.cols == 0 {
+            return (0, 0);
+        }
+        // Строка почти на всю ширину — как обычный вывод команды.
+        let text: alloc::string::String =
+            core::iter::repeat('7').take(self.cols.saturating_sub(1)).collect();
+
+        let us_start = crate::timer::uptime_us();
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        for _ in 0..lines {
+            self.print(&text);
+            self.print("\n");
+        }
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
+        let us = crate::timer::uptime_us().saturating_sub(us_start);
+
+        (cycles / lines as u64, us / lines as u64)
+    }
+
+    /// Стоимость записи всего экрана из `staging` во фреймбуфер, в циклах.
+    ///
+    /// Это нижняя граница любой стратегии прокрутки: даже если ничего не
+    /// пересобирать, экран надо как-то переписать. Если это число велико,
+    /// виноват memory type фреймбуфера, а не код отрисовки.
+    pub fn bench_screen_write(&mut self, iterations: u32) -> u64 {
+        let width = self.width;
+        let words_per_row = width / 2;
+        if iterations == 0 || width < 32 || self.staging.len() != FONT_HEIGHT * words_per_row {
+            return 0;
+        }
+        let src = self.staging.as_ptr();
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        for _ in 0..iterations {
+            for py in 0..self.height {
+                unsafe {
+                    let dst = self.fb_addr.add(py * self.pitch) as *mut u64;
+                    core::ptr::copy_nonoverlapping(src, dst, words_per_row);
+                }
+            }
+        }
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start) / iterations as u64
+    }
+
+    /// Стоимость сборки строки при заданной плотности текста.
+    ///
+    /// Нужен, чтобы отделить «пустая строка» от «строка целиком из символов»:
+    /// прокрутка заполненного экрана тормозит именно из-за вторых, и без
+    /// такого замера не видно, во что обходится одна ячейка.
+    pub fn bench_row_density(&mut self, cells_filled: usize) -> u64 {
+        let width = self.width;
+        let words_per_row = width / 2;
+        if width < 32 || self.staging.len() != FONT_HEIGHT * words_per_row || self.rows == 0 {
+            return 0;
+        }
+        let blank = crate::display::color_to_native(self.bg_color, self.pixel_format);
+        let blank_word = ((blank as u64) << 32) | blank as u64;
+
+        // Готовим строку 0 с нужным числом непробельных ячеек.
+        let base = 0usize;
+        for col in 0..self.cols {
+            let ch = if col < cells_filled { b'x' } else { b' ' };
+            self.cells[base + col] = TextCell { ch, fg: self.fg_color, bg: self.bg_color };
+        }
+
+        const ITERS: u32 = 50;
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        for _ in 0..ITERS {
+            self.build_row_into_staging(0, blank_word);
+        }
+        let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
+
+        // Возвращаем строку как была.
+        self.cells[base..base + self.cols]
+            .iter_mut()
+            .for_each(|c| *c = TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color });
+
+        cycles / ITERS as u64
+    }
+
+    /// Стоимость сборки строки и её записи — по отдельности, в циклах TSC.
+    ///
+    /// `(build_cycles, fb_copy_cycles, ram_copy_cycles)`.
+    pub fn bench_row_build_and_copy(&mut self, iterations: u32) -> (u64, u64, u64) {
+        let width = self.width;
+        if iterations == 0 || width < 32 || self.staging.len() < width / 2 {
+            return (0, 0, 0);
+        }
+        let words = width / 2;
+        let blank = crate::display::color_to_native(self.bg_color, self.pixel_format);
+        let blank_word = ((blank as u64) << 32) | blank as u64;
+
+        let t = unsafe { core::arch::x86_64::_rdtsc() };
+        for i in 0..iterations {
+            self.build_row_into_staging((i as usize) % self.rows.max(1), blank_word);
+        }
+        let build = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(t);
+
+        let mut ram_dst = alloc::vec![0u64; words];
+        let src = self.staging.as_ptr();
+        let t = unsafe { core::arch::x86_64::_rdtsc() };
+        for _ in 0..iterations {
+            unsafe { core::ptr::copy_nonoverlapping(src, ram_dst.as_mut_ptr(), words) };
+        }
+        let ram_copy = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(t);
+
+        let t = unsafe { core::arch::x86_64::_rdtsc() };
+        for i in 0..iterations {
+            let py = (i as usize) % self.height.max(1);
+            unsafe {
+                let dst = self.fb_addr.add(py * self.pitch) as *mut u64;
+                core::ptr::copy_nonoverlapping(src, dst, words);
+            }
+        }
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        let fb_copy = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(t);
+
+        let n = iterations as u64;
+        (build / n, fb_copy / n, ram_copy / n)
+    }
+
+    /// Стоимость копирования одной текстовой строки во фреймбуфер и в RAM.
+    ///
+    /// Возвращает `(fb_cycles, ram_cycles)` на одно копирование строки.
+    /// Нужен, чтобы отличить «медленная видеопамять» от «медленный код»:
+    /// если `fb_cycles` намного больше `ram_cycles`, виноват memory type
+    /// фреймбуфера (нужен WC), а если они близки — искать надо в отрисовке.
+    pub fn bench_row_copy(&mut self, iterations: u32) -> (u64, u64) {
+        let width = self.width;
+        if iterations == 0 || width < 16 || self.staging.len() < width / 2 {
+            return (0, 0);
+        }
+        let words = width / 2;
+
+        // Источник и приёмник в RAM.
+        let mut ram_dst = alloc::vec![0u64; words];
+        let src = self.staging.as_ptr();
+
+        let ram_start = unsafe { core::arch::x86_64::_rdtsc() };
+        for _ in 0..iterations {
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, ram_dst.as_mut_ptr(), words);
+            }
+        }
+        let ram_cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(ram_start);
+
+        let fb_start = unsafe { core::arch::x86_64::_rdtsc() };
+        for i in 0..iterations {
+            let py = (i as usize) % self.height.max(1);
+            unsafe {
+                let dst = self.fb_addr.add(py * self.pitch) as *mut u64;
+                core::ptr::copy_nonoverlapping(src, dst, words);
+            }
+        }
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        let fb_cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(fb_start);
+
+        (fb_cycles / iterations as u64, ram_cycles / iterations as u64)
+    }
+
+    /// Возвращает `(циклы TSC на проход, микросекунды на проход)`.
+    ///
+    /// TSC здесь основной источник: у `uptime_us()` зависит от выбранного
+    /// источника часов (HPET/PIT), и при ошибке в его пересчёте замер врал бы
+    /// в разы. Циклы позволяют проверить число независимо.
+    pub fn bench_redraw(&mut self, iterations: u32) -> (u64, u64) {
+        if iterations == 0 || !self.cells_valid.get() {
+            return (0, 0);
+        }
+        let us_start = crate::timer::uptime_us();
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        for _ in 0..iterations {
+            self.redraw_from_cells();
+        }
+        // Записи в WC-память завершаются асинхронно: без барьера замер
+        // показывал бы только время постановки в буферы.
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
+        let us = crate::timer::uptime_us().saturating_sub(us_start);
+        (cycles / iterations as u64, us / iterations as u64)
+    }
+
     /// Перерисовывает экран из RAM-тени `cells`, не читая видеопамять.
     ///
-    /// Прогоны подряд идущих пробельных ячеек заливаются одним `slice::fill`
-    /// на каждую пиксельную строку. Это и есть основной выигрыш прокрутки:
-    /// типичный экран заполнен на 10-20%, и пустая часть перестаёт стоить
-    /// хоть сколько-нибудь заметных транзакций.
-    fn redraw_from_cells(&self) {
+    /// Каждая текстовая строка собирается в `staging` (обычная RAM), а затем
+    /// уходит во фреймбуфер одной широкой копией на пиксельную строку.
+    ///
+    /// # Почему не по пикселю
+    ///
+    /// Раньше глиф писался 64 отдельными `write_volatile::<u64>`. Прокрутка
+    /// полного экрана 1280x800 — это ~500 000 транзакций: замер на QEMU дал
+    /// 1.02 млрд циклов (~400 мс) за один проход, а на железе каждая такая
+    /// запись ещё и уходит по шине. Отсюда ровно жалоба «пока экран не
+    /// заполнен — мгновенно, как дошло до низа — тормозит».
+    ///
+    /// Сборка в RAM и 16 копий по 5 КБ на строку (вместо 8000 записей)
+    /// снимают и накладные расходы MMIO, и стоимость на реальном железе.
+    fn redraw_from_cells(&mut self) {
         if !self.cells_valid.get() || self.cells.len() != self.cols * self.rows {
             return;
         }
 
-        let blank = TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color };
-        let blank_bg = crate::display::color_to_native(blank.bg, self.pixel_format);
+        let blank_bg = crate::display::color_to_native(self.bg_color, self.pixel_format);
+        let width = self.width;
+        let words_per_row = width / 2;
+        let use_staging = width % 2 == 0
+            && self.staging.len() == FONT_HEIGHT * words_per_row;
 
-        // Кэш последней конвертации: на экране обычно 1-2 комбинации цветов,
-        // поэтому `color_to_native` вызывается несколько раз, а не 2×N.
-        let mut cached_fg = blank.fg;
-        let mut cached_bg = blank.bg;
-        let mut native_fg = crate::display::color_to_native(blank.fg, self.pixel_format);
-        let mut native_bg = blank_bg;
+        // Граница прорисовки: ниже последней строки с текстом ничего нет —
+        // и в тени, и в фреймбуфере там уже фон. Раньше перерисовывались все
+        // `rows`, поэтому прокрутка стоила одинаково независимо от заполнения.
+        let last_used = self.last_used_row();
+        let last_row = last_used.max(self.painted_max).min(self.rows.saturating_sub(1));
+        self.painted_max = last_used;
 
-        for row in 0..self.rows {
-            let base = row * self.cols;
-            let mut col = 0;
-            while col < self.cols {
-                let cell = self.cells[base + col];
-                if cell != blank {
-                    if cell.fg != cached_fg || cell.bg != cached_bg {
-                        cached_fg = cell.fg;
-                        cached_bg = cell.bg;
-                        native_fg = crate::display::color_to_native(cell.fg, self.pixel_format);
-                        native_bg = crate::display::color_to_native(cell.bg, self.pixel_format);
+        if use_staging {
+            // Пара пикселей в одном u64 — столько же запишу в фреймбуфер,
+            // но вдвое меньшим числом операций.
+            let blank_word = ((blank_bg as u64) << 32) | blank_bg as u64;
+
+            for row in 0..=last_row {
+                let base = row * self.cols;
+                self.staging.fill(blank_word);
+
+                for col in 0..self.cols {
+                    let cell = self.cells[base + col];
+                    if cell.ch == b' ' || cell.ch == 0 {
+                        continue;
                     }
-                    self.draw_cell_pixels_native(cell.ch, native_fg, native_bg, col, row);
-                    col += 1;
-                    continue;
+                    let start_x = col * FONT_WIDTH;
+                    if start_x >= width {
+                        break;
+                    }
+                    let fg = crate::display::color_to_native(cell.fg, self.pixel_format);
+                    let bg = crate::display::color_to_native(cell.bg, self.pixel_format);
+                    let glyph = &FONT_DATA[cell.ch as usize];
+                    let first_word = start_x / 2;
+                    let full_words = (FONT_WIDTH / 2).min(words_per_row.saturating_sub(first_word));
+                    for dy in 0..FONT_HEIGHT {
+                        // `expand_line` уже отдаёт 8 пикселей как 4 u64 —
+                        // ровно то, что нужно положить в строку-тень.
+                        let words = expand_line(glyph[dy], fg, bg);
+                        let dst = &mut self.staging[dy * words_per_row + first_word..];
+                        let n = full_words.min(4);
+                        dst[..n].copy_from_slice(&words[..n]);
+                    }
                 }
 
-                // Прогон пробелов: находим его конец и заливаем одним куском.
-                let mut end = col + 1;
-                while end < self.cols && self.cells[base + end] == blank {
-                    end += 1;
-                }
-
-                let start_x = col * FONT_WIDTH;
-                if start_x >= self.width {
-                    break;
-                }
-                let run_width = ((end - col) * FONT_WIDTH).min(self.width - start_x);
                 for dy in 0..FONT_HEIGHT {
                     let py = row * FONT_HEIGHT + dy;
                     if py >= self.height {
                         break;
                     }
                     unsafe {
-                        let ptr = self.fb_addr.add(py * self.pitch + start_x);
-                        core::slice::from_raw_parts_mut(ptr, run_width).fill(blank_bg);
+                        let src = self.staging.as_ptr().add(dy * words_per_row);
+                        let dst = self.fb_addr.add(py * self.pitch) as *mut u64;
+                        // Одна широкая запись на пиксельную строку вместо
+                        // 160×8 отдельных volatile-записей.
+                        core::ptr::copy_nonoverlapping(src, dst, words_per_row);
                     }
                 }
-                col = end;
+            }
+        } else {
+            // Фолбэк до инициализации кучи (или нечётная ширина): поштучно.
+            for row in 0..=last_row {
+                let base = row * self.cols;
+                for col in 0..self.cols {
+                    let cell = self.cells[base + col];
+                    self.draw_cell_pixels_native(
+                        cell.ch,
+                        crate::display::color_to_native(cell.fg, self.pixel_format),
+                        crate::display::color_to_native(cell.bg, self.pixel_format),
+                        col,
+                        row,
+                    );
+                }
             }
         }
+
+        // WC-записи завершаются асинхронно; барьер делает результат видимым
+        // до возврата в вызывающий код (и заодно корректно заканчивает замер).
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
     }
 
     pub fn set_cursor(&mut self, col: usize, row: usize) {
@@ -1180,6 +1645,21 @@ impl Console {
     // === Примитивы рисования пикселей ===
 
     /// Ширина экрана для рисования (виртуальная, если задана, иначе физическая)
+    /// Сколько строк и колонок в текстовой сетке.
+    pub fn fb_rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn fb_cols(&self) -> usize {
+        self.cols
+    }
+
+    /// Поставить курсор в конкретную ячейку (для диагностики).
+    pub fn set_cursor_position(&mut self, col: usize, row: usize) {
+        self.cursor_col = col.min(self.cols.saturating_sub(1));
+        self.cursor_row = row.min(self.rows.saturating_sub(1));
+    }
+
     pub fn fb_width(&self) -> usize {
         if self.virtual_width > 0 {
             self.virtual_width

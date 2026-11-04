@@ -1,3 +1,25 @@
 [workspace]
 members = ["kernel"]
 resolver = "2"
+
+# Профили ОБЯЗАНЫ жить в корневом Cargo.toml: в членах workspace они
+# игнорируются молча. Раньше `[profile.dev]`/`[profile.release]` лежали в
+# `kernel/Cargo.toml`, поэтому debug-сборка шла с opt-level = 0, а
+# `panic = "abort"` не применялся вовсе.
+#
+# opt-level = 1 в dev — не роскошь, а необходимость: отрисовка консоли
+# (сборка глифов, прокрутка) в неоптимизированном коде в ~40 раз медленнее.
+# Замер `diag fb`: сборка одной текстовой строки 2 003 261 циклов при
+# opt-level 0 против ~35 000 при оптимизации. Отладочная информация и
+# проверки переполнения при этом сохраняются.
+[profile.dev]
+opt-level = 1
+debug = true
+overflow-checks = true
+panic = "abort"
+
+[profile.release]
+opt-level = 3
+debug = false
+panic = "abort"
+lto = false
