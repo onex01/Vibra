@@ -1,14 +1,30 @@
 name: Release
 
+# Автоматический релиз.
+#
+# Триггеры:
+#   * push в main — если версия в kernel/src/version.rs новая (тега ещё нет),
+#     релиз собирается и публикуется сам. Хочешь собрать без релиза —
+#     добавь в сообщение коммита `[skip release]`;
+#   * push тега `v*` — пересборка/перезаливка существующего релиза;
+#   * workflow_dispatch — вручную, с любым тегом.
+#
+# Тег создаётся внутри этого же workflow (job `publish`), а не отдельным
+# пушем: тег, отправленный с GITHUB_TOKEN, не запускает другие workflow,
+# поэтому публикация делается сразу здесь.
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (например v0.2.0-rc.5)"
-        required: true
+        description: "Тег релиза (по умолчанию v<версия из version.rs>)"
+        required: false
+      force:
+        description: "Пересобрать даже если релиз уже существует"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -21,8 +37,74 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Build release artifacts
+  # Решает, нужен ли релиз, и вычисляет версию/тег один раз для всех job'ов.
+  prepare:
+    name: Resolve version and tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      codename: ${{ steps.vars.outputs.codename }}
+      tag: ${{ steps.vars.outputs.tag }}
+      should_release: ${{ steps.vars.outputs.should_release }}
+      prerelease: ${{ steps.vars.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version, tag and release policy
+        id: vars
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^pub const KERNEL_VERSION: &str = "\(.*\)";/\1/p' kernel/src/version.rs)"
+          codename="$(sed -n 's/^pub const KERNEL_CODENAME: &str = "\(.*\)";/\1/p' kernel/src/version.rs)"
+          [[ -n "$version" ]] || { echo "cannot read KERNEL_VERSION" >&2; exit 1; }
+
+          tag="${{ github.event.inputs.tag }}"
+          [[ -n "$tag" ]] || tag="v$version"
+
+          # rc/beta/alpha — предварительный релиз.
+          prerelease=false
+          case "$version" in
+            *-rc.*|*-beta.*|*-alpha.*) prerelease=true ;;
+          esac
+
+          # Политика:
+          #   тег      — всегда собираем (перезаливка разрешена);
+          #   dispatch — всегда собираем;
+          #   main     — только если такого тега ещё нет и нет `[skip release]`.
+          should_release=true
+          case "${{ github.event_name }}" in
+            push)
+              if [[ "${{ github.ref_type }}" != "tag" ]]; then
+                if grep -qF '[skip release]' <<< "${{ github.event.head_commit.message }}"; then
+                  echo "release skipped: [skip release] in the commit message"
+                  should_release=false
+                elif git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+                  echo "release skipped: tag $tag already exists"
+                  should_release=false
+                fi
+              fi
+              ;;
+          esac
+          if [[ "${{ github.event.inputs.force }}" == "true" ]]; then
+            should_release=true
+          fi
+
+          {
+            echo "version=$version"
+            echo "codename=$codename"
+            echo "tag=$tag"
+            echo "should_release=$should_release"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$version tag=$tag release=$should_release prerelease=$prerelease"
+
+  build:
+    name: Build images and notes
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -30,10 +112,8 @@ jobs:
       RUSTUP_HOME: ${{ github.workspace }}/.ci/rustup
       SMOKE_TIMEOUT: 180
       SMOKE_MIN_HEARTBEATS: 12
-      FS_TEST_TIMEOUT: 300
       BOOT_READY_TIMEOUT: 120
       DEBUG_IMAGE_TIMEOUT: 150
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,47 +157,70 @@ jobs:
       - name: Test filesystem drivers
         run: ./build.sh fs-test
 
-      - name: Build release ISO
-        run: ./build.sh iso-release
-
-      - name: Build debug ISO
-        run: make iso-debug
-
-      - name: Build GPT/ESP UEFI image
-        run: ./build.sh uefi-usb
-
-      - name: Build USB image
-        run: ./build.sh usb
-
-      - name: Build 3-partition USB debug image
-        run: make usb-debug
-
-      - name: Test 3-partition USB debug image
-        run: |
-          version="$(sed -n 's/^pub const KERNEL_VERSION: &str = "\(.*\)";/\1/p' kernel/src/version.rs)"
-          date="$(date -u +%Y-%m-%d)"
-          bash scripts/qemu-debug-image-test.sh "build/vibra-usb-debug_${date}_${version}.img"
-
-      - name: Test debug ISO written to USB
-        run: |
-          version="$(sed -n 's/^pub const KERNEL_VERSION: &str = "\(.*\)";/\1/p' kernel/src/version.rs)"
-          date="$(date -u +%Y-%m-%d)"
-          bash scripts/qemu-debug-image-test.sh "build/vibra-debug_${date}_${version}.iso"
-
-      - name: Collect artifacts and checksums
+      - name: Build images
         run: |
           set -euo pipefail
+          # Релизный ISO (UEFI+BIOS, без UART).
+          ./build.sh iso-release
+          # Отладочный ISO: serial-лог + раздел VIBRALOG.
+          make iso-debug
+          # GPT/ESP-образ для UEFI-флешки и MBR-образ для BIOS/CSM.
+          ./build.sh uefi-usb
+          ./build.sh usb
+          # Флешка с тремя разделами (ESP, VIBRA, VIBRALOG).
+          make usb-debug
+
+      - name: Smoke-test the debug images
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          date="$(date -u +%Y-%m-%d)"
+          bash scripts/qemu-debug-image-test.sh "build/vibra-usb-debug_${date}_${version}.img"
+          bash scripts/qemu-debug-image-test.sh "build/vibra-debug_${date}_${version}.iso"
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
           mkdir -p dist
-          find build -maxdepth 1 -type f \
-            \( -name 'vibra_*.iso' -o -name 'vibra-*_*.iso' -o -name 'vibra-*_*.img' \) \
-            -exec cp {} dist/ \;
-          (cd dist && sha256sum * > SHA256SUMS)
-          ls -lh dist
+          # Только файлы этой версии: build/ содержит ещё образы тестов
+          # (fs-test, iso-test) и symlink'и vibra.iso/vibra-debug.iso.
+          find build -maxdepth 1 -type f -name "*_${version}.*" -exec cp {} dist/ \;
+          if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then
+            find build -maxdepth 1 -type f -name "*_${version}.*" -print
+          fi
+          cp CHANGELOG.md dist/CHANGELOG.md
+          (cd dist && sha256sum * > SHA256SUMS && ls -lh)
+
+      - name: Write manifest
+        run: |
+          set -euo pipefail
+          {
+            echo "version=${{ needs.prepare.outputs.version }}"
+            echo "codename=${{ needs.prepare.outputs.codename }}"
+            echo "tag=${{ needs.prepare.outputs.tag }}"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "commit_short=$(git rev-parse --short HEAD)"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "rustc=$(cargo +nightly -V 2>/dev/null || echo unknown)"
+            echo "limine=$(grep -m1 '^LIMINE_VERSION' Makefile 2>/dev/null || true)"
+            echo "ovmf=$(sha256sum OVMF.fd 2>/dev/null | cut -d' ' -f1 || echo unknown)"
+          } > dist/MANIFEST.txt
+          cat dist/MANIFEST.txt
+
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          scripts/release-notes.sh \
+            --tag "${{ needs.prepare.outputs.tag }}" \
+            --dist dist \
+            --out dist/RELEASE_NOTES.md
+          cat dist/RELEASE_NOTES.md
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: vibra-release
+          name: vibra-${{ needs.prepare.outputs.version }}
           path: dist/*
           if-no-files-found: error
 
@@ -129,16 +232,53 @@ jobs:
           path: build/*.log
           if-no-files-found: ignore
 
-      - name: Publish GitHub Release
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: vibra-${{ needs.prepare.outputs.version }}
+          path: dist
+
+      - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="${{ needs.prepare.outputs.tag }}"
+          version="${{ needs.prepare.outputs.version }}"
+
+          # Тег мог не существовать (сборка по push в main) — создаём его
+          # здесь же: пуш тега через GITHUB_TOKEN не запускает workflow
+          # повторно, поэтому публикацию делаем сразу.
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" -m "Vibra $version «${{ needs.prepare.outputs.codename }}»"
+            git push origin "refs/tags/$tag"
+          fi
+
+          args=(--title "Vibra $version «${{ needs.prepare.outputs.codename }}»"
+                --notes-file dist/RELEASE_NOTES.md)
+          if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+
           if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" "${args[@]}"
             gh release upload "$tag" dist/* --clobber
           else
-            gh release create "$tag" dist/* \
-              --title "Vibra $tag" \
-              --generate-notes
+            gh release create "$tag" dist/* "${args[@]}"
           fi
+
+          gh release view "$tag" --json url,tagName,assets \
+            --jq '"published \(.tagName): \(.url)\n" + (.assets[] | "  - \(.name) (\(.size) bytes)")'

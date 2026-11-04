@@ -5,6 +5,7 @@ LIMINE_DIR := limine-bin
 
 # Версия берётся из единственного источника — kernel/src/version.rs.
 VERSION := $(shell sed -n 's/^pub const KERNEL_VERSION: &str = "\(.*\)";/\1/p' kernel/src/version.rs)
+CODENAME := $(shell sed -n 's/^pub const KERNEL_CODENAME: &str = "\(.*\)";/\1/p' kernel/src/version.rs)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%d)
 
 # Имена артефактов: vibra_2026-10-31_0.2.0-rc.5.iso
@@ -95,7 +96,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test iso-test shell-test check boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
+.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test iso-test shell-test check dist release-notes boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
 
 all: run
 
@@ -164,6 +165,38 @@ check:
 	@$(MAKE) kernel
 	@$(MAKE) kernel SERIAL_DEBUG=0
 	@python3 scripts/check-warning-budget.py
+
+# Локальная сборка релиза: все образы текущей версии, контрольные суммы,
+# манифест и текст описания релиза — в `dist/`. То же самое делает
+# .github/workflows/release.yml, но здесь можно проверить без GitHub.
+dist:
+	@echo "==> Building release images for $(VERSION)"
+	@$(MAKE) iso-release
+	@$(MAKE) iso-debug
+	@$(MAKE) uefi-usb
+	@$(MAKE) usb
+	@$(MAKE) usb-debug
+	@rm -rf $(BUILD_DIR)/dist
+	@mkdir -p $(BUILD_DIR)/dist
+	@find $(BUILD_DIR) -maxdepth 1 -type f -name "*_$(VERSION).*" -exec cp {} $(BUILD_DIR)/dist/ \;
+	@cp CHANGELOG.md $(BUILD_DIR)/dist/CHANGELOG.md
+	@(cd $(BUILD_DIR)/dist && sha256sum * > SHA256SUMS)
+	@{ \
+		echo "version=$(VERSION)"; \
+		echo "codename=$(CODENAME)"; \
+		echo "tag=v$(VERSION)"; \
+		echo "commit=$$(git rev-parse HEAD 2>/dev/null || echo unknown)"; \
+		echo "built_at=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+		echo "rustc=$$($(CARGO) -V 2>/dev/null || echo unknown)"; \
+	} > $(BUILD_DIR)/dist/MANIFEST.txt
+	@scripts/release-notes.sh --tag "v$(VERSION)" --dist $(BUILD_DIR)/dist \
+		--out $(BUILD_DIR)/dist/RELEASE_NOTES.md
+	@echo "==> dist/ ready:"
+	@ls -lh $(BUILD_DIR)/dist
+
+# Только текст описания релиза (без сборки образов).
+release-notes:
+	@scripts/release-notes.sh --tag "v$(VERSION)" --dist $(BUILD_DIR)/dist
 
 # Проверка загрузки собранного ISO: UEFI (OVMF) и BIOS (SeaBIOS) через El Torito.
 iso-smoke: iso

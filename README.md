@@ -123,6 +123,7 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh fs-test        проверить FAT32/ext2/ext4/NTFS, MBR-раздел, sync/umount
 ./build.sh big-fs-test    проверить NTFS 2 ТБ, GPT выше 2 ТБ, MBR на 4Kn, exFAT
 ./build.sh iso-test       смонтировать ISO9660 с CD-ROM (sr0) и прочитать файлы
+make dist                 собрать все релизные образы + SHA256SUMS + release notes
 ./build.sh vktst-test     проверить vktst, top, free и tree
 ./build.sh debug-image-test  проверить 3 раздела USB debug-образа и запись лога
 ./build.sh iso-debug-test проверить debug ISO, записанный на USB

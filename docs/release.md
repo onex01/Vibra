@@ -72,18 +72,38 @@ make check
 ## GitHub Actions
 
 `.github/workflows/kernel.yml` — обычный CI на push/PR: сборка, smoke,
-clock/ramfs/ro-mount/bad-fs/nvme/shell/fs, vktst, debug-образы, ISO и матрица
-загрузок.
+clock/ramfs/ro-mount/bad-fs/nvme/big-fs/iso/shell/fs, vktst, debug-образы,
+ISO и матрица загрузок.
 
-`.github/workflows/release.yml` — релиз:
+`.github/workflows/release.yml` — авторелиз. Запускается в трёх случаях:
 
-- запускается по тегу `v*` или вручную (`workflow_dispatch` → `tag`);
-- ставит пакеты и nightly-тулчейн;
-- выполняет `doctor`, `setup`, `check`, `build`, `smoke`, `fs-test`;
-- собирает `iso-release`, `iso-debug`, `uefi-usb`, `usb`, `usb-debug`;
-- проверяет debug-образы загрузкой в QEMU;
-- кладёт артефакты и `SHA256SUMS` в `dist/`;
-- публикует GitHub Release (`gh release create`) с автоматическими notes.
+| Триггер | Поведение |
+|---|---|
+| push в `main` | релиз собирается сам, **если** версия в `kernel/src/version.rs` ещё не имеет тега `v<версия>`; `[skip release]` в сообщении коммита отменяет |
+| push тега `v*` | пересборка и перезаливка существующего релиза |
+| `workflow_dispatch` | вручную; можно задать тег и `force` (пересобрать, даже если релиз есть) |
+
+Job'ы:
+
+1. **prepare** — читает `KERNEL_VERSION`/`KERNEL_CODENAME`, вычисляет тег
+   (`v<версия>`), решает `should_release`, ставит `prerelease` для `-rc.*`;
+2. **build** — packages + nightly, `doctor`, `setup`, бюджеты предупреждений,
+   `build`, `smoke`, `fs-test`, затем `iso-release`, `iso-debug`,
+   `uefi-usb`, `usb`, `usb-debug`; проверяет debug-образы загрузкой в QEMU;
+   собирает `dist/` (только файлы текущей версии), `SHA256SUMS`,
+   `MANIFEST.txt`, `RELEASE_NOTES.md`;
+3. **publish** — создаёт тег, если его ещё нет, и публикует релиз с notes из
+   `scripts/release-notes.sh`.
+
+Описание релиза генерируется, а не пишется руками: раздел под текущую версию
+из `CHANGELOG.md`, список коммитов с предыдущего тега, таблица образов с
+размерами и контрольными суммами, известные ограничения.
+
+```sh
+# то же самое локально, без GitHub
+make dist              # все образы + dist/{SHA256SUMS,MANIFEST.txt,RELEASE_NOTES.md}
+make release-notes     # только текст описания для build/dist
+```
 
 ### Выпуск версии
 
@@ -93,9 +113,22 @@ make check
 ./build.sh smoke
 ./build.sh fs-test
 git add -A
-git commit -m "release: 0.2.0-rc.14"
-git tag v0.2.0-rc.14
-git push origin main --tags
+git commit -m "release: 0.2.0-rc.15"
+git push origin main      # этого достаточно: тег и релиз создаст CI
 ```
 
-Тег запускает `release.yml`; артефакты появятся в GitHub Releases.
+Тег можно поставить и руками (`git tag v0.2.0-rc.15 && git push --tags`) —
+тогда `release.yml` пересоберёт и перезальёт релиз, а не создаст дубликат.
+
+### Что попадает в релиз
+
+| Файл | Назначение |
+|---|---|
+| `vibra-release_<DATE>_<VERSION>.iso` | релизный ISO (UEFI+BIOS), UART выключен |
+| `vibra-debug_<DATE>_<VERSION>.iso` | отладочный ISO: serial-лог, разделы `VIBRA` и `VIBRALOG` |
+| `vibra-usb_<DATE>_<VERSION>.img` | образ для флешки, GPT+ESP |
+| `vibra-usb-debug_<DATE>_<VERSION>.img` | флешка с тремя разделами для разбора проблем на железе |
+| `vibra-uefi_<DATE>_<VERSION>.img` | минимальный GPT/ESP-образ |
+| `SHA256SUMS` | контрольные суммы всех файлов |
+| `MANIFEST.txt` | версия, коммит, дата, тулчейн, SHA256 `OVMF.fd` |
+| `RELEASE_NOTES.md`, `CHANGELOG.md` | описание релиза и полная история |
