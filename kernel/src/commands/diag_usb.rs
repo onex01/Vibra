@@ -24,6 +24,52 @@ pub fn diag_usb(console: &mut Console) {
         ));
     }
 
+    console.print_colored("[EHCI]\n", COLOR_YELLOW);
+    console.print(&format!(
+        "  controllers: {}\n",
+        crate::drivers::usb::ehci::controller_count()
+    ));
+    let ehci_ports = crate::drivers::usb::ehci::ports();
+    if ehci_ports.is_empty() {
+        console.print("  no EHCI controller\n");
+    }
+    for port in &ehci_ports {
+        console.print(&format!(
+            "  ctrl{} port{:<2} {:#010x} {} {} {} speed {} ({})",
+            port.controller,
+            port.port,
+            port.portsc,
+            if port.connected { "conn" } else { "empty" },
+            if port.enabled { "en" } else { "dis" },
+            if port.powered { "powered" } else { "unpowered" },
+            port.speed,
+            crate::drivers::usb::xhci::speed_name(port.speed)
+        ));
+        match port.device {
+            Some((vendor, product, kind)) => console.print(&format!(
+                " -> {:04x}:{:04x} {}\n",
+                vendor, product, kind
+            )),
+            None => console.print(" -> not enumerated\n"),
+        }
+    }
+    for device in crate::drivers::usb::ehci::devices() {
+        console.print(&format!(
+            "  ctrl{} addr{:<3} port{:<2} {:04x}:{:04x} class {:02x}/{:02x}/{:02x} speed {} ({}) -> {}\n",
+            device.controller,
+            device.slot,
+            device.port,
+            device.vendor,
+            device.product,
+            device.class,
+            device.subclass,
+            device.protocol,
+            device.speed,
+            crate::drivers::usb::xhci::speed_name(device.speed),
+            device.kind
+        ));
+    }
+
     console.print_colored("[xHCI]\n", COLOR_YELLOW);
     console.print(&format!(
         "  controllers: {}\n  keyboard:    {}\n",
@@ -46,8 +92,8 @@ pub fn diag_usb(console: &mut Console) {
             0x30 => "xHCI (USB 3.x)",
             _ => "USB (unknown prog_if)",
         };
-        // UHCI и xHCI у нас есть; остальные — нет.
-        if prog_if == 0x00 || prog_if == 0x30 {
+        // UHCI, EHCI и xHCI у нас есть; остальные — нет.
+        if prog_if == 0x00 || prog_if == 0x20 || prog_if == 0x30 {
             continue;
         }
         console.print(&format!(
@@ -181,8 +227,14 @@ pub fn diag_usb(console: &mut Console) {
         console.print("  none\n");
     }
     for disk in &disks {
+        // Ищем запись контроллера по (host, controller, slot): на xHCI и
+        // EHCI номера слотов/адресов могут совпадать.
+        let info = crate::drivers::usb::storage_devices()
+            .into_iter()
+            .find(|d| d.host == disk.host && d.controller == disk.controller && d.slot == disk.slot);
         console.print(&format!(
-            "  ctrl{} slot{}: {} {} ({} MiB, {} sectors, {} sec/cmd, {} speed, burst {})\n",
+            "  {:?} ctrl{} slot{}: {} {} ({} MiB, {} sectors, {} sec/cmd, {} speed, burst {})\n",
+            disk.host,
             disk.controller,
             disk.slot,
             disk.model(),
@@ -190,18 +242,8 @@ pub fn diag_usb(console: &mut Console) {
             disk.size_mb(),
             disk.sectors,
             disk.sectors_per_cmd,
-            crate::drivers::usb::xhci::speed_name(
-                crate::drivers::usb::xhci::storage_devices()
-                    .iter()
-                    .find(|d| d.slot == disk.slot)
-                    .map(|d| d.speed)
-                    .unwrap_or(0)
-            ),
-            crate::drivers::usb::xhci::storage_devices()
-                .iter()
-                .find(|d| d.slot == disk.slot)
-                .map(|d| d.max_burst)
-                .unwrap_or(0)
+            crate::drivers::usb::xhci::speed_name(info.as_ref().map(|d| d.speed).unwrap_or(0)),
+            info.as_ref().map(|d| d.max_burst).unwrap_or(0)
         ));
     }
 

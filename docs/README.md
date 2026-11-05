@@ -1,6 +1,6 @@
 # Vibra Kernel — статус проекта
 
-**Версия:** `0.2.0-rc.24` «Foundation RC24»
+**Версия:** `0.2.0-rc.25` «Foundation RC25»
 **Поддерживаемая архитектура:** только `x86_64-unknown-none`  
 **Загрузка:** Limine через UEFI; QEMU — основная тестовая среда
 
@@ -16,7 +16,7 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 Подтверждено только прохождение компиляции и QEMU-путь, когда он явно
 зафиксирован тестом. Наличие исходного файла не является поддержкой железа.
 
-| Подсистема | Состояние 0.2.0-rc.24 |
+| Подсистема | Состояние 0.2.0-rc.25 |
 |---|---|
 | Limine, serial, framebuffer | базовый x86_64 boot path |
 | PMM, heap, paging/VMM | экспериментально, требуется стресс на железе |
@@ -24,7 +24,7 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | PCI/ACPI | инвентаризация и частичная инициализация |
 | AHCI/IDE/NVMe/ATAPI, FAT32/ext2/3/4/NTFS/exFAT/ISO9660 | AHCI + IDE + NVMe + ATAPI CD + block layer + MBR/EBR/GPT + mount/umount/sync; FAT32 rw для `VIBRALOG`, ext/NTFS/exFAT ro (ext4: extents/64bit) в QEMU |
 | xHCI/UHCI/HID/storage | lifecycle, HID boot keyboard, BOT+SCSI mass storage и hotplug в QEMU; UHCI — клавиатура |
-| EHCI (USB 2.0) | только детект в `diag usb`; драйвер запланирован (`rc.25`) |
+| EHCI (USB 2.0) | lifecycle, mass storage и hotplug в QEMU; на реальном железе не подтверждён |
 | e1000/RTL8139, IPv4/ICMP | QEMU-ориентированный прототип, без DHCP/TCP |
 | ARM64 / Orange Pi Zero 3 | не поддерживается |
 
@@ -55,6 +55,7 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | `make uhci-test` | USB-клавиатура на UHCI |
 | `make usb3-test` | xHCI SuperSpeed-диск, монтирование, hotplug |
 | `make usb-storage-test` | USB-накопитель через VFS: `mount fat32`, `ls`, `cat`, `cp` |
+| `make ehci-test` | EHCI (USB 2.0): монтирование USB2-диска, чтение, hotplug |
 | `make vktst-test` | `vktst run all`, `free`, `top -b`, `tree` из `/proc` |
 | `make iso-smoke` | загрузка гибридного ISO в UEFI (OVMF) и BIOS (SeaBIOS) |
 | `BOOT_ITERATIONS=10 python3 scripts/qemu-boot-matrix.py` | повторяемость загрузки |
@@ -109,5 +110,5 @@ ISO, UEFI/USB образы, `SHA256SUMS` и GitHub Release. Подробност
 
 Единственная публичная версия — версия ядра. До `0.5.0` minor-версии отражают
 достигнутые проверяемые hardware milestones, а не количество файлов или
-демонстраций. `0.2.0-rc.24` — prerelease Foundation; финальный `0.2.0` ждёт
-закрытия `rc.25`–`rc.30`, CI, QEMU boot matrix и проверки на реальном x86_64.
+демонстраций. `0.2.0-rc.25` — prerelease Foundation; финальный `0.2.0` ждёт
+закрытия `rc.26`–`rc.30`, CI, QEMU boot matrix и проверки на реальном x86_64.

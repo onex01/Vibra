@@ -334,7 +334,8 @@ Other
  19) Debug ISO written to USB               iso-debug-test
  20) ISO boot matrix (UEFI + BIOS)          iso-smoke
  21) USB3 (SuperSpeed) disk and hotplug     usb3-test
- 22) Back
+ 22) EHCI (USB 2.0) disk and hotplug        ehci-test
+ 23) Back
 MENU
         printf 'Choice: '
         read -r choice || return
@@ -360,10 +361,11 @@ MENU
             19) run_command iso-debug-test ;;
             20) run_command iso-smoke ;;
             21) run_command usb3-test ;;
-            22) return ;;
+            22) run_command ehci-test ;;
+            23) return ;;
             *) echo "Unknown choice: $choice" ;;
         esac
-        [ "${choice:-}" = "22" ] || pause
+        [ "${choice:-}" = "23" ] || pause
     done
 }
 
@@ -474,6 +476,7 @@ nvme-test|build|nvme-test|
 big-fs-test|build|big-fs-test|
 iso-test|build|iso-test|
 usb3-test|build|usb3-test|
+ehci-test|build|ehci-test|
 noserial-test|build|noserial-test|
 serial-input-test|build|serial-input-test|
 shell-test|build|shell-test|

@@ -1,6 +1,6 @@
 # Roadmap — Vibra Kernel
 
-> Текущая версия: **0.2.0-rc.24 «Foundation RC24»**.
+> Текущая версия: **0.2.0-rc.25 «Foundation RC25»**.
 > Цель: стабильное диагностическое ядро на реальном x86_64-железе, не ОС.
 
 Дорожная карта разбита на **серии patch-релизов** внутри каждого minor.
@@ -46,7 +46,7 @@ CMOS RTC; `date`, `date hw`, `uptime`, `diag timer`, LAPIC-timer fallback.
 
 **Хранилище.** AHCI (ATA read/write, ATAPI CD), IDE/PATA (read-only, теперь
 в block layer), NVMe (Identify, I/O queues, 512/4096 байт/блок),
-USB mass storage (xHCI BOT/SCSI), GPT/MBR/EBR, 4Kn, `sdX`/`srX`,
+USB mass storage (xHCI/EHCI BOT/SCSI), GPT/MBR/EBR, 4Kn, `sdX`/`srX`,
 FAT32 (rw), ext2/3/4 (ro, extents/64bit/htree), NTFS (ro, MFT/index),
 `mount auto`, `umount`, `sync`, `VIBRALOG`.
 
@@ -340,27 +340,31 @@ EHCI. На T450 все три порта обслуживает `8086:9CA6`, п�
 эндпоинтов (у bulk-only их нет), split transactions — только для USB 1.1
 за хабом.
 
-- [ ] PCI: `class 0x0C`/`subclass 0x03`/`prog_if 0x20`, BAR0 (32/64-бит),
+- [x] PCI: `class 0x0C`/`subclass 0x03`/`prog_if 0x20`, memory BAR0,
   отображение MMIO.
-- [ ] Legacy handoff через `USBLEGSUP` (EECP).
-- [ ] Init: `HCRESET`, `CONFIGFLAG.CFL = 1`, `USBCMD` Run+ASE, ожидание
-  `HCHalted = 0` по времени.
-- [ ] Порты: сброс (`PR`/`PRC`/`PED`), `PSI`, `PP`, детект `PO`.
-- [ ] Async schedule: QH (48 Б, выравнивание 32) и qTD (32 Б), HHDM-адреса;
-  опрос `USBSTS` вместо прерываний.
-- [ ] Control transfers: `GET_DESCRIPTOR`, `SET_ADDRESS`,
+- [x] Legacy handoff через `USBLEGSUP` (EECP): OS owned, SMI off.
+- [x] Init: `HCRESET`, `CONFIGFLAG.CFL = 1`, `USBCMD` Run+ASE, ожидание
+  `HCHalted = 0`.
+- [x] Порты: сброс (`PR` → `PE`/`PEC`), `PP`, скорость (`PS`; на QEMU —
+  по `PE`), детект `CCS`.
+- [x] Async schedule: QH (48 Б, выравнивание 32) и qTD (32 Б), адреса через
+  `paging::dma_address`, опрос `USBSTS`/qTD вместо прерываний.
+- [x] Control transfers: `GET_DESCRIPTOR`, `SET_ADDRESS`,
   `SET_CONFIGURATION`, `GET_MAX_LUN`, BOT reset.
-- [ ] Bulk IN/OUT через цепочки qTD.
-- [ ] `enum UsbHost { Xhci, Ehci }` и диспетчеризация: BOT/SCSI
-  (`storage.rs`) остаются одни на два контроллера, `StorageInfo` получает
-  поле `host`.
-- [ ] Hotplug EHCI: `PORTSC.CSC`, перечисление и удаление.
-- [ ] `diag usb`: EHCI-порты, скорость, устройство.
-- [ ] `make ehci-test`: QEMU `usb-ehci` + `usb-storage`, монтирование,
+- [x] Bulk IN/OUT через qTD, software data toggle (BOT: CBW = DATA0,
+  data/CSW = DATA1).
+- [x] `enum UsbHost { Xhci, Ehci }` и диспетчеризация: BOT/SCSI
+  (`storage.rs`) остаются одни на два контроллера, `StorageInfo`/`DiskInfo`
+  получили поле `host`.
+- [x] Hotplug EHCI: `PORTSC.CSC`, перечисление и удаление, общий
+  `usb::poll_hotplug` с пересборкой block layer.
+- [x] `diag usb`: раздел `[EHCI]` — порты, скорость, устройства.
+- [x] `make ehci-test`: QEMU `usb-ehci` + `usb-storage`, монтирование,
   чтение, `device_del`/`device_add`.
 
-**Выход:** флешка в порту EHCI появляется в `disks`, монтируется и читается;
-`/VIBRA.LOG` пишется. Проверено на T450.
+**Выход:** в QEMU флешка в порту EHCI появляется в `disks`, монтируется и
+читается, hotplug работает. На T450 драйвер ещё не проверялся — запись в
+`docs/verified-hardware.md` остаётся открытой.
 
 ### 0.2.0-rc.26 — консоль: разделение стоков и быстрый serial
 
@@ -707,15 +711,16 @@ Read-only база есть; серия добавляет безопасную 
 - [!] Нет записи на ext2/3/4 и NTFS (только FAT32).
 - [!] Нет «горячего» определения не-USB устройств: если UART/PS2 исчезнет
   после probe, опрос прекращается (UART) или обрывается (PS2). USB hotplug
-  есть для xHCI, для EHCI появится в rc.25.
+  есть для xHCI и EHCI.
 - [!] ISO9660 без multi-extent/CE: файлы, разбитые на несколько extents,
   пропускаются (образы с >4 ГиБ файлами). UDF не поддерживается.
 - [!] exFAT только для чтения: name hash не сверяется, bitmap не читается.
 - [!] Один NVMe-контроллер; несколько namespace не поддержаны.
-- [!] USB 2.0: нет драйвера EHCI. На T450 все три порта обслуживает он,
-  поэтому флешка не видна ни в одном (rc.25).
+- [!] EHCI проверен только в QEMU: на T450 драйвер ещё не прогонялся
+  (запись в `docs/verified-hardware.md` ждёт железа).
 - [!] USB: нет OHCI, нет хабов (класс 09).
-- [!] USB hotplug работает для xHCI; для EHCI появится в rc.25.
+- [!] USB HID на EHCI не поддержан (только mass storage; клавиатуры —
+  через xHCI/UHCI/PS2).
 - [!] Нет MSI/MSI-X; все драйверы на polling.
 - [!] Нет IOAPIC-маршрутизации; PIC остаётся основным.
 - [!] Нет SMP, per-CPU данных и TLB shootdown.

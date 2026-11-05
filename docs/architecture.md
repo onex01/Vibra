@@ -2,7 +2,7 @@
 
 ## Область действия
 
-Vibra Kernel 0.2.0-rc.24 — экспериментальное модульное монолитное ядро для
+Vibra Kernel 0.2.0-rc.25 — экспериментальное модульное монолитное ядро для
 `x86_64-unknown-none`. Оно загружается Limine в UEFI и использует QEMU как
 основной тестовый стенд. Реальное оборудование пока не считается
 поддержанным; каждый драйвер должен получить отдельную hardware-валидацию.
@@ -79,7 +79,7 @@ CMOS), `diag apic`, `uptime`.
 | `interrupts`, `gdt` | IDT, PIC, APIC-задел, TSS | PIC baseline; LAPIC timer только как fallback для тиков |
 | `timer` | TSC/HPET/PIT часы, CMOS RTC, wall clock | TSC + HPET, RTC синхронизирован; IRQ-тики измеряются |
 | `drivers/pci`, `acpi` | обнаружение x86-оборудования | PCI + ACPI; BAR выше 4 ГБ переносятся в низкое MMIO-окно |
-| `drivers/usb` | xHCI + UHCI lifecycle, HID boot keyboard, BOT+SCSI mass storage, hotplug | enumeration, ввод и storage работают в QEMU; EHCI/OHCI нет |
+| `drivers/usb` | xHCI + UHCI + EHCI lifecycle, HID boot keyboard, BOT+SCSI mass storage, hotplug | enumeration, ввод и storage работают в QEMU; OHCI нет |
 | `fs` | RamFS, VFS, block layer, FAT32 (rw для `VIBRALOG`), ext2/3/4 (ro), NTFS (ro), exFAT/ISO9660 (ro) | block layer + MBR/EBR/GPT + ext4 extents + exFAT/ISO9660 работают в QEMU |
 | `drivers/ahci` | SATA + ATAPI CD | ATA read/write и ATAPI `PACKET`/`READ(10)` работают в QEMU |
 | `drivers/ide` | PATA/IDE (BIOS legacy) | только чтение, регистрируется в block layer |
@@ -104,7 +104,7 @@ CMOS), `diag apic`, `uptime`.
   и не ставит NX-биты в PTE — W^X деградирует, но boot продолжается.
 
 Следующие архитектурные шаги — PIC → LAPIC/IOAPIC и политика MSI/MSI-X, затем
-SMP bring-up, DMA-контракт для блочных драйверов и DHCP/ICMP. xHCI lifecycle,
-USB HID keyboard и USB mass storage реализованы (см.
+SMP bring-up, DMA-контракт для блочных драйверов и DHCP/ICMP. xHCI/UHCI/EHCI
+lifecycle, USB HID keyboard и USB mass storage реализованы (см.
 [usb_progress.md](usb_progress.md)), но подтверждены не на всех физических
-машинах; EHCI (USB 2.0) пока только детектируется. См. [roadmap.md](roadmap.md).
+машинах: EHCI проверен только в QEMU. См. [roadmap.md](roadmap.md).

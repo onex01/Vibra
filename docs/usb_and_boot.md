@@ -6,15 +6,15 @@
 
 ## Реальный статус USB
 
-xHCI и UHCI проходят полный lifecycle и работают как ввод (HID boot keyboard)
-и как накопители (BOT + SCSI) в QEMU. `make keyboard-test`, `make uhci-test`,
-`make usb3-test` и `make usb-storage-test` проверяют это автоматически.
+xHCI, UHCI и EHCI проходят полный lifecycle в QEMU; xHCI/UHCI дают ещё и
+ввод (HID boot keyboard), а все три — накопители через BOT + SCSI.
+`make keyboard-test`, `make uhci-test`, `make usb3-test`,
+`make usb-storage-test` и `make ehci-test` проверяют это автоматически.
 
-EHCI (USB 2.0) пока только детектируется и выводится в `diag usb`. Это важно
-для ноутбуков Haswell/Broadwell: USB2-половина разъёмов висит на EHCI, и без
-драйвера флешка не видна ни в одном порту (см.
-[verified-hardware.md](verified-hardware.md)). Драйвер — `rc.25` в
-[roadmap.md](roadmap.md).
+EHCI важен для ноутбуков Haswell/Broadwell: USB2-половина разъёмов висит на
+EHCI, и без драйвера флешка не видна ни в одном порту (на T450 — все три).
+Драйвер появился в `rc.25`, но на реальном железе ещё не подтверждён (см.
+[verified-hardware.md](verified-hardware.md)).
 
 До теста на реальном оборудовании не включайте USB в обязательный boot path.
 
@@ -24,10 +24,12 @@ EHCI (USB 2.0) пока только детектируется и выводи�
 ./build.sh setup
 ./build.sh debug
 ./build.sh qemu-usb
+make ehci-test          # EHCI + usb-storage, монтирование и hotplug
 ```
 
 `qemu-usb` добавляет эмулируемые xHCI keyboard/mouse только для разработки.
-Смотрите serial log; успешная загрузка QEMU не подтверждает физический USB.
+`make ehci-test` поднимает `usb-ehci` и USB2-накопитель. Смотрите serial log;
+успешная загрузка QEMU не подтверждает физический USB.
 
 ## Образы
 
@@ -74,7 +76,7 @@ UEFI-only теста x86_64 используйте `./build.sh uefi-usb`: он �
 |---|---|---|
 | 0x00 | UHCI (USB 1.1, Intel/VIA) | поддерживается: control, interrupt, bulk |
 | 0x10 | OHCI (USB 1.1, NEC/AMD/VIA) | не поддерживается |
-| 0x20 | EHCI (USB 2.0) | только детект; драйвер — `rc.25` |
+| 0x20 | EHCI (USB 2.0) | поддерживается: control, bulk, storage, hotplug |
 | 0x30 | xHCI (USB 3.x) | поддерживается: control, bulk, HID, storage, hotplug |
 
 Клавиатуры low-speed на чипсетах Intel и AMD SB подключены к UHCI-компаньону,

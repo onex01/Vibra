@@ -20,6 +20,7 @@
 | `make serial-input-test` | ввод через COM1 (`-serial stdio`), а не через monitor | qemu |
 | `make usb3-test` | xHCI SuperSpeed: USB3-диск, монтирование, hotplug (device_del/device_add) | qemu |
 | `make usb-storage-test` | USB-накопитель на xHCI через VFS: `mount fat32`, `ls`, `cat`, запись `cp` | qemu, mtools |
+| `make ehci-test` | EHCI (USB 2.0): USB2-диск, монтирование, чтение, hotplug | qemu, mtools |
 | `make boot-log-test` | запись `/VIBRA.LOG` на раздел `VIBRALOG` и инкрементальный flush | qemu, mtools |
 | `make iso-test` | ISO9660 с CD-ROM (ATAPI), Joliet/Rock Ridge, подкаталог | qemu, genisoimage |
 | `make big-fs-test` | NTFS 2 ТБ, GPT-раздел за 2 ТБ, MBR на 4Kn, exFAT по метке, FAT16-диагностика | qemu, ntfs-3g, mtools, python3 |
@@ -49,6 +50,7 @@ make check
 ./build.sh iso-test
 ./build.sh usb3-test
 ./build.sh usb-storage-test
+./build.sh ehci-test
 ./build.sh noserial-test
 ./build.sh build-script-test
 ./build.sh serial-input-test

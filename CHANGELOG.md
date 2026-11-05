@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.2.0-rc.25 «Foundation RC25» — 2026-11-06
+
+### EHCI (USB 2.0): флешка на ноутбуке
+
+На ThinkPad T450 (Haswell/Broadwell) USB2-половина каждого USB3-разъёма
+принадлежит EHCI (`8086:9CA6`), а все 15 портов xHCI читаются как пустые
+(`PORTSC=0x2a0`). Без драйвера EHCI флешка не появлялась ни в одном порту,
+и `VIBRA.LOG` не писался. Теперь есть `drivers/usb/ehci.rs`.
+
+- PCI: `prog_if 0x20`, memory BAR0, legacy handoff через EECP/`USBLEGSUP`,
+  `HCRESET`, `CONFIGFLAG.CFL = 1`, `USBCMD` Run+ASE, ожидание `HCHalted = 0`.
+- Async schedule: QH (48 байт, выравнивание 32) и qTD (32 байта),
+  HHDM-адреса из `paging::dma_address`, без периодического списка и split
+  transactions — BOT их не использует.
+- Control transfers: `GET_DESCRIPTOR`, `SET_ADDRESS`, `SET_CONFIGURATION`,
+  class requests; перечисление mass storage и `GET_MAX_LUN`/BOT reset.
+- Bulk IN/OUT через qTD; BOT/SCSI остаётся один на два контроллера:
+  `UsbHost { Xhci, Ehci }`, `StorageInfo`/`DiskInfo` получили поле `host`.
+- Hotplug EHCI (`PORTSC.CSC`), перечисление и удаление; block layer
+  пересобирается через общий `usb::poll_hotplug`.
+- `diag usb`: отдельный раздел `[EHCI]` с портами и устройствами.
+- `make ehci-test`: QEMU `usb-ehci` + `usb-storage`, монтирование, чтение,
+  `device_del`/`device_add`.
+
+### Найденные по ходу дефекты протокола
+
+- Бит Active в qTD token — **бит 7** (`0x80`), а не 0: с нулём в бите 0
+  контроллер считал все qTD завершёнными и не передавал ни байта.
+- Horizontal link QH требует тип `01` (бит 1). Ноль QEMU читает как iTD и
+  останавливает EHCI с «non queue head request in async schedule».
+- QH overlay должен содержать **ссылку** на первый qTD, а не сам qTD:
+  иначе `ehci_verify_qh` считает QH изменённым и сбрасывает очередь.
+- `PORTSC` нельзя писать без бита `PE`: QEMU считает такую запись
+  «guest may clear PED» и выключает порт. Запись PR=0 завершает port reset
+  в QEMU (на железе бит снимает контроллер).
+- QEMU не заполняет speed-биты `PORTSC`; high-speed определяется по `PE`.
+
+### Проверки
+
+`make check`, `make smoke`, `make fs-test`, `make vktst-test`,
+`make debug-image-test`, `make usb3-test`, `make usb-storage-test`,
+`make ehci-test` — все зелёные в QEMU. На реальном T450 драйвер ещё не
+проверялся.
+
 ## 0.2.0-rc.24 «Foundation RC24» — 2026-11-05
 
 ### Мусор в строке ввода: две настоящие причины

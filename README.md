@@ -3,7 +3,7 @@
 <p align="center"><b>Экспериментальное x86_64-ядро на Rust</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0--rc.24--Foundation-blue?style=flat-square" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-0.2.0--rc.25--Foundation-blue?style=flat-square" alt="Version"/>
   <img src="https://img.shields.io/badge/target-x86__64-orange?style=flat-square" alt="Target"/>
   <img src="https://img.shields.io/badge/Rust-no__std-red?style=flat-square" alt="Rust"/>
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License"/>
@@ -13,7 +13,7 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.24`
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.25`
 обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 
@@ -39,11 +39,11 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 - RAM-файловая система, встроенная shell, `vktst` и `disks` для диагностики.
 
 Это не подтверждает работу соответствующих драйверов на реальном железе.
-В частности, EHCI (USB 2.0), OHCI, автомонтирование дисков, DHCP/TCP и ARM64 не
-реализованы; HID boot keyboard, UHCI-клавиатура и USB-накопители работают в
-QEMU (`make keyboard-test`, `make uhci-test`, `make usb-storage-test`), но на
-физическом железе подтверждены не для всех платформ. Подробности и критерии
-готовности — в [roadmap](docs/roadmap.md).
+В частности, OHCI, автомонтирование дисков, DHCP/TCP и ARM64 не реализованы;
+HID boot keyboard, UHCI-клавиатура, USB-накопители на xHCI и EHCI работают в
+QEMU (`make keyboard-test`, `make uhci-test`, `make usb-storage-test`,
+`make ehci-test`), но на физическом железе подтверждены не для всех платформ.
+Подробности и критерии готовности — в [roadmap](docs/roadmap.md).
 
 ## Быстрый старт
 
@@ -157,6 +157,7 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh uhci-test      проверить USB-клавиатуру на UHCI
 ./build.sh usb3-test      проверить USB3-диск на xHCI и hotplug
 ./build.sh usb-storage-test  проверить FAT32 на USB-диске через VFS
+./build.sh ehci-test      проверить EHCI (USB 2.0): диск, монтирование, hotplug
 ./build.sh iso            собрать гибридный BIOS/UEFI ISO
 ./build.sh iso-smoke      загрузить ISO в UEFI (OVMF) и BIOS (SeaBIOS)
 ./build.sh uefi-usb       собрать GPT-образ с EFI System Partition
@@ -176,8 +177,8 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 драйверы не поддерживают запись. Boot-лог пишется на FAT32-раздел `VIBRALOG`.
 
 Имена образов содержат дату и версию, например
-`vibra_2026-10-31_0.2.0-rc.24.iso` и
-`vibra-debug_2026-10-31_0.2.0-rc.24.iso`; для совместимости создаются
+`vibra_2026-10-31_0.2.0-rc.25.iso` и
+`vibra-debug_2026-10-31_0.2.0-rc.25.iso`; для совместимости создаются
 симлинки `build/vibra.iso` и `build/vibra-debug.iso`.
 
 ## CI

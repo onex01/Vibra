@@ -242,6 +242,8 @@ pub fn init() -> BootConsole {
     // Перечисление USB отложено до таймера: на реальном железе оно занимает
     // секунды, а интервалы HID легче считать, когда время уже есть.
     crate::drivers::usb::xhci::enumerate_now();
+    // EHCI: USB2-порты на Haswell/Broadwell (флешка на T450).
+    crate::drivers::usb::ehci::enumerate_now();
     // UHCI: low/full-speed устройства (клавиатуры на USB2-портах чипсета).
     let uhci_found = crate::drivers::usb::uhci::enumerate();
     if uhci_found > 0 {

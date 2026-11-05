@@ -1,10 +1,9 @@
 # USB — реальный статус
 
-> Короткая версия: xHCI и UHCI проходят полный lifecycle в QEMU; USB mass
-> storage читается и пишется через VFS. EHCI есть только в диагностике — без
-> него на ноутбуках Haswell/Broadwell флешка не видна (см.
-> [verified-hardware.md](verified-hardware.md)). План — `rc.25` в
-> [roadmap.md](roadmap.md).
+> Короткая версия: xHCI, UHCI и EHCI проходят lifecycle в QEMU; USB mass
+> storage читается и пишется через VFS. На T450 EHCI — единственный путь
+> к флешке; драйвер есть с `rc.25`, но на железе ещё не проверялся (см.
+> [verified-hardware.md](verified-hardware.md)).
 
 ## Контроллеры
 
@@ -14,7 +13,7 @@
 |---|---|---|
 | `0x00` | UHCI (USB 1.1) | lifecycle, control/interrupt/bulk, HID-клавиатура |
 | `0x10` | OHCI (USB 1.1) | нет драйвера |
-| `0x20` | EHCI (USB 2.0) | только детект и вывод регистров |
+| `0x20` | EHCI (USB 2.0) | lifecycle, control/bulk, mass storage, hotplug |
 | `0x30` | xHCI (USB 3.x) | lifecycle, control/bulk, HID-клавиатура, storage, hotplug |
 
 `diag usb` печатает все найденные контроллеры, их BAR/MMIO, корневые порты
@@ -60,19 +59,31 @@ make usb3-test         # SuperSpeed-диск, монтирование, hotplug
 make usb-storage-test  # mount fat32, ls, cat, запись cp через VFS
 ```
 
-## EHCI (USB 2.0) — почему это важно
+## EHCI (USB 2.0)
 
 На Haswell/Broadwell USB2-половина каждого USB3-разъёма принадлежит EHCI.
 На Lenovo T450 оба контроллера есть (`8086:9C31` xHCI, `8086:9CA6` EHCI), но
 у xHCI все 15 портов читаются как `PORTSC=0x2a0` (`PP=1`, `CCS=0`) — ни один
-не видит подключения. Флешка в таком порту не появляется, пока нет драйвера
-EHCI. Companion-контроллеров UHCI на этой машине нет.
+не видит подключения. Companion-контроллеров UHCI на этой машине нет.
 
-Объём `rc.25`: только async schedule (bulk-only transport не использует
-interrupt-эндпоинты), без периодического списка и без split transactions
-(устройство high-speed на корневом порту). `storage.rs` остаётся один на два
-контроллера — вводится `enum UsbHost { Xhci, Ehci }` и тонкая
-диспетчеризация `bulk`/`resolve_stall`/`storage_devices`.
+`drivers/usb/ehci.rs` реализует только async schedule: периодический список
+нужен для interrupt-эндпоинтов, а BOT их не использует; split transactions —
+только для USB 1.1 за хабом.
+
+- PCI `prog_if 0x20`, BAR0, legacy handoff, `HCRESET`,
+  `CONFIGFLAG.CFL = 1`, `USBCMD` Run+ASE.
+- QH (48 байт, выравнивание 32) и qTD (32 байта); адреса — через
+  `paging::dma_address`, только ниже 4 ГиБ.
+- Control transfers и перечисление, bulk IN/OUT, hotplug по `PORTSC.CSC`.
+- `storage.rs` один на два контроллера: `UsbHost { Xhci, Ehci }`,
+  диспетчеризация `bulk`/`resolve_stall`/`storage_devices`.
+
+Особенности протокола, на которых легко обжечься: Active в qTD token — бит 7;
+horizontal link QH требует тип `01`; overlay QH содержит ссылку на первый
+qTD, а не сам qTD; запись `PORTSC` без бита `PE` выключает порт.
+
+Проверка: `make ehci-test` (QEMU `usb-ehci` + `usb-storage`, монтирование,
+чтение, hotplug).
 
 ## PS/2 (i8042)
 
@@ -96,6 +107,7 @@ make keyboard-test KEYBOARD_CASE=usb
 make uhci-test                # клавиатура на UHCI
 make usb3-test                # SuperSpeed-диск и hotplug
 make usb-storage-test         # FAT32 на USB-диске через VFS
+make ehci-test                # EHCI-диск: монтирование, чтение, hotplug
 ```
 
 Ожидаемые строки в `build/keyboard-usb.log`:
@@ -107,13 +119,13 @@ make usb-storage-test         # FAT32 на USB-диске через VFS
 [xHCI] HID keyboard ready: slot 1 port 1 0627:0001 ep=0x81 mps=8 interval=10
 ```
 
-QEMU умеет и EHCI: `-device usb-ehci,id=ehci -device usb-storage,bus=ehci.0`.
-Это стенд для `rc.25`.
+QEMU умеет EHCI: `-device usb-ehci,id=ehci -device usb-storage,bus=ehci.0`.
+Это стенд `make ehci-test`.
 
 ## Что ещё не сделано
 
-- EHCI (USB 2.0) — `rc.25`.
 - OHCI (USB 1.1, NEC/AMD/VIA) — не начато.
+- USB HID на EHCI — не поддержан: там только mass storage.
 - Хабы (класс 09) — не нужны, пока устройство подключено к корневому порту.
 - MSI/MSI-X и прерывания вместо polling — `rc.30`.
 - Несколько USB-накопителей одновременно и стабильные `sdX` между

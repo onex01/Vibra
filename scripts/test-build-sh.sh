@@ -97,7 +97,7 @@ menu_out="$(printf '6\n' | ./build.sh menu 2>&1)"
 printf '%s' "$menu_out" | grep -q 'Build images' || fail "main menu does not render"
 printf '%s' "$menu_out" | grep -q 'Quit' || fail "main menu has no Quit entry"
 # Все подменю должны открываться и закрываться, не зацикливаясь.
-for sub in '1:5' '2:5' '3:10' '4:22' '5:7'; do
+for sub in '1:5' '2:5' '3:10' '4:23' '5:7'; do
     entry="${sub%%:*}"
     back="${sub##*:}"
     out="$(printf '%s\n%s\n6\n' "$entry" "$back" | ./build.sh menu 2>&1)" \

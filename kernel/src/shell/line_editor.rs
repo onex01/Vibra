@@ -94,7 +94,7 @@ impl LineEditor {
             // устройство не перечисляет.
             if now_ms.saturating_sub(last_hotplug_ms) >= 500 {
                 last_hotplug_ms = now_ms;
-                let (added, removed) = crate::drivers::usb::xhci::poll_hotplug();
+                let (added, removed) = crate::drivers::usb::poll_hotplug();
                 if added > 0 || removed > 0 {
                     // Сообщение печатается до строки ввода, чтобы не
                     // испортить набираемый текст.

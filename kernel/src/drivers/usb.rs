@@ -13,6 +13,76 @@ pub mod hid;
 pub mod storage;
 pub mod uhci;
 pub mod xhci;
+pub mod ehci;
+
+/// Контроллер, через который идёт bulk-обмен накопителя.
+///
+/// BOT/SCSI (`storage.rs`) один на оба контроллера; различается только
+/// транспорт, поэтому хост передаётся в каждую операцию.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsbHost {
+    Xhci,
+    Ehci,
+}
+
+/// Все mass storage устройства обоих контроллеров.
+pub fn storage_devices() -> Vec<super::usb::xhci::StorageInfo> {
+    let mut devices = xhci::storage_devices();
+    devices.extend(ehci::storage_devices());
+    devices
+}
+
+/// Bulk transfer через контроллер, которому принадлежит устройство.
+///
+/// `toggle` — начальный data toggle (0 = DATA0, 1 = DATA1). Нужен EHCI:
+/// BOT требует DATA0 для CBW, DATA1 для data-стадии и CSW. xHCI ведёт
+/// toggle сам и параметр игнорирует.
+pub fn bulk(
+    host: UsbHost,
+    controller: usize,
+    slot: u8,
+    dir_in: bool,
+    data: &mut [u8],
+    toggle: u32,
+) -> Result<usize, super::usb::xhci::UsbError> {
+    match host {
+        UsbHost::Xhci => xhci::bulk(controller, slot, dir_in, data),
+        UsbHost::Ehci => ehci::bulk(controller, slot, dir_in, data, toggle),
+    }
+}
+
+/// Восстановить BOT-сессию после STALL: Bulk-Only Reset + ClearFeature(HALT).
+pub fn resolve_stall(
+    host: UsbHost,
+    controller: usize,
+    slot: u8,
+) -> Result<(), super::usb::xhci::UsbError> {
+    match host {
+        UsbHost::Xhci => xhci::resolve_stall(controller, slot),
+        UsbHost::Ehci => ehci::resolve_stall(controller, slot),
+    }
+}
+
+/// Опрос hotplug обоих контроллеров. Возвращает `(подключено, отключено)`.
+pub fn poll_hotplug() -> (usize, usize) {
+    let (added_x, removed_x) = xhci::poll_hotplug();
+    let (added_e, removed_e) = ehci::poll_hotplug();
+    let (added, removed) = (added_x + added_e, removed_x + removed_e);
+    if added > 0 || removed > 0 {
+        // Список накопителей изменился: пересобираем записи в block layer,
+        // иначе `disks` показывал бы отключённый диск, а новый — нет.
+        if let Some(mut mgr) = crate::fs::get_disk_manager().try_lock() {
+            let (gone, back) = crate::fs::blockdev::refresh_usb(&mut mgr);
+            if gone > 0 || back > 0 {
+                crate::println!(
+                    "[USB] hotplug: block devices refreshed (-{}, +{})",
+                    gone, back
+                );
+            }
+        }
+    }
+    (added, removed)
+}
 
 /// Информация об обнаруженном USB контроллере
 #[derive(Debug, Clone)]
@@ -121,7 +191,7 @@ pub fn get_devices() -> Vec<UsbDevice> {
 ///   0x00 — UHCI (USB 1.1, Intel/VIA): low/full-speed устройства, включая
 ///          клавиатуры на USB2-портах чипсетов Intel и AMD SB;
 ///   0x10 — OHCI (USB 1.1, NEC/AMD/VIA) — не поддерживается;
-///   0x20 — EHCI (USB 2.0) — не поддерживается (см. docs/usb_and_boot.md);
+///   0x20 — EHCI (USB 2.0) — async schedule, bulk-only transport;
 ///   0x30 — xHCI (USB 3.x) — основной драйвер.
 ///
 /// Раньше тип не проверялся: EHCI-контроллеры отдавались в xHCI-код и
@@ -139,6 +209,7 @@ pub fn init() {
 
     let mut found: Vec<UsbController> = Vec::new();
     let mut uhci_count = 0usize;
+    let mut ehci_count = 0usize;
 
     for pci_dev in &devices {
         let kind = match pci_dev.prog_if {
@@ -211,6 +282,34 @@ pub fn init() {
                     uhci_count += 1;
                 }
             }
+            0x20 => {
+                // EHCI: memory BAR0, MMIO. Инициализируем контроллер здесь,
+                // а перечисление откладываем до Step 8.5 — как у xHCI:
+                // на реальном железе оно занимает секунды, а таймауты
+                // transfers считаются по монотонному времени.
+                if pci_dev.is_io_bar(0) {
+                    println!("[USB] EHCI with I/O BAR0, skipping");
+                    continue;
+                }
+                let bar0_phys = pci_dev.bar0_phys();
+                if bar0_phys == 0 {
+                    println!(
+                        "[USB] [{:02X}:{:02X}.{}] EHCI BAR0 is zero, skipping",
+                        pci_dev.bus, pci_dev.dev, pci_dev.func
+                    );
+                    continue;
+                }
+                let hhdm = crate::memory::paging::HHDM_OFFSET.load(Ordering::Relaxed);
+                let mmio_virt = hhdm + bar0_phys;
+                println!(
+                    "[USB] [{:02X}:{:02X}.{}] {:04X}:{:04X} EHCI (MMIO {:#x})",
+                    pci_dev.bus, pci_dev.dev, pci_dev.func,
+                    pci_dev.vendor_id, pci_dev.device_id, bar0_phys
+                );
+                if crate::drivers::usb::ehci::init_controller(bar0_phys, mmio_virt) {
+                    ehci_count += 1;
+                }
+            }
             other => {
                 println!(
                     "[USB] [{:02X}:{:02X}.{}] {:04X}:{:04X} {} (prog_if {:#04x}) is not supported yet",
@@ -221,12 +320,13 @@ pub fn init() {
         }
     }
 
-    let initialized = found.len() + uhci_count;
+    let initialized = found.len() + uhci_count + ehci_count;
     USB_CONTROLLERS.lock().extend(found);
     println!(
-        "[USB] {} controller(s) initialized ({} xHCI, {} UHCI)",
+        "[USB] {} controller(s) initialized ({} xHCI, {} EHCI, {} UHCI)",
         initialized,
         USB_CONTROLLERS.lock().len(),
+        ehci_count,
         uhci_count
     );
 

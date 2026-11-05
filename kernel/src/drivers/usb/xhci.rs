@@ -142,6 +142,7 @@ pub struct UsbDeviceInfo {
 /// Параметры mass storage устройства, которое можно использовать как диск.
 #[derive(Clone, Copy)]
 pub struct StorageInfo {
+    pub host: crate::drivers::usb::UsbHost,
     pub controller: usize,
     pub slot: u8,
     pub port: u8,
@@ -626,11 +627,11 @@ unsafe fn slot_control(
 
 /// Информация об endpoint из configuration descriptor.
 #[derive(Clone, Copy)]
-struct EndpointInfo {
-    address: u8,
-    max_packet: u16,
-    interval: u8,
-    attributes: u8,
+pub(crate) struct EndpointInfo {
+    pub(crate) address: u8,
+    pub(crate) max_packet: u16,
+    pub(crate) interval: u8,
+    pub(crate) attributes: u8,
     /// `bMaxBurst` из SuperSpeed Endpoint Companion (0 для USB 2.0).
     ///
     /// Без него контроллер считает, что за один transfer уходит один пакет,
@@ -652,20 +653,20 @@ impl EndpointInfo {
 
 /// Разобранный интерфейс конфигурации.
 #[derive(Clone, Copy)]
-struct InterfaceInfo {
-    number: u8,
-    class: u8,
-    subclass: u8,
-    protocol: u8,
-    in_ep: Option<EndpointInfo>,
-    out_ep: Option<EndpointInfo>,
+pub(crate) struct InterfaceInfo {
+    pub(crate) number: u8,
+    pub(crate) class: u8,
+    pub(crate) subclass: u8,
+    pub(crate) protocol: u8,
+    pub(crate) in_ep: Option<EndpointInfo>,
+    pub(crate) out_ep: Option<EndpointInfo>,
 }
 
 /// Разбирает configuration descriptor на интерфейсы с их endpoints.
 ///
-/// Раньше здесь был поиск «первого HID-интерфейса»: для mass storage и для
-/// составных устройств (хаб + клавиатура) этого недостаточно.
-fn parse_interfaces(config: &[u8], out: &mut Vec<InterfaceInfo>) {
+/// Общий для xHCI, UHCI и EHCI: раскладка дескрипторов одинаковая, а
+/// дублировать разбор в каждом контроллере — гарантированные расхождения.
+pub(crate) fn parse_interfaces(config: &[u8], out: &mut Vec<InterfaceInfo>) {
     let mut current: Option<InterfaceInfo> = None;
     let mut offset = 0usize;
     // Направление последнего разобранного endpoint: SuperSpeed companion
@@ -754,7 +755,7 @@ fn find_keyboard_interface(interfaces: &[InterfaceInfo]) -> Option<InterfaceInfo
 }
 
 /// USB Mass Storage, Bulk-Only Transport: class 8, subclass 6, protocol 0x50.
-fn find_storage_interface(interfaces: &[InterfaceInfo]) -> Option<InterfaceInfo> {
+pub(crate) fn find_storage_interface(interfaces: &[InterfaceInfo]) -> Option<InterfaceInfo> {
     interfaces.iter().copied().find(|i| {
         i.class == 8
             && i.subclass == 6
@@ -1410,20 +1411,6 @@ pub fn poll_hotplug() -> (usize, usize) {
         (added, removed)
     };
 
-    if added > 0 || removed > 0 {
-        // Список USB-накопителей мог измениться: пересобираем записи в block
-        // layer, иначе `disks` показывал бы отключённый диск, а новый — нет.
-        if let Some(mut mgr) = crate::fs::get_disk_manager().try_lock() {
-            let (gone, back) = crate::fs::blockdev::refresh_usb(&mut mgr);
-            if gone > 0 || back > 0 {
-                crate::println!(
-                    "[xHCI] hotplug: block devices refreshed (-{}, +{})",
-                    gone, back
-                );
-            }
-        }
-    }
-
     (added, removed)
 }
 
@@ -1516,6 +1503,7 @@ pub fn storage_devices() -> Vec<StorageInfo> {
     for (index, ctrl) in XHCI.lock().iter().enumerate() {
         for dev in &ctrl.storage {
             result.push(StorageInfo {
+                host: crate::drivers::usb::UsbHost::Xhci,
                 controller: index,
                 slot: dev.slot,
                 port: dev.port,

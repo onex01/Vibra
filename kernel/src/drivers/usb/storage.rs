@@ -11,7 +11,8 @@
 // Драйвер не знает о VFS: `UsbDisk` реализует `DiskIo`, а регистрацией в
 // `DiskManager` занимается `fs::blockdev`.
 
-use super::xhci::{self, StorageInfo, UsbError};
+use super::xhci::{StorageInfo, UsbError};
+use super::UsbHost;
 use crate::fs::disk::DiskIo;
 use crate::fs::vfs::FsError;
 use crate::println;
@@ -30,6 +31,7 @@ const MAX_SECTORS_PER_CMD: usize = 64;
 /// Паспорт найденного накопителя.
 #[derive(Clone)]
 pub struct DiskInfo {
+    pub host: UsbHost,
     pub controller: usize,
     pub slot: u8,
     pub vendor: String,
@@ -58,6 +60,7 @@ impl DiskInfo {
 
 /// USB-накопитель, доступный через `DiskIo`.
 pub struct UsbDisk {
+    host: UsbHost,
     controller: usize,
     slot: u8,
     sectors_per_cmd: usize,
@@ -68,6 +71,7 @@ impl UsbDisk {
     /// Открывает накопитель и проверяет его SCSI-командами.
     pub fn new(info: &StorageInfo) -> Result<(Self, DiskInfo), FsError> {
         let mut disk = UsbDisk {
+            host: info.host,
             controller: info.controller,
             slot: info.slot,
             sectors_per_cmd: (info.max_transfer / SECTOR_SIZE).clamp(1, MAX_SECTORS_PER_CMD),
@@ -101,6 +105,7 @@ impl UsbDisk {
 
         let sectors = last_lba as u64 + 1;
         let info = DiskInfo {
+            host: info.host,
             controller: info.controller,
             slot: info.slot,
             vendor,
@@ -128,7 +133,7 @@ impl UsbDisk {
             Ok(()) => Ok(()),
             Err(first) => {
                 // Recovery: Bulk-Only Reset + очистка halt'ов, затем повтор.
-                let _ = xhci::resolve_stall(self.controller, self.slot);
+                let _ = super::resolve_stall(self.host, self.controller, self.slot);
                 match self.bot(cdb, data, dir_in) {
                     Ok(()) => Ok(()),
                     Err(_) => Err(first),
@@ -152,15 +157,16 @@ impl UsbDisk {
         cbw[15..15 + cdb.len()].copy_from_slice(cdb);
 
         // 1. Command stage
-        let sent = xhci::bulk(self.controller, self.slot, false, &mut cbw)?;
+        let sent = super::bulk(self.host, self.controller, self.slot, false, &mut cbw, 0)?;
         if sent != cbw.len() {
             return Err(FsError::IoError);
         }
 
-        // 2. Data stage
+        // 2. Data stage: BOT требует DATA1 на первом пакете.
         if let Some(buffer) = data {
             if !buffer.is_empty() {
-                let done = xhci::bulk(self.controller, self.slot, dir_in, buffer)?;
+                let done =
+                    super::bulk(self.host, self.controller, self.slot, dir_in, buffer, 1)?;
                 // Размер известен заранее, поэтому короткий transfer — ошибка.
                 if done != buffer.len() {
                     return Err(FsError::IoError);
@@ -168,9 +174,9 @@ impl UsbDisk {
             }
         }
 
-        // 3. Status stage
+        // 3. Status stage: CSW всегда DATA1.
         let mut csw = [0u8; 13];
-        let done = xhci::bulk(self.controller, self.slot, true, &mut csw)?;
+        let done = super::bulk(self.host, self.controller, self.slot, true, &mut csw, 1)?;
         if done != csw.len() {
             return Err(FsError::IoError);
         }
@@ -276,20 +282,20 @@ static DISKS: Mutex<Vec<DiskInfo>> = Mutex::new(Vec::new());
 /// в block layer открывала накопитель по уже несуществующему слоту — чтение
 /// падало, ФС определялась как `unknown`.
 pub fn refresh() -> usize {
-    let devices = xhci::storage_devices();
+    let devices = super::storage_devices();
     {
         let mut disks = DISKS.lock();
         disks.retain(|d| {
             devices
                 .iter()
-                .any(|info| info.controller == d.controller && info.slot == d.slot)
+                .any(|info| info.host == d.host && info.controller == d.controller && info.slot == d.slot)
         });
     }
     probe()
 }
 
 pub fn probe() -> usize {
-    let devices = xhci::storage_devices();
+    let devices = super::storage_devices();
     if devices.is_empty() {
         return 0;
     }
@@ -298,14 +304,15 @@ pub fn probe() -> usize {
     for info in devices {
         if disks
             .iter()
-            .any(|d| d.controller == info.controller && d.slot == info.slot)
+            .any(|d| d.host == info.host && d.controller == info.controller && d.slot == info.slot)
         {
             continue;
         }
         match UsbDisk::new(&info) {
             Ok((_, disk_info)) => {
                 println!(
-                    "[USB-STORAGE] ctrl{} slot{}: {} {} ({} sectors, {} MiB)",
+                    "[USB-STORAGE] {:?} ctrl{} slot{}: {} {} ({} sectors, {} MiB)",
+                    info.host,
                     info.controller,
                     info.slot,
                     disk_info.model(),
@@ -316,8 +323,8 @@ pub fn probe() -> usize {
                 disks.push(disk_info);
             }
             Err(error) => println!(
-                "[USB-STORAGE] ctrl{} slot{}: probe failed ({:?})",
-                info.controller, info.slot, error
+                "[USB-STORAGE] {:?} ctrl{} slot{}: probe failed ({:?})",
+                info.host, info.controller, info.slot, error
             ),
         }
     }
@@ -333,6 +340,7 @@ pub fn disks() -> Vec<DiskInfo> {
 pub fn open(index: usize) -> Option<Box<dyn DiskIo>> {
     let info = DISKS.lock().get(index)?.clone();
     Some(Box::new(UsbDisk {
+        host: info.host,
         controller: info.controller,
         slot: info.slot,
         sectors_per_cmd: info.sectors_per_cmd,
