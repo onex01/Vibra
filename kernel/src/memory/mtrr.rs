@@ -30,6 +30,8 @@ const MTRR_TYPE_WB: u8 = 6;
 
 const MASK_VALID: u64 = 1 << 11;
 const DEF_TYPE_ENABLE: u64 = 1 << 11;
+/// MTRR заморожены прошивкой: запись в любой MTRR MSR даёт #GP.
+const DEF_TYPE_LOCK: u64 = 1 << 10;
 
 /// Сколько диапазонов удалось перевести в WC (для `diag fb`).
 static WC_RANGES: AtomicUsize = AtomicUsize::new(0);
@@ -67,6 +69,15 @@ pub fn variable_count() -> usize {
     // прочитался как 0xFF (сбой/эмуляция), обход уйдёт на несуществующие
     // MSR и получит #GP — ограничиваем.
     raw.min(16)
+}
+
+/// Заблокированы ли MTRR прошивкой.
+///
+/// Если да, **любая** запись в MSR MTRR вызывает #GP — это не ошибка кода,
+/// а решение firmware (типично для ноутбуков). Проверять обязательно:
+/// без этого `diag mtrr wc` роняет ядро в General Protection.
+pub fn is_locked() -> bool {
+    unsafe { rdmsr(IA32_MTRR_DEF_TYPE) & DEF_TYPE_LOCK != 0 }
 }
 
 /// Поддерживает ли CPU тип WC (MTRRCAP bit 10).
@@ -160,6 +171,10 @@ pub fn set_write_combining(physical: u64, length: u64) -> bool {
     if !supports_wc() {
         return false;
     }
+    // Прошивка могла заморозить MTRR: тогда wrmsr даёт #GP и ядро падает.
+    if is_locked() {
+        return false;
+    }
     let Some((base, size)) = align_range(physical, length) else {
         return false;
     };
@@ -202,6 +217,8 @@ pub fn set_write_combining(physical: u64, length: u64) -> bool {
                 return false;
             }
         };
+
+        crate::serial::debugcon_println(format_args!("[MTRR] slot={}", slot));
 
         // MTRR должны быть включены, иначе запись в них бессмысленна.
         let def = rdmsr(IA32_MTRR_DEF_TYPE);

@@ -3,7 +3,7 @@
 <p align="center"><b>Экспериментальное x86_64-ядро на Rust</b></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0--rc.19--Foundation-blue?style=flat-square" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-0.2.0--rc.20--Foundation-blue?style=flat-square" alt="Version"/>
   <img src="https://img.shields.io/badge/target-x86__64-orange?style=flat-square" alt="Target"/>
   <img src="https://img.shields.io/badge/Rust-no__std-red?style=flat-square" alt="Rust"/>
   <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License"/>
@@ -13,7 +13,7 @@
 
 Vibra — **не операционная система и не готовый дистрибутив**. Это раннее
 монолитное ядро для x86_64, разрабатываемое для освоения bare-metal Rust и
-достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.19`
+достижения устойчивой работы на реальном оборудовании. Версия `0.2.0-rc.20`
 обозначает prerelease этапа Foundation; API, структура репозитория и форматы образов могут
 меняться без обратной совместимости.
 
@@ -171,8 +171,8 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 драйверы не поддерживают запись. Boot-лог пишется на FAT32-раздел `VIBRALOG`.
 
 Имена образов содержат дату и версию, например
-`vibra_2026-10-31_0.2.0-rc.19.iso` и
-`vibra-debug_2026-10-31_0.2.0-rc.19.iso`; для совместимости создаются
+`vibra_2026-10-31_0.2.0-rc.20.iso` и
+`vibra-debug_2026-10-31_0.2.0-rc.20.iso`; для совместимости создаются
 симлинки `build/vibra.iso` и `build/vibra-debug.iso`.
 
 ## CI

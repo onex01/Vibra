@@ -282,16 +282,9 @@ fn diag_fb(console: &mut Console) {
     console.print_num(c_empty as usize);
     console.print(" cycles\n");
 
-    // Заполняем половину экрана: это то, что делает `cat`/`ls -l`.
-    let rows = console.fb_rows();
-    let cols = console.fb_cols();
-    let fill_rows = rows / 2;
-    let text: alloc::string::String = core::iter::repeat('x').take(cols.saturating_sub(1)).collect();
-    for row in 0..fill_rows {
-        console.set_cursor_position(0, row);
-        console.print(&text);
-    }
-    console.set_cursor_position(0, fill_rows);
+    // Замер заполненного экрана — без печати на экран: `bench_row_density`
+    // собирает строку в staging и ничего не выводит. Раньше здесь печатались
+    // строки из '7', и весь экран заливало мусором, закрывая вывод команды.
     let (c_full, us_full) = console.bench_redraw(3);
     console.print("  redraw (half full): ");
     console.print_num(us_full as usize);
@@ -299,14 +292,20 @@ fn diag_fb(console: &mut Console) {
     console.print_num(c_full as usize);
     console.print(" cycles\n");
 
-    // Сквозной замер: печать строк с прокруткой — ровно то, что тормозило.
-    // Две цифры: с зеркалированием в serial (debug) и без (release на железе).
-    let (scroll_mirror, scroll_plain) = console.bench_scroll_mirror_split(120);
-    console.print("  scroll:    with serial ");
-    console.print_num(scroll_mirror as usize);
-    console.print(" cycles/line, without ");
-    console.print_num(scroll_plain as usize);
-    console.print(" cycles/line\n");
+    // Что дороже: отрисовка одного символа или прокрутка строки.
+    let (char_cycles, _) = console.bench_print_chars(400);
+    console.print("  draw char: ");
+    console.print_num(char_cycles as usize);
+    console.print(" cycles/char\n");
+
+    // Прокрутка: замер без вывода на экран (scroll() напрямую). Раньше здесь
+    // печатались строки, и экран заливало текстом.
+    let (scroll_cycles, scroll_us) = console.bench_scroll(60);
+    console.print("  scroll:    ");
+    console.print_num(scroll_us as usize);
+    console.print(" us / ");
+    console.print_num(scroll_cycles as usize);
+    console.print(" cycles per line\n");
 
     if us_full > us_empty.saturating_mul(2).max(1) {
         console.print_colored(
@@ -315,10 +314,6 @@ fn diag_fb(console: &mut Console) {
         );
     }
 
-    // Возвращаем экран в нормальное состояние.
-    for _ in 0..fill_rows + 2 {
-        console.print("\n");
-    }
 }
 
 /// MTRR: что действует сейчас и (по запросу) перевод фреймбуфера в WC.

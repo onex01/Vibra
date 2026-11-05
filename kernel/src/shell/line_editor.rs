@@ -22,6 +22,15 @@ pub struct LineEditor {
     // нельзя опираться на новый len/cursor после загрузки истории.
     screen_len: usize,
     screen_cursor: usize,
+    /// Позиция начала ввода (сразу после приглашения) и её длина.
+    ///
+    /// Раньше перерисовка стирала текст последовательностью `\x08`, а он не
+    /// переходит на предыдущую строку при переносе: длинная команда
+    /// оставляла в приглашении обрывки предыдущего текста. Теперь позиция
+    /// известна явно, и стирание идёт по координатам.
+    input_col: usize,
+    input_row: usize,
+    prompt_len_cells: usize,
     tab_index: i32,
     tab_match_count: usize,
 }
@@ -41,6 +50,9 @@ impl LineEditor {
             prompt_color: crate::framebuffer::COLOR_VIBRA_PROMPT,
             screen_len: 0,
             screen_cursor: 0,
+            input_col: 0,
+            input_row: 0,
+            prompt_len_cells: 0,
             tab_index: -1,
             tab_match_count: 0,
         }
@@ -53,6 +65,10 @@ impl LineEditor {
         self.prompt_len = prompt_len;
         self.screen_len = 0;
         self.screen_cursor = 0;
+        self.prompt_len_cells = prompt_len;
+        let (col, row) = console.cursor_position();
+        self.input_col = col;
+        self.input_row = row;
         let mut last_heartbeat_ms = crate::timer::uptime_ms();
         let mut last_log_flush_ms = last_heartbeat_ms;
         let mut last_hotplug_ms = last_heartbeat_ms;
@@ -88,6 +104,11 @@ impl LineEditor {
                     self.screen_cursor = 0;
                 }
             }
+
+            // В простое экран догоняет тень: во время массового вывода
+            // перерисовка откладывалась, иначе прокрутка стоила бы десятки
+            // миллисекунд на строку.
+            console.flush_if_due(false);
 
             let next_key = crate::serial::poll_key().or_else(keyboard::poll_key);
             if let Some(key) = next_key {
@@ -261,22 +282,19 @@ impl LineEditor {
     /// Иначе после загрузки истории новый `len` больше старого, и backspace
     /// уезжает в prompt — ровно та проблема, из-за которой пропадал `vibra:/>`.
     fn redraw_line(&mut self, console: &mut Console) {
-        for _ in 0..self.screen_cursor {
-            console.put_char('\x08');
-        }
-        for _ in 0..self.screen_len {
-            console.put_char(' ');
-        }
-        for _ in 0..self.screen_len {
-            console.put_char('\x08');
+        // Стираем всё, что было напечатано после приглашения (включая
+        // переносы строк), и возвращаемся в начало ввода.
+        console.clear_from(self.input_col, self.input_row);
+
+        if let Ok(text) = core::str::from_utf8(&self.buffer[..self.len]) {
+            console.print(text);
         }
 
-        if let Ok(s) = core::str::from_utf8(&self.buffer[..self.len]) {
-            console.print(s);
-        }
-        for _ in self.cursor..self.len {
-            console.put_char('\x08');
-        }
+        // Ставим курсор туда, где он должен быть по логике редактора.
+        let cells = self.prompt_len_cells + self.cursor;
+        let row = self.input_row + cells / console.fb_cols().max(1);
+        let col = cells % console.fb_cols().max(1);
+        console.set_cursor_position(col, row);
 
         self.screen_len = self.len;
         self.screen_cursor = self.cursor;

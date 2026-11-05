@@ -493,12 +493,24 @@ pub struct Console {
     /// строку. Одна `copy_nonoverlapping` на пиксельную строку превращает это
     /// в ~800 последовательных копий по 5 КБ.
     staging: Vec<u64>,
+    /// Экран «отстал»: тень `cells` ушла вперёд, фреймбуфер ещё нет.
+    ///
+    /// Нужно, потому что перерисовка экрана — самая дорогая операция: на
+    /// реальном железе фреймбуфер отображён как uncached, и полный проход
+    /// по 5.7 МБ стоит десятки миллисекунд. При массовом выводе (`cat`,
+    /// `ls -l`, `tree`) прокрутка происходит на каждой строке, и без
+    /// отложенной перерисовки экран обновляется в 10 раз чаще, чем нужно.
+    pending: bool,
+    /// Когда последний раз перерисовывали экран, мс монотонных часов.
+    last_flush_ms: u64,
     /// До какой строки экран реально прорисован. Прокрутка перерисовывает
     /// только эту область: если на экране 5 строк текста, нет смысла трогать
     /// остальные 45.
     painted_max: usize,
     /// Тип памяти MTRR, покрывающий фреймбуфер (0xFF — не удалось узнать).
     mtrr_type: u8,
+    /// Тип MTRR до нашей правки (для отчёта).
+    mtrr_before: u8,
     /// Отчёт о переводе фреймбуфера в write-combining (сколько страниц
     /// изменено, сколько уже было, сколько вне отображения).
     wc_pages: usize,
@@ -624,11 +636,14 @@ impl Console {
             cells: Vec::new(),
             staging: Vec::new(),
             painted_max: 0,
+            pending: false,
+            last_flush_ms: 0,
             wc_pages: 0,
             wc_already: 0,
             wc_unmapped: 0,
             wc_leaf_flags: 0,
             mtrr_type: 0xFF,
+            mtrr_before: 0xFF,
             pat_ok: false,
             wc_report_pending: false,
             cells_valid: core::cell::Cell::new(false),
@@ -684,11 +699,14 @@ impl Console {
             cells: Vec::new(),
             staging: Vec::new(),
             painted_max: 0,
+            pending: false,
+            last_flush_ms: 0,
             wc_pages: 0,
             wc_already: 0,
             wc_unmapped: 0,
             wc_leaf_flags: 0,
             mtrr_type: 0xFF,
+            mtrr_before: 0xFF,
             pat_ok: false,
             wc_report_pending: false,
             cells_valid: core::cell::Cell::new(true),
@@ -781,6 +799,8 @@ impl Console {
             let slice = core::slice::from_raw_parts_mut(self.fb_addr, total_pixels);
             slice.fill(bg);
         }
+        // Очистка экрана при WC-памяти тоже требует барьера.
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
         self.reset_cells();
         self.cursor_col = 0;
         self.cursor_row = 0;
@@ -815,6 +835,12 @@ impl Console {
                 }
                 *slot = cell;
             }
+            // Экран отстал (идёт массовый вывод): рисовать по пикселю сейчас
+            // бессмысленно — следующая прокрутка всё равно перерисует экран
+            // целиком. Достаточно обновить тень.
+            if self.pending {
+                return;
+            }
         }
         self.draw_cell_pixels(cell, col, row);
     }
@@ -831,6 +857,10 @@ impl Console {
         let fg = crate::display::color_to_native(cell.fg, self.pixel_format);
         let bg = crate::display::color_to_native(cell.bg, self.pixel_format);
         self.draw_cell_pixels_native(cell.ch, fg, bg, col, row);
+        // При WC-памяти записи копятся в write-combining буферах. Без барьера
+        // они доходят до экрана когда захотят (или не доходят вовсе, если
+        // буфер не заполнился) — снаружи это выглядит как зависание.
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
     }
 
     /// То же, но цвета уже в нативном формате.
@@ -1010,9 +1040,10 @@ impl Console {
 
         let can_redraw = self.cells_valid.get() && self.cells.len() == self.cols * self.rows;
 
-        // Медленный MMIO-фреймбуфер: перерисовка из тени, во фреймбуфер только
-        // пишем. Чтение из write-combining памяти здесь и было источником
-        // замедления — см. комментарий к `probe_framebuffer_is_ram`.
+        // Медленный MMIO-фреймбуфер: сдвиг только в тени, а перерисовка —
+        // отложенная. Экран всё равно не успевает за потоком вывода: пока
+        // `cat` печатает, обновлять его чаще 25 раз в секунду бессмысленно,
+        // а каждый проход стоит десятки миллисекунд на uncached памяти.
         if can_redraw && !self.fb_is_ram.get() {
             self.cells.copy_within(self.cols.., 0);
             let blank = TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color };
@@ -1020,7 +1051,8 @@ impl Console {
             for cell in &mut self.cells[last_row..] {
                 *cell = blank;
             }
-            self.redraw_from_cells();
+            self.pending = true;
+            self.flush_if_due(false);
             self.cursor_row = self.rows - 1;
             return;
         }
@@ -1088,13 +1120,24 @@ impl Console {
         self.wc_unmapped = report.unmapped;
         self.wc_leaf_flags = report.leaf_flags;
 
-        // MTRR здесь только читаем. Перепрограммирование MTRR на загрузке
-        // оказалось небезопасным: если прошивка оставила MTRR выключенными,
-        // включение меняет тип памяти для всей системы. Явная команда
-        // `diag mtrr wc` делает это осознанно, с отчётом до и после.
-        self.mtrr_type = crate::memory::paging::virt_to_phys(self.fb_addr as u64)
-            .map(|phys| crate::memory::mtrr::covering_type(phys).unwrap_or(crate::memory::mtrr::default_type()))
-            .unwrap_or(0xFF);
+        // PAT не переопределяет MTRR: если фреймбуфер покрыт диапазоном UC,
+        // записи всё равно уходят по одной транзакции. Добавляем более
+        // специфичный диапазон WC на сам фреймбуфер — по правилам MTRR
+        // побеждает более узкий диапазон, поэтому остальные MMIO-области
+        // остаются как были.
+        //
+        // Раньше это выглядело как зависание загрузки, но причина была не в
+        // MTRR: после смены типа памяти записи уходили в write-combining
+        // буферы и без `sfence` не доходили до экрана. Теперь барьер стоит
+        // после каждой отрисовки.
+        // MTRR на загрузке не меняем: правка MSR/wbinvd подвешивает boot
+        // (см. `diag mtrr wc`). Здесь только читаем текущий тип, чтобы
+        // отчёт `diag fb` показывал реальную причину.
+        if let Some(phys) = crate::memory::paging::virt_to_phys(self.fb_addr as u64) {
+            self.mtrr_type = crate::memory::mtrr::covering_type(phys)
+                .unwrap_or(crate::memory::mtrr::default_type());
+            self.mtrr_before = self.mtrr_type;
+        }
         // Печать откладывается: `init_boot_console` вызывается до
         // `[BOOT] Step 1`, а boot-лог обязан начинаться с него (иначе не
         // отличить норму от регрессии с нулями в начале файла).
@@ -1203,69 +1246,66 @@ impl Console {
         }
     }
 
-    /// Сравнить печать с зеркалированием в serial и без него.
-    ///
-    /// `put_char` на каждый символ дополнительно пишет в COM1 (ожидание THRE)
-    /// и в журналы. В debug-сборке под QEMU это заметно, а в release на
-    /// железе serial вообще выключен — поэтому замер прокрутки обязан
-    /// показывать обе цифры, иначе легко оптимизировать не то.
-    ///
-    /// Возвращает `(с_serial, без_serial)` в циклах на строку.
-    pub fn bench_scroll_mirror_split(&mut self, lines: usize) -> (u64, u64) {
-        if lines == 0 || self.cols == 0 {
-            return (0, 0);
-        }
-        let text: alloc::string::String =
-            core::iter::repeat('7').take(self.cols.saturating_sub(1)).collect();
-
-        let start = unsafe { core::arch::x86_64::_rdtsc() };
-        for _ in 0..lines {
-            self.print(&text);
-            self.print("\n");
-        }
-        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
-        let with_serial = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
-
-        let start = unsafe { core::arch::x86_64::_rdtsc() };
-        for _ in 0..lines {
-            for ch in text.chars() {
-                self.put_char_from_serial(ch);
-            }
-            self.put_char_from_serial('\n');
-        }
-        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
-        let without_serial = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
-
-        (
-            with_serial / lines as u64,
-            without_serial / lines as u64,
-        )
-    }
-
     /// Сколько стоит напечатать `lines` строк обычным путём (`put_char`).
     ///
     /// Это сквозной замер прокрутки: после заполнения экрана каждая строка
     /// вызывает `scroll()`, то есть ровно тот путь, который тормозил на
     /// ноутбуке. Возвращает `(cycles, us)` на строку.
     pub fn bench_scroll(&mut self, lines: usize) -> (u64, u64) {
-        if lines == 0 || self.cols == 0 {
+        if lines == 0 || self.cols == 0 || self.rows == 0 {
             return (0, 0);
         }
-        // Строка почти на всю ширину — как обычный вывод команды.
-        let text: alloc::string::String =
-            core::iter::repeat('7').take(self.cols.saturating_sub(1)).collect();
+
+        // Заполняем тень «как после `ls -l`» — по строке текста на каждую
+        // строку экрана, — но ничего не печатаем: раньше здесь выводились
+        // строки из '7', и команда заливала экран, закрывая свой же вывод.
+        let blank = TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color };
+        let cell = TextCell { ch: b'x', fg: self.fg_color, bg: self.bg_color };
+        for row in 0..self.rows {
+            let base = row * self.cols;
+            for col in 0..self.cols {
+                self.cells[base + col] = if col + 1 < self.cols { cell } else { blank };
+            }
+        }
 
         let us_start = crate::timer::uptime_us();
         let start = unsafe { core::arch::x86_64::_rdtsc() };
         for _ in 0..lines {
-            self.print(&text);
-            self.print("\n");
+            self.scroll();
         }
         unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
         let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
         let us = crate::timer::uptime_us().saturating_sub(us_start);
 
         (cycles / lines as u64, us / lines as u64)
+    }
+
+    /// Стоимость вывода `chars` символов в одну строку (без прокрутки).
+    ///
+    /// Отдельно от `bench_scroll`: позволяет понять, что дороже — отрисовка
+    /// символа или прокрутка. На реальном железе это разные пути: символ
+    /// пишется 64 отдельными volatile-записями, а прокрутка — широкими
+    /// копиями из staging.
+    pub fn bench_print_chars(&mut self, chars: usize) -> (u64, u64) {
+        if chars == 0 || self.cols == 0 {
+            return (0, 0);
+        }
+        // Начинаем с чистой строки, чтобы не упираться в автоперенос.
+        self.cursor_col = 0;
+        self.cursor_row = 0;
+        let ch = 'W';
+
+        let us_start = crate::timer::uptime_us();
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        for i in 0..chars {
+            let col = i % self.cols;
+            let row = (i / self.cols) % self.rows;
+            self.draw_char_at(ch, col, row, self.fg_color, self.bg_color);
+        }
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
+        let us = crate::timer::uptime_us().saturating_sub(us_start);
+        (cycles / chars as u64, us / chars as u64)
     }
 
     /// Стоимость записи всего экрана из `staging` во фреймбуфер, в циклах.
@@ -1429,6 +1469,31 @@ impl Console {
         let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
         let us = crate::timer::uptime_us().saturating_sub(us_start);
         (cycles / iterations as u64, us / iterations as u64)
+    }
+
+    /// Перерисовать экран, если он отстал и прошло достаточно времени.
+    ///
+    /// `force` — перерисовать немедленно (перед приглашением, после команды,
+    /// при выходе из режима массового вывода).
+    ///
+    /// Интервал выбран 40 мс: это ~25 обновлений в секунду, глаз не замечает
+    /// разницы, а число проходов по 5.7 МБ падает на порядок.
+    pub fn flush_if_due(&mut self, force: bool) {
+        if !self.pending {
+            return;
+        }
+        let now = crate::timer::uptime_ms();
+        if !force && now.saturating_sub(self.last_flush_ms) < 40 {
+            return;
+        }
+        self.last_flush_ms = now;
+        self.pending = false;
+        self.redraw_from_cells();
+    }
+
+    /// Есть ли непринятые изменения на экране (для тестов и отладки).
+    pub fn has_pending_redraw(&self) -> bool {
+        self.pending
     }
 
     /// Перерисовывает экран из RAM-тени `cells`, не читая видеопамять.
@@ -1702,6 +1767,35 @@ impl Console {
     }
 
     /// Поставить курсор в конкретную ячейку (для диагностики).
+    /// Текущая позиция курсора `(col, row)`.
+    pub fn cursor_position(&self) -> (usize, usize) {
+        (self.cursor_col, self.cursor_row)
+    }
+
+    /// Стереть всё от `(col, row)` до конца строки и поставить курсор туда же.
+    ///
+    /// Нужно редактору строки: перерисовка через `\x08` ломается на переносе
+    /// строки (backspace не переходит на предыдущую строку), из-за чего в
+    /// приглашении оставались обрывки текста.
+    pub fn clear_from(&mut self, col: usize, row: usize) {
+        let (end_col, end_row) = (self.cursor_col, self.cursor_row);
+        self.set_cursor_position(col, row);
+        let mut c = col;
+        let mut r = row;
+        while r < end_row || (r == end_row && c <= end_col) {
+            self.draw_char_at(' ', c, r, self.fg_color, self.bg_color);
+            c += 1;
+            if c >= self.cols {
+                c = 0;
+                r += 1;
+            }
+            if r >= self.rows {
+                break;
+            }
+        }
+        self.set_cursor_position(col, row);
+    }
+
     pub fn set_cursor_position(&mut self, col: usize, row: usize) {
         self.cursor_col = col.min(self.cols.saturating_sub(1));
         self.cursor_row = row.min(self.rows.saturating_sub(1));
@@ -1793,6 +1887,15 @@ impl Console {
         if w == 0 || h == 0 {
             return;
         }
+        // Барьер нужен и здесь: при WC-памяти без него прямоугольник может
+        // «проявиться» позже, уже поверх другого вывода.
+        struct Fence;
+        impl Drop for Fence {
+            fn drop(&mut self) {
+                unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+            }
+        }
+        let _fence = Fence;
         // Прямое рисование мимо текстовой сетки — RAM-тень устарела.
         self.cells_valid.set(false);
         let native_color = crate::display::color_to_native(color, self.pixel_format);

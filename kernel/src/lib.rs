@@ -415,6 +415,15 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
         };
         let prompt_len = prompt_str.len();
 
+        // Приглашение печатается только на актуальном экране: иначе оно
+        // появится поверх недорисованного вывода команды.
+        console.flush_if_due(true);
+        // Команда могла закончить вывод без перевода строки (`cat` файла без
+        // \n в конце, `echo -n`, обрезанный вывод). Тогда приглашение
+        // печаталось поверх последней строки, и она «съедалась».
+        if console.cursor_position().0 != 0 {
+            console.put_char('\n');
+        }
         console.print_colored(prompt_str, framebuffer::COLOR_VIBRA_PROMPT);
 
         let mut line_buffer = [0u8; 256];
@@ -474,6 +483,10 @@ pub fn shell_loop(mut bc: BootConsole) -> ! {
             console.print(cmd_name);
             console.print_colored("'. Type 'help'.\n", framebuffer::COLOR_RED);
         }
+
+        // Команда закончилась: досрочно дорисовываем экран, чтобы результат
+        // был виден целиком, а не «до последнего обновления».
+        console.flush_if_due(true);
 
         // Журнал дописывается после каждой команды, но только порциями по
         // 16 КиБ: полная перезапись 256 КиБ на каждую команду заметно
