@@ -91,10 +91,11 @@ FAT12/FAT16 не поддерживаются — драйвер работае�
 | `diag heap-test`, `diag heap-check`, `diag heap-big [MiB]` | стресс, целостность free-list, рост кучи |
 | `diag timer` | источники времени, RTC, частота IRQ |
 | `diag keyboard` | состояние 8042, scan set, очереди PS/2 и USB HID |
-| `diag usb` | контроллеры xHCI/UHCI, устройства, storage |
+| `diag usb` | контроллеры xHCI/UHCI, корневые порты (CCS/PED/speed), устройства, storage |
 | `diag disk` | порты AHCI, IDE/NVMe, сигнатуры ФС, DMA-ошибки |
 | `diag apic` | LAPIC/IOAPIC и маршрутизация |
 | `diag display` | бэкенды, формат пикселя, геометрия |
+| `diag fb` | memory type фреймбуфера (PAT/WC), замеры сборки строки и прокрутки |
 | `diag hw` | SMBIOS, ACPI-таблицы, FADT |
 | `diag power` | путь выключения (PM1_CNT, `_S5`) |
 | `diag fault-test`, `diag panic-test` | проверка отчётов (останавливает VM) |

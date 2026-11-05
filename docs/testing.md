@@ -18,6 +18,7 @@
 | `make build-script-test` | `./build.sh`: таблица команд, меню, соответствие командам CI, существование make-целей | bash, make |
 | `make noserial-test` | загрузка без COM1 (`-serial none`) до shell по debugcon-маркерам | qemu |
 | `make serial-input-test` | ввод через COM1 (`-serial stdio`), а не через monitor | qemu |
+| `make usb3-test` | xHCI SuperSpeed: USB3-диск, монтирование, hotplug (device_del/device_add) | qemu |
 | `make iso-test` | ISO9660 с CD-ROM (ATAPI), Joliet/Rock Ridge, подкаталог | qemu, genisoimage |
 | `make big-fs-test` | NTFS 2 ТБ, GPT-раздел за 2 ТБ, MBR на 4Kn, exFAT по метке, FAT16-диагностика | qemu, ntfs-3g, mtools, python3 |
 | `make shell-test` | Tab, история, `help`, `diag timer`, отсутствие битого prompt | qemu, mtools |
@@ -44,6 +45,7 @@ make check
 ./build.sh nvme-test
 ./build.sh big-fs-test
 ./build.sh iso-test
+./build.sh usb3-test
 ./build.sh noserial-test
 ./build.sh build-script-test
 ./build.sh serial-input-test

@@ -269,6 +269,25 @@ static DISKS: Mutex<Vec<DiskInfo>> = Mutex::new(Vec::new());
 
 /// Опросить все mass storage устройства и зарегистрировать накопители.
 /// Возвращает число найденных дисков.
+/// Пересобрать список накопителей под текущее состояние контроллера.
+///
+/// `probe()` только добавляет новые устройства и никогда не убирает старые:
+/// после выдёргивания флешки её запись оставалась, и повторная регистрация
+/// в block layer открывала накопитель по уже несуществующему слоту — чтение
+/// падало, ФС определялась как `unknown`.
+pub fn refresh() -> usize {
+    let devices = xhci::storage_devices();
+    {
+        let mut disks = DISKS.lock();
+        disks.retain(|d| {
+            devices
+                .iter()
+                .any(|info| info.controller == d.controller && info.slot == d.slot)
+        });
+    }
+    probe()
+}
+
 pub fn probe() -> usize {
     let devices = xhci::storage_devices();
     if devices.is_empty() {

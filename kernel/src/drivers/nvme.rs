@@ -107,6 +107,25 @@ unsafe fn nvme_write64(offset: u64, val: u64) {
 /// `virt - hhdm` верна только для HHDM-памяти. Очереди и буферы здесь
 /// выделяются из heap (HHDM), но полагаться на это нельзя: при смене
 /// аллокатора или маппинга PRP указывал бы в чужую физическую память.
+/// Предел ожидания в циклах TSC: момент времени «сейчас + ms».
+///
+/// Счётчик итераций зависит от оптимизации: тот же цикл при opt-level 1
+/// проходит в разы быстрее, и фиксированные 5 000 000 итераций превращаются
+/// из ~150 мс в ~15 — команда падала по таймауту, хотя устройство просто не
+/// успело ответить. Поэтому ждём по времени, а не по числу итераций.
+fn wait_deadline_ms(ms: u64) -> u64 {
+    // До инициализации таймера частоту TSC узнать негде: берём нижнюю оценку
+    // 1 ГГц, тогда реальное ожидание будет только длиннее.
+    let hz = crate::timer::tsc_hz().unwrap_or(1_000_000_000);
+    let cycles = hz / 1000 * ms;
+    unsafe { core::arch::x86_64::_rdtsc() }.wrapping_add(cycles)
+}
+
+#[inline]
+fn wait_expired(deadline: u64) -> bool {
+    unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(deadline) < (1u64 << 63)
+}
+
 fn dma_phys(virt: u64) -> Option<u64> {
     crate::memory::paging::dma_address(virt)
 }
@@ -164,9 +183,9 @@ impl NvmeController {
         let tail_offset = 0x1000; // Admin SQ y_tail doorbell
         core::ptr::write_volatile((base + tail_offset) as *mut u32, self.admin_sq_tail as u32);
 
-        // Ждём completion
-        let mut timeout = 5_000_000u32;
-        while timeout > 0 {
+        // Ждём completion: по времени (см. `wait_deadline_ms`).
+        let deadline = wait_deadline_ms(2000);
+        loop {
             let comp = &*self.admin_cq.add(self.admin_cq_head as usize);
             if (comp.status >> 0) & 1 == self.admin_phase as u16 {
                 // Фаза совпала — команда завершена
@@ -182,7 +201,9 @@ impl NvmeController {
 
                 return Some(result);
             }
-            timeout -= 1;
+            if wait_expired(deadline) {
+                break;
+            }
         }
 
         println!("[NVMe] Admin command timed out (opcode={:#x})", cmd.opcode);
@@ -205,9 +226,9 @@ impl NvmeController {
         let tail_offset = 0x1000 + 8;
         core::ptr::write_volatile((base + tail_offset) as *mut u32, self.io_sq_tail as u32);
 
-        // Ждём completion
-        let mut timeout = 5_000_000u32;
-        while timeout > 0 {
+        // Ждём completion: по времени (см. `wait_deadline_ms`).
+        let deadline = wait_deadline_ms(2000);
+        loop {
             let comp = &*self.io_cq.add(self.io_cq_head as usize);
             if (comp.status >> 0) & 1 == self.io_phase as u16 {
                 let result = core::ptr::read(comp as *const _ as *const NvmeCompQueueEntry);
@@ -222,7 +243,9 @@ impl NvmeController {
 
                 return Some(result);
             }
-            timeout -= 1;
+            if wait_expired(deadline) {
+                break;
+            }
         }
 
         println!("[NVMe] I/O command timed out (opcode={:#x})", cmd.opcode);
@@ -525,13 +548,13 @@ pub fn init() {
         // Сброс контроллера — обнуляем CC
         nvme_write32(NVME_REG_CC, 0);
 
-        // Ждём пока CSTS.RDY станет 0
-        let mut timeout = 5_000_000u32;
-        while nvme_read32(NVME_REG_CSTS) & CSTS_RDY != 0 && timeout > 0 {
-            timeout -= 1;
-        }
-        if timeout == 0 {
-            println!("[NVMe] Warning: controller reset timed out (CSTS.RDY=1)");
+        // Ждём пока CSTS.RDY станет 0 — тоже по времени, а не по итерациям.
+        let deadline = wait_deadline_ms(2000);
+        while nvme_read32(NVME_REG_CSTS) & CSTS_RDY != 0 {
+            if wait_expired(deadline) {
+                println!("[NVMe] Warning: controller reset timed out (CSTS.RDY=1)");
+                break;
+            }
         }
 
         println!("[NVMe] Controller reset; starting initialization");
@@ -585,15 +608,14 @@ pub fn init() {
 
         println!("[NVMe] CC written: {:#x}; waiting for CSTS.RDY...", cc);
 
-        // Ждём пока CSTS.RDY станет 1
-        timeout = 5_000_000;
-        while nvme_read32(NVME_REG_CSTS) & CSTS_RDY == 0 && timeout > 0 {
-            timeout -= 1;
-        }
-        if timeout == 0 {
-            println!("[NVMe] ERROR: timed out waiting for CSTS.RDY");
-            println!("[NVMe]   CSTS = {:#x}", nvme_read32(NVME_REG_CSTS));
-            return;
+        // Ждём пока CSTS.RDY станет 1 (по времени, см. `wait_deadline_ms`).
+        let deadline = wait_deadline_ms(5000);
+        while nvme_read32(NVME_REG_CSTS) & CSTS_RDY == 0 {
+            if wait_expired(deadline) {
+                println!("[NVMe] ERROR: timed out waiting for CSTS.RDY");
+                println!("[NVMe]   CSTS = {:#x}", nvme_read32(NVME_REG_CSTS));
+                return;
+            }
         }
 
         println!("[NVMe] Controller ready (CSTS.RDY=1)");

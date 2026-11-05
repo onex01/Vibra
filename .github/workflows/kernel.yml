@@ -104,6 +104,9 @@ jobs:
       - name: Test large volumes (NTFS 2T, GPT above 2T, MBR 4Kn)
         run: ./build.sh big-fs-test
 
+      - name: Test USB3 (SuperSpeed) disk and hotplug
+        run: ./build.sh usb3-test
+
       - name: Test ISO9660 read-only (CD-ROM via ATAPI)
         run: ./build.sh iso-test
 

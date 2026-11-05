@@ -68,6 +68,7 @@ const PORTSC_PED: u32 = 1 << 1;
 const PORTSC_PR: u32 = 1 << 4;
 const PORTSC_PP: u32 = 1 << 9;
 const PORTSC_SPEED_SHIFT: u32 = 10;
+const PORTSC_CSC: u32 = 1 << 17;
 const PORTSC_PRC: u32 = 1 << 21;
 const PORTSC_WPR: u32 = 1 << 31;
 /// Write-1-to-clear bits (CSC..CEC).
@@ -76,16 +77,31 @@ const PORTSC_RW1C: u32 = 0x7F << 17;
 const SPEED_FULL: u32 = 1;
 const SPEED_LOW: u32 = 2;
 const SPEED_HIGH: u32 = 3;
+const SPEED_SUPER: u32 = 4;
+
+/// Начальный размер пакета EP0 по скорости.
+///
+/// USB 2.0: full/low — 8 байт, high — 64. USB 3.x (SuperSpeed): **всегда**
+/// 512, и `bMaxPacketSize0` в дескрипторе обязан быть 9 (2^9 = 512).
+/// Раньше здесь стояло 64, и на любом USB3-порту Address Device уходил с
+/// заниженным пакетом — устройства не перечислялись вообще.
+fn ep0_max_packet(speed: u32) -> u16 {
+    match speed {
+        SPEED_SUPER => 512,
+        SPEED_HIGH => 64,
+        _ => 8,
+    }
+}
 
 /// Максимум данных в одном bulk TRB (17-битное поле длины TRB).
 const MAX_BULK_CHUNK: usize = 32 * 1024;
 
-fn speed_name(speed: u32) -> &'static str {
+pub fn speed_name(speed: u32) -> &'static str {
     match speed {
         SPEED_FULL => "full",
         SPEED_LOW => "low",
         SPEED_HIGH => "high",
-        4 => "super",
+        SPEED_SUPER => "super",
         _ => "unknown",
     }
 }
@@ -132,6 +148,10 @@ pub struct StorageInfo {
     pub vendor: u16,
     pub product: u16,
     pub max_transfer: usize,
+    /// Скорость порта (`super` = USB3).
+    pub speed: u32,
+    /// `bMaxBurst` из SuperSpeed companion descriptor.
+    pub max_burst: u8,
 }
 
 #[inline]
@@ -278,6 +298,10 @@ struct BulkEndpoint {
 struct StorageDevice {
     slot: u8,
     port: u8,
+    /// Скорость порта: по ней видно, идёт ли устройство как USB3.
+    speed: u32,
+    /// `bMaxBurst` из SuperSpeed companion (0 на USB 2.0).
+    max_burst: u8,
     vendor: u16,
     product: u16,
     interface: u8,
@@ -320,6 +344,12 @@ struct Controller {
     devices: Vec<UsbDeviceInfo>,
     /// Сколько страниц scratchpad зарезервировано (нужно для Address Device).
     scratchpad_pages: usize,
+    /// Пришло событие PORT_STATUS_CHANGE: нужно сверить порты.
+    ///
+    /// Само событие CSC очищает (`port_clear_changes`), и раньше это значило,
+    /// что `poll_hotplug` никогда не видит изменений: `poll_keyboard`
+    /// вычитывает event ring гораздо чаще, чем опрашивается hotplug.
+    rescan: bool,
     /// Перечисление портов уже выполнено.
     enumerated: bool,
 }
@@ -376,10 +406,13 @@ impl Controller {
                     }
                     TRB_PORT_STATUS_CHANGE => {
                         // Во время boot порты могут рапортовать об изменениях.
-                        // Читаем и очищаем, чтобы событие не копилось.
+                        // Читаем и очищаем, чтобы событие не копилось, но
+                        // запоминаем, что порты надо пересмотреть: иначе
+                        // hotplug-опрос не увидит ничего.
                         let port = ((event.param >> 24) & 0xFF) as u8;
                         if port >= 1 && port <= self.max_ports {
                             self.port_clear_changes(port);
+                            self.rescan = true;
                         }
                     }
                     _ => {}
@@ -398,6 +431,7 @@ impl Controller {
                 let port = ((event.param >> 24) & 0xFF) as u8;
                 if port >= 1 && port <= self.max_ports {
                     self.port_clear_changes(port);
+                    self.rescan = true;
                 }
             }
             _ => {}
@@ -595,6 +629,12 @@ struct EndpointInfo {
     max_packet: u16,
     interval: u8,
     attributes: u8,
+    /// `bMaxBurst` из SuperSpeed Endpoint Companion (0 для USB 2.0).
+    ///
+    /// Без него контроллер считает, что за один transfer уходит один пакет,
+    /// и bulk на USB3 работает в разы медленнее нормы (а на части
+    /// контроллеров — не работает вовсе).
+    max_burst: u8,
 }
 
 impl EndpointInfo {
@@ -626,6 +666,9 @@ struct InterfaceInfo {
 fn parse_interfaces(config: &[u8], out: &mut Vec<InterfaceInfo>) {
     let mut current: Option<InterfaceInfo> = None;
     let mut offset = 0usize;
+    // Направление последнего разобранного endpoint: SuperSpeed companion
+    // (тип 0x30) относится именно к нему и идёт сразу за ним.
+    let mut last_endpoint_in: Option<bool> = None;
 
     while offset + 2 <= config.len() {
         let len = config[offset] as usize;
@@ -647,6 +690,17 @@ fn parse_interfaces(config: &[u8], out: &mut Vec<InterfaceInfo>) {
                     in_ep: None,
                     out_ep: None,
                 });
+                last_endpoint_in = None;
+            }
+            // SuperSpeed Endpoint Companion: bMaxBurst сразу после endpoint.
+            0x30 if len >= 6 => {
+                if let (Some(iface), Some(is_in)) = (current.as_mut(), last_endpoint_in) {
+                    let burst = config[offset + 2];
+                    let slot = if is_in { iface.in_ep.as_mut() } else { iface.out_ep.as_mut() };
+                    if let Some(ep) = slot {
+                        ep.max_burst = burst;
+                    }
+                }
             }
             5 if len >= 7 => {
                 if let Some(iface) = current.as_mut() {
@@ -656,6 +710,7 @@ fn parse_interfaces(config: &[u8], out: &mut Vec<InterfaceInfo>) {
                         max_packet: u16::from_le_bytes([config[offset + 4], config[offset + 5]])
                             & 0x07FF,
                         interval: config[offset + 6],
+                        max_burst: 0,
                     };
                     // bits 0-1: 0 = control, 1 = isochronous, 2 = bulk,
                     // 3 = interrupt.
@@ -664,9 +719,11 @@ fn parse_interfaces(config: &[u8], out: &mut Vec<InterfaceInfo>) {
                             if info.is_in() {
                                 if iface.in_ep.is_none() {
                                     iface.in_ep = Some(info);
+                                    last_endpoint_in = Some(true);
                                 }
                             } else if iface.out_ep.is_none() {
                                 iface.out_ep = Some(info);
+                                last_endpoint_in = Some(false);
                             }
                         }
                         _ => {}
@@ -736,6 +793,8 @@ struct EpConfig {
     max_packet: u16,
     interval: u8,
     ring_phys: u64,
+    /// `bMaxBurst` для SuperSpeed (0 для USB 2.0).
+    max_burst: u8,
 }
 
 /// Configure Endpoint для набора endpoint'ов (клавиатура, bulk storage).
@@ -772,7 +831,12 @@ unsafe fn configure_endpoints(
         wr32(ctx + 0x00, (ep.interval as u32) << 16);
         wr32(
             ctx + 0x04,
-            (3 << 1) | (ep.ep_type << 3) | ((ep.max_packet as u32) << 16),
+            (3 << 1)
+                | (ep.ep_type << 3)
+                // MaxBurstSize (биты 8-15): без него USB3-supervision
+                // отправляет один пакет за transfer вместо целой серии.
+                | ((ep.max_burst as u32) << 8)
+                | ((ep.max_packet as u32) << 16),
         );
         wr32(ctx + 0x08, (ep.ring_phys as u32) | 1);
         wr32(ctx + 0x0C, (ep.ring_phys >> 32) as u32);
@@ -898,9 +962,7 @@ unsafe fn enumerate_device(
     wr64(ctrl.dcbaa_virt + (slot as u64) * 8, dev_phys);
 
     let Some((in_phys, in_virt)) = alloc_dma(4096) else { return };
-    // Начальный EP0 max packet: 64 только для HS/Super, иначе 8 (USB 2.0:
-    // FS-устройства по умолчанию используют 8-байтовые пакеты).
-    let max_packet: u16 = if speed == SPEED_HIGH || speed == 4 { 64 } else { 8 };
+    let max_packet = ep0_max_packet(speed);
     fill_address_context(in_virt, speed, port, max_packet, ep0_phys);
 
     let Some(event) = ctrl.command(in_phys, TRB_ADDRESS_DEVICE, slot) else {
@@ -922,8 +984,19 @@ unsafe fn enumerate_device(
         println!("[xHCI] slot {}: GET_DESCRIPTOR(device, 8) failed", slot);
         return;
     }
-    let device_max_packet = short[7] as u16;
-    if device_max_packet != max_packet && (8..=64).contains(&device_max_packet) {
+    // bMaxPacketSize0 — это степень двойки: 8, 16, 32, 64 (USB 2.0) или
+    // 512 (USB 3.x). Раньше диапазон был 8..=64, поэтому 512 отбрасывался,
+    // и Evaluate Context никогда не применял правильный размер на USB3.
+    let device_max_packet = match short[7] {
+        // 2^9 = 512 — обязательное значение для SuperSpeed.
+        9 => 512u16,
+        // 8, 16, 32, 64 байт.
+        3..=6 => 1u16 << short[7],
+        // Недопустимое значение (в том числе 0 у некоторых эмуляторов):
+        // оставляем размер, вычисленный по скорости.
+        _ => max_packet,
+    };
+    if device_max_packet != max_packet {
         // Evaluate Context применяет новый размер в контроллере.
         if !evaluate_ep0(ctrl, slot, speed, port, device_max_packet, ep0_phys) {
             println!(
@@ -1069,6 +1142,7 @@ unsafe fn setup_keyboard(
         max_packet: endpoint.max_packet,
         interval: endpoint.interval,
         ring_phys: ring.phys,
+        max_burst: endpoint.max_burst,
     }];
     if !configure_endpoints(ctrl, slot, speed, port, &config) {
         println!("[xHCI] slot {}: Configure Endpoint (interrupt IN) failed", slot);
@@ -1127,6 +1201,7 @@ unsafe fn setup_storage(
             max_packet: in_ep.max_packet,
             interval: 0,
             ring_phys: in_ring.phys,
+            max_burst: in_ep.max_burst,
         },
         EpConfig {
             dci: out_ep.dci(),
@@ -1134,6 +1209,7 @@ unsafe fn setup_storage(
             max_packet: out_ep.max_packet,
             interval: 0,
             ring_phys: out_ring.phys,
+            max_burst: out_ep.max_burst,
         },
     ];
     if !configure_endpoints(ctrl, slot, speed, port, &configs) {
@@ -1141,10 +1217,14 @@ unsafe fn setup_storage(
         return false;
     }
 
-    let max_transfer = MAX_BULK_CHUNK.min((in_ep.max_packet as usize).max(512) * 16);
+    // За один transfer уходит целая серия пакетов: (burst+1) пакетов.
+    let burst_payload = (in_ep.max_packet as usize).max(64) * (in_ep.max_burst as usize + 1);
+    let max_transfer = MAX_BULK_CHUNK.min(burst_payload.max(512) * 16);
     ctrl.storage.push(StorageDevice {
         slot,
         port,
+        speed,
+        max_burst: in_ep.max_burst,
         vendor,
         product,
         interface: interface.number,
@@ -1242,6 +1322,154 @@ pub fn enumerate_now() {
     );
 }
 
+/// Убрать состояние порта: устройства, клавиатуры, накопители и слоты.
+///
+/// Клавиатуры и накопители адресуются слотом, поэтому сначала собираем
+/// слоты этого порта, иначе состояние останется висеть на несуществующем
+/// устройстве и чтение будет падать с `NoDevice`.
+unsafe fn remove_port_devices(ctrl: &mut Controller, port: u8) {
+    let slots: Vec<u8> = ctrl
+        .devices
+        .iter()
+        .filter(|d| d.port == port)
+        .map(|d| d.slot)
+        .collect();
+    ctrl.devices.retain(|d| d.port != port);
+    ctrl.storage.retain(|d| d.port != port);
+    ctrl.slots.retain(|s| s.port != port);
+    ctrl.keys.retain(|k| !slots.contains(&k.slot));
+}
+
+/// Обработать изменения на корневых портах (hotplug).
+///
+/// Возвращает `(подключено, отключено)`. Вызывается из shell, поэтому
+/// использует `try_lock`: если драйвер занят длинной передачей, опрос
+/// пропускается и повторится в следующий раз.
+pub fn poll_hotplug() -> (usize, usize) {
+    // Область видимости лока ограничена явно: `refresh_usb` ниже перечисляет
+    // накопители через `xhci::bulk`, а тот берёт `XHCI.lock()` — с уже
+    // захваченным локом это был бы дедлок.
+    let (added, removed) = {
+        let mut controllers = match XHCI.try_lock() {
+            Some(guard) => guard,
+            None => return (0, 0),
+        };
+
+        let mut added = 0usize;
+        let mut removed = 0usize;
+
+        for index in 0..controllers.len() {
+            let ctrl = &mut controllers[index];
+            // `rescan` выставляется обработчиком событий: он же и очищает CSC,
+            // поэтому одного чтения PORTSC недостаточно.
+            let rescan = ctrl.rescan;
+            ctrl.rescan = false;
+
+            for port in 1..=ctrl.max_ports {
+                let portsc = unsafe { rd32(ctrl.port_reg(port)) };
+                // CSC — write-1-to-clear, поэтому решение принимаем по
+                // прочитанному значению, а не после очистки.
+                if portsc & PORTSC_CSC == 0 && !rescan {
+                    continue;
+                }
+                unsafe { ctrl.port_clear_changes(port) };
+
+                let connected = portsc & PORTSC_CCS != 0;
+                let known = ctrl.devices.iter().any(|d| d.port == port);
+
+                if connected && !known {
+                    match unsafe { ctrl.reset_port(port) } {
+                        Some(speed) => {
+                            crate::println!(
+                                "[xHCI] hotplug: port {} connected (speed {} = {})",
+                                port,
+                                speed,
+                                speed_name(speed)
+                            );
+                            unsafe { enumerate_device(ctrl, index, port, speed) };
+                            added += 1;
+                        }
+                        None => {
+                            crate::println!("[xHCI] hotplug: port {} reset failed", port);
+                        }
+                    }
+                } else if !connected && known {
+                    unsafe { remove_port_devices(ctrl, port) };
+                    crate::println!("[xHCI] hotplug: port {} disconnected", port);
+                    removed += 1;
+                }
+            }
+        }
+
+        (added, removed)
+    };
+
+    if added > 0 || removed > 0 {
+        // Список USB-накопителей мог измениться: пересобираем записи в block
+        // layer, иначе `disks` показывал бы отключённый диск, а новый — нет.
+        if let Some(mut mgr) = crate::fs::get_disk_manager().try_lock() {
+            let (gone, back) = crate::fs::blockdev::refresh_usb(&mut mgr);
+            if gone > 0 || back > 0 {
+                crate::println!(
+                    "[xHCI] hotplug: block devices refreshed (-{}, +{})",
+                    gone, back
+                );
+            }
+        }
+    }
+
+    (added, removed)
+}
+
+/// Состояние корневого порта для диагностики.
+pub struct PortStatus {
+    pub controller: usize,
+    pub port: u8,
+    /// Сырое значение PORTSC.
+    pub portsc: u32,
+    pub speed: u32,
+    pub connected: bool,
+    pub enabled: bool,
+    pub powered: bool,
+    /// Что удалось перечислить на этом порту: `(vendor, product, kind)`.
+    pub device: Option<(u16, u16, &'static str)>,
+}
+
+/// Снимок корневых портов всех контроллеров.
+///
+/// Нужен для разбора «флешка не появилась» на реальной машине: видно, какие
+/// порты вообще видят подключение, какую скорость отдают и что было
+/// перечислено. Без этого остаётся только гадать по общему логу.
+pub fn ports() -> Vec<PortStatus> {
+    let controllers = match XHCI.try_lock() {
+        Some(guard) => guard,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for (index, ctrl) in controllers.iter().enumerate() {
+        for port in 1..=ctrl.max_ports {
+            let portsc = unsafe { rd32(ctrl.port_reg(port)) };
+            let speed = (portsc >> PORTSC_SPEED_SHIFT) & 0xF;
+            let device = ctrl
+                .devices
+                .iter()
+                .find(|d| d.port == port)
+                .map(|d| (d.vendor, d.product, d.kind));
+            out.push(PortStatus {
+                controller: index,
+                port,
+                portsc,
+                speed,
+                connected: portsc & PORTSC_CCS != 0,
+                enabled: portsc & PORTSC_PED != 0,
+                powered: portsc & PORTSC_PP != 0,
+                device,
+            });
+        }
+    }
+    out
+}
+
 /// Все найденные устройства (для `diag usb`).
 pub fn devices() -> Vec<UsbDeviceInfo> {
     XHCI
@@ -1263,6 +1491,8 @@ pub fn storage_devices() -> Vec<StorageInfo> {
                 vendor: dev.vendor,
                 product: dev.product,
                 max_transfer: dev.max_transfer,
+                speed: dev.speed,
+                max_burst: dev.max_burst,
             });
         }
     }
@@ -1629,6 +1859,7 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
             slots: Vec::new(),
             devices: Vec::new(),
             scratchpad_pages: scratchpad_count,
+            rescan: false,
             enumerated: false,
         };
 

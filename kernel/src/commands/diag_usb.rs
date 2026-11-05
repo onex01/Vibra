@@ -31,6 +31,35 @@ pub fn diag_usb(console: &mut Console) {
         crate::drivers::usb::xhci::keyboard_status()
     ));
 
+    console.print_colored("[root ports]\n", COLOR_YELLOW);
+    let ports = crate::drivers::usb::xhci::ports();
+    if ports.is_empty() {
+        console.print("  none\n");
+    }
+    for port in &ports {
+        // Компактно: только подключённые порты и всё, что уже перечислено.
+        if !port.connected && port.device.is_none() {
+            continue;
+        }
+        console.print(&format!(
+            "  ctrl{} port{:<2} {} {} {} speed {} ({})",
+            port.controller,
+            port.port,
+            if port.connected { "connected" } else { "empty" },
+            if port.enabled { "enabled" } else { "disabled" },
+            if port.powered { "powered" } else { "unpowered" },
+            port.speed,
+            crate::drivers::usb::xhci::speed_name(port.speed)
+        ));
+        match port.device {
+            Some((vendor, product, kind)) => console.print(&format!(
+                " -> {:04x}:{:04x} {}\n",
+                vendor, product, kind
+            )),
+            None => console.print(" -> not enumerated\n"),
+        }
+    }
+
     console.print_colored("[devices]\n", COLOR_YELLOW);
     let devices = crate::drivers::usb::xhci::devices();
     if devices.is_empty() {
@@ -38,7 +67,7 @@ pub fn diag_usb(console: &mut Console) {
     }
     for device in &devices {
         console.print(&format!(
-            "  ctrl{} slot{:<2} port{:<2} {:04x}:{:04x} class {:02x}/{:02x}/{:02x} speed {} -> {}\n",
+            "  ctrl{} slot{:<2} port{:<2} {:04x}:{:04x} class {:02x}/{:02x}/{:02x} speed {} ({}) -> {}\n",
             device.controller,
             device.slot,
             device.port,
@@ -48,6 +77,7 @@ pub fn diag_usb(console: &mut Console) {
             device.subclass,
             device.protocol,
             device.speed,
+            crate::drivers::usb::xhci::speed_name(device.speed),
             device.kind
         ));
     }
@@ -59,14 +89,26 @@ pub fn diag_usb(console: &mut Console) {
     }
     for disk in &disks {
         console.print(&format!(
-            "  ctrl{} slot{}: {} {} ({} MiB, {} sectors, {} sec/cmd)\n",
+            "  ctrl{} slot{}: {} {} ({} MiB, {} sectors, {} sec/cmd, {} speed, burst {})\n",
             disk.controller,
             disk.slot,
             disk.model(),
             disk.revision,
             disk.size_mb(),
             disk.sectors,
-            disk.sectors_per_cmd
+            disk.sectors_per_cmd,
+            crate::drivers::usb::xhci::speed_name(
+                crate::drivers::usb::xhci::storage_devices()
+                    .iter()
+                    .find(|d| d.slot == disk.slot)
+                    .map(|d| d.speed)
+                    .unwrap_or(0)
+            ),
+            crate::drivers::usb::xhci::storage_devices()
+                .iter()
+                .find(|d| d.slot == disk.slot)
+                .map(|d| d.max_burst)
+                .unwrap_or(0)
         ));
     }
 

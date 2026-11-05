@@ -268,6 +268,20 @@ fn probe_usb(mgr: &mut DiskManager, first_index: usize) -> usize {
     added
 }
 
+/// Пересобрать записи USB-накопителей после hotplug.
+///
+/// Удаляет прежние записи `usb` и регистрирует заново то, что драйвер видит
+/// сейчас. Возвращает `(удалено, добавлено)`.
+pub fn refresh_usb(mgr: &mut DiskManager) -> (usize, usize) {
+    // Сначала синхронизируем список накопителей драйвера: иначе открытие
+    // пойдёт по слоту, которого уже нет, и ФС определится как unknown.
+    crate::drivers::usb::storage::refresh();
+    let removed = mgr.remove_by_driver("usb");
+    let first = mgr.count();
+    let added = probe_usb(mgr, first);
+    (removed, added)
+}
+
 /// Регистрирует диск и его разделы. Возвращает число добавленных записей.
 /// Метка тома из BPB FAT (смещение 0x47, 11 байт, добита пробелами).
 ///

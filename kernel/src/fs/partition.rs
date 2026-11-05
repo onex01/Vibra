@@ -491,7 +491,12 @@ pub fn detect_fs_type(disk: &mut dyn DiskIo) -> &'static str {
     // внутри первого 4096-байтного блока, поэтому нельзя просто читать
     // "сектор 2" как 512-байтный.
     let mut s = [0u8; 2048];
-    if disk.read(0, &mut s).is_err() { return "unknown"; }
+    // Ошибку чтения печатаем: иначе «ФС unknown» на реальной машине не
+    // отличить от «сигнатуры нет» — и оба случая выглядят как молчание.
+    if let Err(error) = disk.read(0, &mut s) {
+        crate::println!("[FS] detect: reading sector 0 failed: {:?}", error);
+        return "unknown";
+    }
 
     // NTFS: OEM ID "NTFS    " по смещению 3.
     if &s[3..11] == b"NTFS    " { return "ntfs"; }

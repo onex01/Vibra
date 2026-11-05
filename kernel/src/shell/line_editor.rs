@@ -55,12 +55,38 @@ impl LineEditor {
         self.screen_cursor = 0;
         let mut last_heartbeat_ms = crate::timer::uptime_ms();
         let mut last_log_flush_ms = last_heartbeat_ms;
+        let mut last_hotplug_ms = last_heartbeat_ms;
 
         loop {
             let now_ms = crate::timer::uptime_ms();
             if now_ms.saturating_sub(last_log_flush_ms) >= 1000 {
                 last_log_flush_ms = now_ms;
                 crate::boot_log::checkpoint();
+            }
+            // Hotplug опрашивается из цикла ввода: только здесь ядро
+            // проводит время в ожидании, прерывание PORTSC само по себе
+            // устройство не перечисляет.
+            if now_ms.saturating_sub(last_hotplug_ms) >= 500 {
+                last_hotplug_ms = now_ms;
+                let (added, removed) = crate::drivers::usb::xhci::poll_hotplug();
+                if added > 0 || removed > 0 {
+                    // Сообщение печатается до строки ввода, чтобы не
+                    // испортить набираемый текст.
+                    console.put_char('\n');
+                    console.print_colored(
+                        "[USB] port change: ",
+                        crate::framebuffer::COLOR_YELLOW,
+                    );
+                    if added > 0 {
+                        console.print("connected, ");
+                    }
+                    if removed > 0 {
+                        console.print("disconnected, ");
+                    }
+                    console.print("run 'disks' to rescan\n");
+                    self.screen_len = 0;
+                    self.screen_cursor = 0;
+                }
             }
 
             let next_key = crate::serial::poll_key().or_else(keyboard::poll_key);

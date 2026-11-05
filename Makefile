@@ -100,7 +100,7 @@ ifeq ($(ENABLE_USB),1)
 QEMU_FLAGS += $(USB_FLAGS)
 endif
 
-.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test iso-test shell-test noserial-test serial-input-test check dist release-notes debug-variants iso-debug-noserial usb-debug-noserial build-script-test boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
+.PHONY: all build build-release run-release kernel smoke run clean setup install-kernel iso iso-release iso-smoke usb uefi-usb run-iso run-bios qemu-usb fs-test keyboard-test uhci-test clock-test ramfs-test ro-mount-test bad-fs-test nvme-test big-fs-test iso-test usb3-test shell-test noserial-test serial-input-test check dist release-notes debug-variants iso-debug-noserial usb-debug-noserial build-script-test boot-log-kernel boot-log-test usb-storage-test usb-debug iso-debug read-boot-log vktst-test debug-image-test iso-debug-test
 
 all: run
 
@@ -163,6 +163,10 @@ noserial-test: build
 # Ввод через COM1 (остальные shell-тесты подают клавиши через monitor).
 serial-input-test: build
 	@QEMU="$(QEMU)" bash scripts/qemu-serial-input-test.sh
+
+# xHCI на SuperSpeed: USB3-накопитель, монтирование и hotplug.
+usb3-test: build
+	@QEMU="$(QEMU)" bash scripts/qemu-usb3-test.sh
 
 # ISO9660 с CD-ROM через ATAPI: монтирование, имена Joliet/Rock Ridge.
 iso-test: build

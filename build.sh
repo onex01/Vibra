@@ -333,7 +333,8 @@ Other
  18) Debug image with three partitions      debug-image-test
  19) Debug ISO written to USB               iso-debug-test
  20) ISO boot matrix (UEFI + BIOS)          iso-smoke
- 21) Back
+ 21) USB3 (SuperSpeed) disk and hotplug     usb3-test
+ 22) Back
 MENU
         printf 'Choice: '
         read -r choice || return
@@ -358,10 +359,11 @@ MENU
             18) run_command debug-image-test ;;
             19) run_command iso-debug-test ;;
             20) run_command iso-smoke ;;
-            21) return ;;
+            21) run_command usb3-test ;;
+            22) return ;;
             *) echo "Unknown choice: $choice" ;;
         esac
-        [ "${choice:-}" = "21" ] || pause
+        [ "${choice:-}" = "22" ] || pause
     done
 }
 
@@ -409,7 +411,9 @@ menu_main() {
   6) Quit
 MENU
         printf 'Choice: '
-        read -r choice || return
+        # EOF (закрытый stdin) — это выход, а не ошибка: иначе запуск из
+        # скрипта или `</dev/null` завершался бы с кодом 1.
+        read -r choice || exit 0
         case "$choice" in
             1) menu_build ;;
             2) menu_run ;;
@@ -469,6 +473,7 @@ bad-fs-test|build|bad-fs-test|
 nvme-test|build|nvme-test|
 big-fs-test|build|big-fs-test|
 iso-test|build|iso-test|
+usb3-test|build|usb3-test|
 noserial-test|build|noserial-test|
 serial-input-test|build|serial-input-test|
 shell-test|build|shell-test|

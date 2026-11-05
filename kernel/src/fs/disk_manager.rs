@@ -96,6 +96,21 @@ impl DiskManager {
         self.disks.iter().position(|e| e.name == name)
     }
 
+    /// Удалить записи указанного драйвера. Возвращает число удалённых.
+    ///
+    /// Нужно для hotplug: при отключении USB-накопителя его записи должны
+    /// исчезнуть из `disks`, иначе команда показывает диск, чтение которого
+    /// сразу падает с `NoDevice`.
+    ///
+    /// Точки монтирования, которые уже держат `Arc` на устройство, не
+    /// трогаются: размонтировать их должен пользователь (`umount`).
+    pub fn remove_by_driver(&mut self, driver: &str) -> usize {
+        let before = self.disks.len();
+        self.disks.retain(|e| e.driver != driver);
+        before - self.disks.len()
+    }
+
+
     /// Найти устройство по метке тома (`LABEL=VIBRALOG`).
     pub fn find_by_label(&self, label: &str) -> Option<usize> {
         self.disks
