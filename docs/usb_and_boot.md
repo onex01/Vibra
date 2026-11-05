@@ -1,23 +1,22 @@
 # USB и загрузка
 
-> Инженерные заметки о текущем состоянии xHCI — в
+> Инженерные заметки о текущем состоянии USB — в
 > [usb_progress.md](usb_progress.md). Этот файл описывает образы и процедуры
 > проверки; при расхождении приоритет у `usb_progress.md` и кода.
 
 ## Реальный статус USB
 
-В `0.1.0` USB не был рабочим вводом или накопителем. Код xHCI умел находить
-PCI-контроллер и выводить диагностические регистры. Очереди и тестовые TRB не
-равны перечислению устройств; `hid_ok` был искусственной инъекцией для проверки
-очереди клавиатуры, а не HID-драйвером.
+xHCI и UHCI проходят полный lifecycle и работают как ввод (HID boot keyboard)
+и как накопители (BOT + SCSI) в QEMU. `make keyboard-test`, `make uhci-test`,
+`make usb3-test` и `make usb-storage-test` проверяют это автоматически.
+
+EHCI (USB 2.0) пока только детектируется и выводится в `diag usb`. Это важно
+для ноутбуков Haswell/Broadwell: USB2-половина разъёмов висит на EHCI, и без
+драйвера флешка не видна ни в одном порту (см.
+[verified-hardware.md](verified-hardware.md)). Драйвер — `rc.25` в
+[roadmap.md](roadmap.md).
 
 До теста на реальном оборудовании не включайте USB в обязательный boot path.
-План: корректный reset и BIOS handoff → DCBAA/command/event rings → port reset
-→ Address Device → descriptors/configuration → HID boot keyboard.
-
-В `0.2.0-rc.4` xHCI enumeration и HID boot keyboard уже работают в QEMU
-(`make keyboard-test` проверяет PS/2 и USB-ввод через monitor `sendkey`), но на
-физическом железе это по-прежнему не подтверждено.
 
 ## QEMU
 
@@ -75,13 +74,14 @@ UEFI-only теста x86_64 используйте `./build.sh uefi-usb`: он �
 |---|---|---|
 | 0x00 | UHCI (USB 1.1, Intel/VIA) | поддерживается: control, interrupt, bulk |
 | 0x10 | OHCI (USB 1.1, NEC/AMD/VIA) | не поддерживается |
-| 0x20 | EHCI (USB 2.0) | не поддерживается (только детект) |
-| 0x30 | xHCI (USB 3.x) | поддерживается |
+| 0x20 | EHCI (USB 2.0) | только детект; драйвер — `rc.25` |
+| 0x30 | xHCI (USB 3.x) | поддерживается: control, bulk, HID, storage, hotplug |
 
 Клавиатуры low-speed на чипсетах Intel и AMD SB подключены к UHCI-компаньону,
 поэтому без UHCI-драйвера они не работали вовсе. EHCI нужен для
-high-speed-устройств (флешек) на USB2-портах; пока такие устройства
-доступны только через USB3-порт (xHCI).
+high-speed-устройств (флешек) на USB2-портах. На большинстве машин с USB3
+флешка работает и через xHCI; на Haswell/Broadwell (например, ThinkPad T450)
+USB2-порты целиком принадлежат EHCI, и без него устройство не появляется.
 
 ## Логи на носителе
 

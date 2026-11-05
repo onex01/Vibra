@@ -28,7 +28,7 @@ pub enum Key {
     Insert,
     /// Delete (E0 53).
     Delete,
-    /// Home (E0 47) / Ctrl+A в编辑ре — начало строки.
+    /// Home (E0 47) — начало строки.
     Home,
     /// End (E0 4F).
     End,

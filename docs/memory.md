@@ -1,6 +1,6 @@
 # Подсистема памяти Vibra Kernel
 
-Документ описывает, как ядро Vibra Kernel 0.2.0-rc.4 «Foundation RC4»
+Документ описывает, как ядро Vibra Kernel 0.2.0-rc.24 «Foundation RC24»
 управляет памятью. Здесь разбираются PMM (физическая память), heap-аллокатор
 (куча для `Vec`/`String`/`Box`), paging-диагностика и VMM. Собственные таблицы
 страниц уже строятся на базе Limine memory map, после чего ядро переключает CR3.
@@ -33,7 +33,7 @@
    PMM (физические фреймы)
         │  alloc_contiguous(1024) ─► phys
         ▼
-   heap.rs:  virt = hhdm + phys  ──► FreeList на 4 МБ
+   heap.rs:  virt = hhdm + phys  ──► FreeList на 8 МБ (растёт до 64)
         │
         ▼
    #[global_allocator]  ──► Vec / String / Box
@@ -59,7 +59,7 @@ virt = hhdm_offset + phys
 
 Это удобство мы используем в двух местах:
 
-1. **Heap** берёт 4 МБ у PMM и работает с ними как с виртуальным массивом
+1. **Heap** берёт 8 МБ у PMM и работает с ними как с виртуальным массивом
    байт — потому что HHDM уже всё отобразил.
 2. **`pmm::alloc_frame_zeroed(hhdm)`** (задел под Шаг 4) выделяет фрейм и
    возвращает его HHDM-адрес, чтобы page-tables могли писать в таблицы
@@ -167,14 +167,17 @@ static PMM: Mutex<PmmInner> = Mutex::new(PmmInner::new());
 
 ```rust
 // heap::init(hhdm)
-let phys = pmm::alloc_contiguous(1024)?;   // 4 МБ физикой
+let phys = pmm::alloc_contiguous(2048)?;   // 8 МБ физикой
 let start = hhdm + phys;                    // виртуальный адрес
-FreeList::init(start, 4 * 1024 * 1024);     // работаем как с массивом байт
+FreeList::init(start, 8 * 1024 * 1024);     // работаем как с массивом байт
 ```
 
 Это убирает 1 МБ из `.bss` и делает кучу настоящей — с `free` и
-коалесценцией. Размер 4 МБ выбран с запасом под heap-стресс (10k итераций) и
-будущий рост; при нехватке 4 МБ аллокатор пробует 2 МБ, иначе паникует.
+коалесценцией. Стартовый размер — 8 МБ (2048 фреймов). Если их не хватает,
+аллокатор пробует половину и четверть, а при исчерпании кучи добирает у PMM
+ещё 4 МБ (1024 фрейма) и вставляет регион в free-list — до 64 МБ и не более
+16 регионов (`INITIAL_FRAMES`, `GROW_FRAMES`, `MAX_REGIONS`,
+`MAX_HEAP_BYTES` в `heap.rs`).
 
 ### Структура свободного блока
 
@@ -237,7 +240,7 @@ FreeList::init(start, 4 * 1024 * 1024);     // работаем как с мас
 |-----|-----|:---:|
 | 1 | `serial::init()` | — |
 | 2 | `pmm::init(memory_map)` — битмап, счётчики | — |
-| 3 | `heap::init(hhdm)` — `alloc_contiguous(1024)`, FreeList | — (она сама создаёт кучу) |
+| 3 | `heap::init(hhdm)` — `alloc_contiguous(2048)`, FreeList | — (она сама создаёт кучу) |
 | 4 | **heap-стресс** — 10k alloc/drop, проверка `used → 0` | да (временно, всё освобождается) |
 | 5 | `keyboard::init()` | — |
 | 6 | `fs::init_filesystem()` — RamFS на статических массивах | — |
@@ -253,7 +256,7 @@ FreeList::init(start, 4 * 1024 * 1024);     // работаем как с мас
 
 ## 6. Тесты
 
-### `diag pmtest` — тест PMM (Шаг 2)
+### `diag pmm` — тест PMM (Шаг 2)
 Shell-команда. Делает: `stats` до → `alloc_contiguous(16)` → 1000×
 `alloc_frame` → free всех → `stats` после. Ожидаемый результат: **PASS** —
 счётчики `used` в начале и конце совпадают (доказывает корректность

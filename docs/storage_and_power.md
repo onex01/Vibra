@@ -98,6 +98,18 @@ READ SECTORS EXT (LBA48), PIO, только чтение. Устройства �
 Запись через IDE не поддерживается: для диагностики и монтирования
 достаточно чтения.
 
+## USB mass storage
+
+Накопители на xHCI идут через Bulk-Only Transport и подмножество SCSI
+(`INQUIRY`, `READ CAPACITY(10)`, `READ(10)`, `WRITE(10)`, `REQUEST SENSE`,
+`GET_MAX_LUN`, BOT reset). Устройство регистрируется в общем block layer как
+`sdX`, поэтому MBR/GPT, FAT32/ext/NTFS/exFAT и `LABEL=` работают без
+изменений, а `disks -v` показывает драйвер, модель и размер сектора.
+
+Проверки: `make usb3-test` (SuperSpeed и hotplug) и `make usb-storage-test`
+(`mount fat32`, `ls`, `cat`, запись `cp` через VFS). EHCI-накопители появятся
+в `rc.25`; до этого флешка на порту, отданном EHCI, не видна.
+
 ## Размонтирование и sync
 
 `umount <path>` освобождает точку монтирования (раньше путь оставался

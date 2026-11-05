@@ -23,7 +23,8 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | PS/2, PIC/PIT, GDT/IDT | базовый диагностический путь |
 | PCI/ACPI | инвентаризация и частичная инициализация |
 | AHCI/IDE/NVMe/ATAPI, FAT32/ext2/3/4/NTFS/exFAT/ISO9660 | AHCI + IDE + NVMe + ATAPI CD + block layer + MBR/EBR/GPT + mount/umount/sync; FAT32 rw для `VIBRALOG`, ext/NTFS/exFAT ro (ext4: extents/64bit) в QEMU |
-| xHCI/HID | enumeration и HID boot keyboard в QEMU; на реальном железе не подтверждено |
+| xHCI/UHCI/HID/storage | lifecycle, HID boot keyboard, BOT+SCSI mass storage и hotplug в QEMU; UHCI — клавиатура |
+| EHCI (USB 2.0) | только детект в `diag usb`; драйвер запланирован (`rc.25`) |
 | e1000/RTL8139, IPv4/ICMP | QEMU-ориентированный прототип, без DHCP/TCP |
 | ARM64 / Orange Pi Zero 3 | не поддерживается |
 
@@ -48,11 +49,13 @@ Vibra Kernel — экспериментальное ядро на Rust `no_std`,
 | `make big-fs-test` | NTFS 2 ТБ, GPT выше 2 ТБ, MBR на 4Kn, exFAT и LABEL= |
 | `make iso-test` | ISO9660 с CD-ROM через ATAPI: Joliet/Rock Ridge, подкаталог |
 | `make boot-log-test` | запись `/VIBRA.LOG` на `VIBRALOG` и инкрементальный flush |
-| `make debug-image-test` | три раздела, лог начинается с `[BOOT]` |
-| `make vktst-test` | `vktst run all`, `free`, `top -b`, `tree` из `/proc` |
-| `make debug-image-test` | 3 раздела USB debug-образа и запись `/VIBRA.LOG` |
+| `make debug-image-test` | три раздела USB debug-образа и запись `/VIBRA.LOG` |
 | `make iso-debug-test` | debug ISO, записанный на USB: разделы и лог |
 | `make keyboard-test` | ввод PS/2 и USB HID клавиатуры через monitor `sendkey` |
+| `make uhci-test` | USB-клавиатура на UHCI |
+| `make usb3-test` | xHCI SuperSpeed-диск, монтирование, hotplug |
+| `make usb-storage-test` | USB-накопитель через VFS: `mount fat32`, `ls`, `cat`, `cp` |
+| `make vktst-test` | `vktst run all`, `free`, `top -b`, `tree` из `/proc` |
 | `make iso-smoke` | загрузка гибридного ISO в UEFI (OVMF) и BIOS (SeaBIOS) |
 | `BOOT_ITERATIONS=10 python3 scripts/qemu-boot-matrix.py` | повторяемость загрузки |
 | `python3 scripts/check-warning-budget.py` | бюджет предупреждений компилятора |
@@ -97,14 +100,14 @@ ISO, UEFI/USB образы, `SHA256SUMS` и GitHub Release. Подробност
 - `storage_and_power.md` — ACPI poweroff, каталоги FAT32, приёмники логов.
 - `memory.md` — модель памяти и известные риски.
 - `testing.md` — матрица QEMU-проверок и критерии приёмки.
-- `verified-hardware.md` — шаблон отчёта о прогоне на реальной машине.
+- `verified-hardware.md` — отчёт о прогоне на реальной машине (заполнен для ThinkPad T450).
 - `usb_and_boot.md` — QEMU/UEFI-процедуры и статус USB.
 - `roadmap.md` — измеримые критерии версий.
-- `usb_progress.md` — инженерные заметки о незавершённом xHCI.
+- `usb_progress.md` — инженерные заметки: xHCI/UHCI/storage/EHCI.
 
 ## Версионирование
 
 Единственная публичная версия — версия ядра. До `0.5.0` minor-версии отражают
 достигнутые проверяемые hardware milestones, а не количество файлов или
-демонстраций. `0.2.0-rc.4` — prerelease Foundation; финальный `0.2.0` ждёт
-выполнения CI, QEMU boot matrix и проверки на реальном x86_64.
+демонстраций. `0.2.0-rc.24` — prerelease Foundation; финальный `0.2.0` ждёт
+закрытия `rc.25`–`rc.30`, CI, QEMU boot matrix и проверки на реальном x86_64.

@@ -39,10 +39,11 @@ framebuffer, безопасная память, прерывания, PCI, бл�
 - RAM-файловая система, встроенная shell, `vktst` и `disks` для диагностики.
 
 Это не подтверждает работу соответствующих драйверов на реальном железе.
-В частности, USB-накопители, автомонтирование дисков, DHCP/TCP и ARM64 не
-реализованы; HID boot keyboard работает в QEMU (`make keyboard-test`), но на
-физическом железе не подтверждён. Подробности и критерии готовности — в
-[roadmap](docs/roadmap.md).
+В частности, EHCI (USB 2.0), OHCI, автомонтирование дисков, DHCP/TCP и ARM64 не
+реализованы; HID boot keyboard, UHCI-клавиатура и USB-накопители работают в
+QEMU (`make keyboard-test`, `make uhci-test`, `make usb-storage-test`), но на
+физическом железе подтверждены не для всех платформ. Подробности и критерии
+готовности — в [roadmap](docs/roadmap.md).
 
 ## Быстрый старт
 
@@ -78,8 +79,9 @@ Serial остаётся доступен для ввода команд; лог�
 `clock-test` проверяет монотонные часы и RTC: `date`, `uptime`, `diag timer`,
 `/proc/uptime` и отсутствие удалённых каталогов (`/os`, `/apps`, `/lib`) в рамфс.
 `debug` включает serial shell. Не используйте его на открытом физическом
-serial-порту: для сборки без serial-ввода используйте `./build.sh secure`, а
-для debug-образа с логом на носителе, но без COM1 — `iso-debug-noserial` или
+serial-порту: для запуска без serial-ввода используйте
+`./build.sh run-serial-file` (лог в файл), а для debug-образа с логом на
+носителе, но без COM1 — `iso-debug-noserial` или
 `usb-debug-noserial`. Каждый символ в COM1 при 115200 стоит ~87 мкс, поэтому
 на длинном выводе вариант без serial заметно быстрее, а диагностика остаётся
 в `/VIBRA.LOG` на разделе `VIBRALOG`.
@@ -153,12 +155,15 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh iso-debug-test проверить debug ISO, записанный на USB
 ./build.sh keyboard-test  проверить ввод PS/2 и USB HID
 ./build.sh uhci-test      проверить USB-клавиатуру на UHCI
+./build.sh usb3-test      проверить USB3-диск на xHCI и hotplug
+./build.sh usb-storage-test  проверить FAT32 на USB-диске через VFS
 ./build.sh iso            собрать гибридный BIOS/UEFI ISO
 ./build.sh iso-smoke      загрузить ISO в UEFI (OVMF) и BIOS (SeaBIOS)
 ./build.sh uefi-usb       собрать GPT-образ с EFI System Partition
 ./build.sh check          сборка debug/release-конфигураций + бюджет предупреждений
 ./build.sh debug          собрать и запустить QEMU
-./build.sh secure         QEMU без serial shell
+./build.sh run-serial-file  QEMU с serial-логом в файл (без ввода в stdio)
+./build.sh run-serial-tcp   QEMU с serial на TCP-порт
 ./build.sh usb            собрать образ USB; запись на устройство выполняется вручную
 ```
 

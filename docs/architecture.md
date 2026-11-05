@@ -79,12 +79,12 @@ CMOS), `diag apic`, `uptime`.
 | `interrupts`, `gdt` | IDT, PIC, APIC-задел, TSS | PIC baseline; LAPIC timer только как fallback для тиков |
 | `timer` | TSC/HPET/PIT часы, CMOS RTC, wall clock | TSC + HPET, RTC синхронизирован; IRQ-тики измеряются |
 | `drivers/pci`, `acpi` | обнаружение x86-оборудования | PCI + ACPI; BAR выше 4 ГБ переносятся в низкое MMIO-окно |
-| `drivers/usb` | xHCI lifecycle + HID boot keyboard | enumeration и HID-отчёты работают в QEMU |
+| `drivers/usb` | xHCI + UHCI lifecycle, HID boot keyboard, BOT+SCSI mass storage, hotplug | enumeration, ввод и storage работают в QEMU; EHCI/OHCI нет |
 | `fs` | RamFS, VFS, block layer, FAT32 (rw для `VIBRALOG`), ext2/3/4 (ro), NTFS (ro), exFAT/ISO9660 (ro) | block layer + MBR/EBR/GPT + ext4 extents + exFAT/ISO9660 работают в QEMU |
 | `drivers/ahci` | SATA + ATAPI CD | ATA read/write и ATAPI `PACKET`/`READ(10)` работают в QEMU |
 | `drivers/ide` | PATA/IDE (BIOS legacy) | только чтение, регистрируется в block layer |
-| `drivers/usb` | xHCI + UHCI + HID + mass storage | QEMU; EHCI/OHCI нет |
-| `commands` | shell-команды | `top` (htop-like), `vktst`, `tree`, `free` |
+| `drivers/nvme` | NVMe | Identify, I/O queues, 512/4096 байт на блок |
+| `commands` | shell-команды | `top` (htop-like), `vktst`, `tree`, `free`, `disks` |
 | `net` | Ethernet/ARP/IPv4/ICMP | QEMU-ориентированный, без DHCP/TCP |
 
 ## Ограничения архитектуры
@@ -104,6 +104,7 @@ CMOS), `diag apic`, `uptime`.
   и не ставит NX-биты в PTE — W^X деградирует, но boot продолжается.
 
 Следующие архитектурные шаги — PIC → LAPIC/IOAPIC и политика MSI/MSI-X, затем
-SMP bring-up, DMA-контракт для блочных драйверов и DHCP/ICMP. USB HID keyboard и xHCI
-lifecycle реализованы (см. [usb_progress.md](usb_progress.md)), но ещё не
-подтверждены на физической машине. См. [roadmap.md](roadmap.md).
+SMP bring-up, DMA-контракт для блочных драйверов и DHCP/ICMP. xHCI lifecycle,
+USB HID keyboard и USB mass storage реализованы (см.
+[usb_progress.md](usb_progress.md)), но подтверждены не на всех физических
+машинах; EHCI (USB 2.0) пока только детектируется. См. [roadmap.md](roadmap.md).

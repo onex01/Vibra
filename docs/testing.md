@@ -19,6 +19,8 @@
 | `make noserial-test` | загрузка без COM1 (`-serial none`) до shell по debugcon-маркерам | qemu |
 | `make serial-input-test` | ввод через COM1 (`-serial stdio`), а не через monitor | qemu |
 | `make usb3-test` | xHCI SuperSpeed: USB3-диск, монтирование, hotplug (device_del/device_add) | qemu |
+| `make usb-storage-test` | USB-накопитель на xHCI через VFS: `mount fat32`, `ls`, `cat`, запись `cp` | qemu, mtools |
+| `make boot-log-test` | запись `/VIBRA.LOG` на раздел `VIBRALOG` и инкрементальный flush | qemu, mtools |
 | `make iso-test` | ISO9660 с CD-ROM (ATAPI), Joliet/Rock Ridge, подкаталог | qemu, genisoimage |
 | `make big-fs-test` | NTFS 2 ТБ, GPT-раздел за 2 ТБ, MBR на 4Kn, exFAT по метке, FAT16-диагностика | qemu, ntfs-3g, mtools, python3 |
 | `make shell-test` | Tab, история, `help`, `diag timer`, отсутствие битого prompt | qemu, mtools |
@@ -46,6 +48,7 @@ make check
 ./build.sh big-fs-test
 ./build.sh iso-test
 ./build.sh usb3-test
+./build.sh usb-storage-test
 ./build.sh noserial-test
 ./build.sh build-script-test
 ./build.sh serial-input-test
@@ -55,6 +58,7 @@ make check
 ./build.sh debug-image-test
 ./build.sh iso-debug-test
 ./build.sh keyboard-test
+./build.sh uhci-test
 ./build.sh iso
 make iso-smoke
 ./build.sh uefi-usb
@@ -63,7 +67,8 @@ BOOT_ITERATIONS=100 python3 scripts/qemu-boot-matrix.py
 
 На CI без KVM QEMU работает через TCG, поэтому таймауты заданы с запасом:
 `SMOKE_TIMEOUT`, `BOOT_TIMEOUT`, `RAMFS_TEST_TIMEOUT`, `RO_MOUNT_TEST_TIMEOUT`,
-`BAD_FS_TEST_TIMEOUT`, `NVME_TEST_TIMEOUT`, `BIG_FS_TEST_TIMEOUT`
+`BAD_FS_TEST_TIMEOUT`, `NVME_TEST_TIMEOUT`, `BIG_FS_TEST_TIMEOUT`,
+`SHELL_TEST_TIMEOUT`, `FS_TEST_TIMEOUT`, `KEYBOARD_TEST_TIMEOUT`.
 
 ## exFAT-фикстура
 
@@ -72,7 +77,7 @@ root и loop-устройства нечем. Поэтому `scripts/mk-exfat-f
 образ вручную: boot sector с checksum, FAT, cluster heap, entry set
 `0x85`+`0xC0`+`0xC1`, метка `0x83`. В образе есть contiguous-файл,
 подкаталог и файл из двух кластеров через FAT — так проверяется и разбор
-каталога, и порядок цепочки., `SHELL_TEST_TIMEOUT`, `FS_TEST_TIMEOUT`, `KEYBOARD_TEST_TIMEOUT`.
+каталога, и порядок цепочки.
 
 ## Что считается регрессией
 
