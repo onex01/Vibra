@@ -5,8 +5,8 @@
 Единственный источник версии — `kernel/src/version.rs`:
 
 ```rust
-pub const KERNEL_VERSION: &str = "0.2.0-rc.18";
-pub const KERNEL_CODENAME: &str = "Foundation RC18";
+pub const KERNEL_VERSION: &str = "0.2.0-rc.19";
+pub const KERNEL_CODENAME: &str = "Foundation RC19";
 ```
 
 `Makefile` читает `KERNEL_VERSION` из этого файла, `kernel/build.rs` добавляет
@@ -137,11 +137,11 @@ make check
 ./build.sh smoke
 ./build.sh fs-test
 git add -A
-git commit -m "release: 0.2.0-rc.18"
+git commit -m "release: 0.2.0-rc.19"
 git push origin main      # этого достаточно: тег и релиз создаст CI
 ```
 
-Тег можно поставить и руками (`git tag v0.2.0-rc.18 && git push --tags`) —
+Тег можно поставить и руками (`git tag v0.2.0-rc.19 && git push --tags`) —
 тогда `release.yml` пересоберёт и перезальёт релиз, а не создаст дубликат.
 
 ### Что попадает в релиз

@@ -29,6 +29,7 @@ const PORT_CMD: u64 = 0x18;     // Command and Status
 const PORT_TFD: u64 = 0x20;     // Task File Data
 const PORT_SIG: u64 = 0x24;     // Signature
 const PORT_SSTS: u64 = 0x28;    // SATA Status
+const PORT_SCTL: u64 = 0x2C;    // SATA Control (DET)
 const PORT_SERR: u64 = 0x30;    // SATA Error
 const PORT_CI: u64 = 0x38;      // Command Issue
 
@@ -374,6 +375,32 @@ unsafe fn init_port(port: u32) {
 }
 
 /// Остановить порт
+/// COMRESET линка: DET=1 (сброс), затем DET=0 (нормальная работа).
+///
+/// Нужен на реальном железе: после неудачной команды или после того, как
+/// прошивка оставила порт в промежуточном состоянии, диск держит BSY=1 и
+/// на IDENTIFY DEVICE не отвечает. `init_port` сам COMRESET не делает, а
+/// без него порт так и остаётся занятым (ровно это видно в `diag disk`:
+/// `TFD=0x0080` — BSY, `SERR` с ошибками).
+unsafe fn comreset(port: u32) {
+    let sctl = port_read32(port, PORT_SCTL);
+    // DET = 1: инициировать сброс; остальные поля сохраняем.
+    port_write32(port, PORT_SCTL, (sctl & !0xF) | 1);
+    // Спецификация требует держать сброс не меньше 1 мс.
+    crate::timer::sleep_ms(2);
+    // DET = 0: вернуть линк в рабочее состояние.
+    port_write32(port, PORT_SCTL, sctl & !0xF);
+
+    // Ждём DET=3 (device present, link up) — по времени, а не по итерациям.
+    let deadline = crate::timer::uptime_ms() + 1000;
+    while crate::timer::uptime_ms() < deadline {
+        if port_read32(port, PORT_SSTS) & 0xF == 3 {
+            break;
+        }
+        crate::timer::sleep_ms(1);
+    }
+}
+
 unsafe fn port_stop(port: u32) {
     let mut cmd = port_read32(port, PORT_CMD);
     cmd &= !(PORT_CMD_ST | PORT_CMD_FRE);
@@ -1034,6 +1061,12 @@ pub fn get_disk_info() -> Vec<DiskInfo> {
 pub fn identify_device(port_num: u32) -> Option<DiskInfo> {
     for attempt in 0..3 {
         if attempt > 0 {
+            // Просто переинициализировать порт недостаточно: если линк в
+            // промежуточном состоянии, диск остаётся занятым (BSY=1) и
+            // IDENTIFY не проходит. COMRESET возвращает порт в рабочее
+            // состояние — без него внутренний SATA-диск на ноутбуке так и
+            // не регистрировался в block layer.
+            unsafe { comreset(port_num) };
             crate::timer::sleep_ms(50);
             unsafe { init_port(port_num) };
             crate::timer::sleep_ms(20);
@@ -1054,14 +1087,20 @@ pub fn identify_device(port_num: u32) -> Option<DiskInfo> {
 
 fn identify_once(port_num: u32) -> Option<DiskInfo> {
     unsafe {
-        // Ждём пока порт свободен (BSY=0, DRQ=0)
-        let mut timeout = 50_000u32;
-        while port_read32(port_num, PORT_TFD) as u8 & (TFD_BSY | TFD_DRQ) != 0 && timeout > 0 {
-            timeout -= 1;
-        }
-        if timeout == 0 {
-            println!("[AHCI] Port {}: identify timeout (port busy)", port_num);
-            return None;
+        // Ждём пока порт свободен (BSY=0, DRQ=0). По времени: число итераций
+        // зависит от оптимизации, а MMIO-чтение на реальном железе может
+        // занимать микросекунды — фиксированный счётчик давал то 5 мс, то 500.
+        let deadline = crate::timer::uptime_ms() + 1000;
+        while port_read32(port_num, PORT_TFD) as u8 & (TFD_BSY | TFD_DRQ) != 0 {
+            if crate::timer::uptime_ms() >= deadline {
+                println!(
+                    "[AHCI] Port {}: identify timeout (TFD={:#x}, SERR={:#x})",
+                    port_num,
+                    port_read32(port_num, PORT_TFD),
+                    port_read32(port_num, PORT_SERR)
+                );
+                return None;
+            }
         }
 
         // Очи Status
@@ -1113,15 +1152,19 @@ fn identify_once(port_num: u32) -> Option<DiskInfo> {
         // Запускаем команду
         port_write32(port_num, PORT_CI, 1);
 
-        // Ждём завершения
-        timeout = 2_000_000;
-        while port_read32(port_num, PORT_CI) & 1 != 0 && timeout > 0 {
-            timeout -= 1;
+        // Ждём завершения по времени: см. комментарий в начале identify_once.
+        let cmd_deadline = crate::timer::uptime_ms() + 2000;
+        let mut finished = false;
+        while port_read32(port_num, PORT_CI) & 1 != 0 {
+            if crate::timer::uptime_ms() >= cmd_deadline {
+                break;
+            }
         }
+        finished = port_read32(port_num, PORT_CI) & 1 == 0;
 
         alloc::alloc::dealloc(ct_ptr, ct_layout);
 
-        if timeout == 0 {
+        if !finished {
             // Диагностика: какие биты остались — покажет, дошла ли команда.
             let cmd_reg = port_read32(port_num, PORT_CMD);
             let tfd = port_read32(port_num, PORT_TFD);

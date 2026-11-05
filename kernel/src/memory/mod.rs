@@ -2,6 +2,7 @@ pub mod pmm;
 pub mod heap;
 pub mod dma;
 pub mod paging;
+pub mod mtrr;
 pub mod vmm;
 
 use alloc::string::String;

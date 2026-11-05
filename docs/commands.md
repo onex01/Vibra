@@ -95,7 +95,8 @@ FAT12/FAT16 не поддерживаются — драйвер работае�
 | `diag disk` | порты AHCI, IDE/NVMe, сигнатуры ФС, DMA-ошибки |
 | `diag apic` | LAPIC/IOAPIC и маршрутизация |
 | `diag display` | бэкенды, формат пикселя, геометрия |
-| `diag fb` | memory type фреймбуфера (PAT/WC), замеры сборки строки и прокрутки |
+| `diag fb` | memory type фреймбуфера (PAT/MTRR), staging, замеры сборки строки, записи экрана и прокрутки |
+| `diag mtrr`, `diag mtrr wc` | диапазоны MTRR; `wc` помечает фреймбуфер как write-combining |
 | `diag hw` | SMBIOS, ACPI-таблицы, FADT |
 | `diag power` | путь выключения (PM1_CNT, `_S5`) |
 | `diag fault-test`, `diag panic-test` | проверка отчётов (останавливает VM) |

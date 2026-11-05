@@ -31,16 +31,46 @@ pub fn diag_usb(console: &mut Console) {
         crate::drivers::usb::xhci::keyboard_status()
     ));
 
+    // Контроллеры USB, которых у нас нет: если флешка воткнута в порт
+    // EHCI/OHCI, её не увидит ни один наш драйвер, и это надо видеть сразу.
+    console.print_colored("[controllers without driver]\n", COLOR_YELLOW);
+    let mut missing = 0usize;
+    for (class, subclass, name) in [
+        (0x0C, 0x20, "EHCI (USB 2.0)"),
+        (0x0C, 0x10, "OHCI (USB 1.1)"),
+        (0x0C, 0x03, "UHCI (USB 1.1)"),
+    ] {
+        let count = crate::drivers::pci::find_all_devices_by_class(class, subclass).len();
+        // UHCI у нас есть — показываем только те, что не поддержаны.
+        if subclass == 0x03 {
+            continue;
+        }
+        if count > 0 {
+            console.print(&format!("  {} device(s): {}\n", count, name));
+            missing += count;
+        }
+    }
+    if missing == 0 {
+        console.print("  none\n");
+    }
+
     console.print_colored("[root ports]\n", COLOR_YELLOW);
     let ports = crate::drivers::usb::xhci::ports();
     if ports.is_empty() {
         console.print("  none\n");
     }
+    // Печатаем ВСЕ порты, включая пустые: иначе «флешка не видна» невозможно
+    // отличить от «порт вообще не видит подключения», а это разные причины
+    // (второе — другой контроллер, например EHCI, драйвера которого нет).
+    if !ports.is_empty() {
+        let connected = ports.iter().filter(|p| p.connected).count();
+        console.print(&format!(
+            "  {} port(s), {} connected\n",
+            ports.len(),
+            connected
+        ));
+    }
     for port in &ports {
-        // Компактно: только подключённые порты и всё, что уже перечислено.
-        if !port.connected && port.device.is_none() {
-            continue;
-        }
         console.print(&format!(
             "  ctrl{} port{:<2} {} {} {} speed {} ({})",
             port.controller,

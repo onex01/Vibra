@@ -340,7 +340,6 @@ struct TextCell {
 /// Это даёт основную экономию: раньше на каждый из 8 пикселей строки
 /// выполнялось сравнение бита и отдельная ветка, теперь 8 итераций
 /// чистых ALU-операций, а запись идёт парами.
-#[inline]
 #[inline(always)]
 fn expand_line(line: u8, fg: u32, bg: u32) -> [u64; 4] {
     let mut out = [0u64; 4];
@@ -498,6 +497,8 @@ pub struct Console {
     /// только эту область: если на экране 5 строк текста, нет смысла трогать
     /// остальные 45.
     painted_max: usize,
+    /// Тип памяти MTRR, покрывающий фреймбуфер (0xFF — не удалось узнать).
+    mtrr_type: u8,
     /// Отчёт о переводе фреймбуфера в write-combining (сколько страниц
     /// изменено, сколько уже было, сколько вне отображения).
     wc_pages: usize,
@@ -528,9 +529,11 @@ pub(crate) fn init_boot_console() {
         return;
     };
 
-    let mut console = Console::new(framebuffer);
-    console.enable_write_combining();
-    *BOOT_CONSOLE.lock() = Some(console);
+    // WC настраивается не здесь: таблицы страниц читаются через HHDM, а он
+    // становится известен только в `memory::init` (шаг 3). Вызов перенесён
+    // в `after_heap_init`, иначе на реальном железе фреймбуфер оставался
+    // uncached — каждая запись пикселя уходила отдельной транзакцией.
+    *BOOT_CONSOLE.lock() = Some(Console::new(framebuffer));
 }
 
 /// Включить RAM-тень текстовой сетки после инициализации кучи.
@@ -538,13 +541,16 @@ pub(crate) fn after_heap_init() {
     with_boot_console(|console| {
         console.rebuild_cells();
         console.alloc_staging();
+        // HHDM уже известен, таблицы страниц доступны: применяем WC здесь.
+        console.enable_write_combining();
         // Теперь boot-лог уже начался с `[BOOT] Step 1`, и отчёт о WC не
         // испортит проверку начала файла.
         if console.wc_report_pending {
             console.wc_report_pending = false;
             crate::println!(
-                "[FB] memory: PAT {}, {} page(s) switched to write-combining, {} already, {} unmapped (leaf flags {:#x})",
+                "[FB] memory: PAT {}, MTRR {}, {} page(s) WC, {} already, {} unmapped (leaf {:#x})",
                 if console.pat_ok { "WC" } else { "unchanged" },
+                crate::memory::mtrr::type_name(console.mtrr_type),
                 console.wc_pages,
                 console.wc_already,
                 console.wc_unmapped,
@@ -622,6 +628,7 @@ impl Console {
             wc_already: 0,
             wc_unmapped: 0,
             wc_leaf_flags: 0,
+            mtrr_type: 0xFF,
             pat_ok: false,
             wc_report_pending: false,
             cells_valid: core::cell::Cell::new(false),
@@ -681,6 +688,7 @@ impl Console {
             wc_already: 0,
             wc_unmapped: 0,
             wc_leaf_flags: 0,
+            mtrr_type: 0xFF,
             pat_ok: false,
             wc_report_pending: false,
             cells_valid: core::cell::Cell::new(true),
@@ -1079,16 +1087,55 @@ impl Console {
         self.wc_already = report.already;
         self.wc_unmapped = report.unmapped;
         self.wc_leaf_flags = report.leaf_flags;
+
+        // MTRR здесь только читаем. Перепрограммирование MTRR на загрузке
+        // оказалось небезопасным: если прошивка оставила MTRR выключенными,
+        // включение меняет тип памяти для всей системы. Явная команда
+        // `diag mtrr wc` делает это осознанно, с отчётом до и после.
+        self.mtrr_type = crate::memory::paging::virt_to_phys(self.fb_addr as u64)
+            .map(|phys| crate::memory::mtrr::covering_type(phys).unwrap_or(crate::memory::mtrr::default_type()))
+            .unwrap_or(0xFF);
         // Печать откладывается: `init_boot_console` вызывается до
         // `[BOOT] Step 1`, а boot-лог обязан начинаться с него (иначе не
         // отличить норму от регрессии с нулями в начале файла).
         self.wc_report_pending = true;
     }
 
+    /// Выставить WC на диапазон фреймбуфера через MTRR.
+    ///
+    /// Возвращает `(успех, тип до, тип после)`. Вызывается командой
+    /// `diag mtrr wc`: менять MTRR на загрузке опасно, а здесь пользователь
+    /// видит отчёт и может сравнить замеры до и после.
+    pub fn apply_mtrr_wc(&mut self) -> (bool, u8, u8) {
+        let bytes = (self.pitch * self.height * 4) as u64;
+        let Some(phys) = crate::memory::paging::virt_to_phys(self.fb_addr as u64) else {
+            return (false, 0xFF, 0xFF);
+        };
+        let before = crate::memory::mtrr::covering_type(phys)
+            .unwrap_or(crate::memory::mtrr::default_type());
+        let ok = crate::memory::mtrr::set_write_combining(phys, bytes);
+        let after = crate::memory::mtrr::covering_type(phys)
+            .unwrap_or(crate::memory::mtrr::default_type());
+        self.mtrr_type = after;
+        (ok, before, after)
+    }
+
+    /// Сколько байт занимает staging-буфер строки (0 — быстрый путь выключен).
+    pub fn staging_bytes(&self) -> usize {
+        self.staging.len() * core::mem::size_of::<u64>()
+    }
+
     /// Состояние отрисовки для `diag fb`:
-    /// `(PAT запрограммирован, изменено, уже WC, вне отображения, флаги листа)`.
-    pub fn write_combining_state(&self) -> (bool, usize, usize, usize, u64) {
-        (self.pat_ok, self.wc_pages, self.wc_already, self.wc_unmapped, self.wc_leaf_flags)
+    /// `(PAT, тип MTRR фреймбуфера, изменено, уже WC, вне отображения, флаги)`.
+    pub fn write_combining_state(&self) -> (bool, u8, usize, usize, usize, u64) {
+        (
+            self.pat_ok,
+            self.mtrr_type,
+            self.wc_pages,
+            self.wc_already,
+            self.wc_unmapped,
+            self.wc_leaf_flags,
+        )
     }
 
     /// Замер стоимости перерисовки экрана из текстовой тени: ровно та работа,

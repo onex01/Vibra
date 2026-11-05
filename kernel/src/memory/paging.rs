@@ -118,6 +118,11 @@ pub fn init(hhdm_offset: u64) {
 }
 
 /// Физический адрес активной PML4; младшие 12 бит CR3 (PCID) отброшены.
+/// Смещение HHDM (0, если `paging::init` ещё не вызывался).
+pub fn hhdm_offset() -> u64 {
+    HHDM_OFFSET.load(Ordering::Relaxed)
+}
+
 pub fn current_root_phys() -> u64 {
     let cr3: u64;
     unsafe {
@@ -393,6 +398,12 @@ pub struct WcReport {
 pub fn set_write_combining(virt: u64, len: u64) -> WcReport {
     let mut report = WcReport { changed: 0, already: 0, unmapped: 0, leaf_flags: 0 };
     if len == 0 {
+        return report;
+    }
+    // До `paging::init` HHDM неизвестен, и обход таблиц читал бы физические
+    // адреса как виртуальные. Возвращаем пустой отчёт: вызывающий повторит
+    // попытку, когда HHDM появится.
+    if HHDM_OFFSET.load(Ordering::Relaxed) == 0 {
         return report;
     }
     let start = virt & !0xfff;

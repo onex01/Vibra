@@ -48,6 +48,7 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
         "apic" => diag_apic(console),
         "display" => diag_display(console),
         "fb" => diag_fb(console),
+        "mtrr" => diag_mtrr(console, args.get(1).copied()),
         "heap-test" => diag_heap_test(console),
         "heap-check" => diag_heap_check(console),
         "heap-big" => diag_heap_big(console, args.get(1).copied()),
@@ -146,10 +147,18 @@ fn diag_fb(console: &mut Console) {
     console.print_num(console.fb_rows());
     console.print(" cells\n");
 
-    let (pat_ok, wc_pages, wc_already, wc_unmapped, leaf_flags) =
+    let (pat_ok, mtrr_type, wc_pages, wc_already, wc_unmapped, leaf_flags) =
         console.write_combining_state();
     console.print("  PAT:       ");
     console.print(if pat_ok { "write-combining index programmed" } else { "not programmed" });
+    console.print("\n  MTRR:      ");
+    console.print(crate::memory::mtrr::type_name(mtrr_type));
+    if mtrr_type == 0 {
+        console.print_colored(
+            "  -> UC overrides PAT: writes cannot be combined",
+            crate::framebuffer::COLOR_RED,
+        );
+    }
     console.print("\n  WC:        changed ");
     console.print_num(wc_pages);
     console.print(", already ");
@@ -164,6 +173,9 @@ fn diag_fb(console: &mut Console) {
     } else {
         console.print("  -> WC NOT applied: each pixel is a separate transaction\n");
     }
+
+    // Какие диапазоны MTRR действуют и что покрывает фреймбуфер.
+    console.print(&crate::memory::mtrr::report());
 
     // Проверка самих часов: если 20 мс ожидания меряются как не 20, то и
     // замер прокрутки ниже недостоверен.
@@ -202,6 +214,18 @@ fn diag_fb(console: &mut Console) {
     console.print_num(dense_full as usize);
     console.print(" cycles\n");
 
+    // Быстрый путь требует staging-буфера: без него каждая ячейка пишется
+    // по пикселю, и прокрутка стоит в разы дороже.
+    console.print("  staging:   ");
+    console.print_num(console.staging_bytes());
+    console.print(" bytes");
+    if console.staging_bytes() == 0 {
+        console.print_colored("  -> SLOW PATH (per-pixel writes)", crate::framebuffer::COLOR_RED);
+    } else {
+        console.print("  (fast path: one wide copy per pixel row)");
+    }
+    console.print("\n");
+
     // Разбор по частям: сборка строки против её записи.
     let (build_c, fb_copy_c, ram_copy_c) = console.bench_row_build_and_copy(200);
     console.print("  build row: ");
@@ -211,6 +235,34 @@ fn diag_fb(console: &mut Console) {
     console.print(", copy->ram ");
     console.print_num(ram_copy_c as usize);
     console.print("\n");
+
+    // Вердикт по write-combining: сравниваем стоимость копии строки в RAM и
+    // во фреймбуфер. На RAM это ~1 цикл/байт; если во фреймбуфер выходит
+    // десятки циклов на байт — память осталась uncached, и PAT/MTRR не
+    // сработали (типичная причина «тормозит, когда экран заполнен»).
+    let (_fb_c, ram_c) = console.bench_row_copy(200);
+    let width_bytes = console.fb_width() * 4;
+    // Для вердикта берём запись всего экрана: она проходит все 4 МиБ и не
+    // может быть «схлопнута» повтором одной и той же строки.
+    let screen_bytes = (console.fb_width() * 4 * console.fb_height()) as u64;
+    if screen_bytes > 0 && screen_write > 0 {
+        let per_byte_x10 = screen_write * 10 / screen_bytes;
+        console.print("  WC verdict: ");
+        console.print_num((per_byte_x10 / 10) as usize);
+        console.print(".");
+        console.print_num((per_byte_x10 % 10) as usize);
+        console.print(" cycles/byte for a full-screen write (row copy in RAM ");
+        console.print_num((ram_c * 10 / width_bytes as u64 / 10) as usize);
+        console.print(")  -> ");
+        if per_byte_x10 <= 30 {
+            console.print_colored("cached/combined, OK\n", crate::framebuffer::COLOR_GREEN);
+        } else {
+            console.print_colored(
+                "UNCACHED: framebuffer writes are not combined\n",
+                crate::framebuffer::COLOR_RED,
+            );
+        }
+    }
 
     // Отдельно: одна строка в RAM против той же строки во фреймбуфер.
     let (fb_c, ram_c) = console.bench_row_copy(200);
@@ -266,6 +318,45 @@ fn diag_fb(console: &mut Console) {
     // Возвращаем экран в нормальное состояние.
     for _ in 0..fill_rows + 2 {
         console.print("\n");
+    }
+}
+
+/// MTRR: что действует сейчас и (по запросу) перевод фреймбуфера в WC.
+///
+/// Почему отдельной командой: MTRR переопределяет PAT, и если прошивка
+/// помечает фреймбуфер как UC, никакой PAT не поможет — записи уходят по
+/// одной транзакции. Но менять MTRR на загрузке опасно (меняется тип памяти
+/// для всей системы), поэтому решение принимает пользователь.
+fn diag_mtrr(console: &mut Console, arg: Option<&str>) {
+    use crate::framebuffer::COLOR_YELLOW;
+
+    console.print_colored("[MTRR]\n", COLOR_YELLOW);
+    console.print(&crate::memory::mtrr::report());
+
+    if arg != Some("wc") {
+        console.print_colored(
+            "  'diag mtrr wc' marks the framebuffer range as write-combining\n",
+            crate::framebuffer::COLOR_DARK_GRAY,
+        );
+        return;
+    }
+
+    let (ok, before, after) = console.apply_mtrr_wc();
+    console.print("  apply WC:  ");
+    console.print(crate::memory::mtrr::type_name(before));
+    console.print(" -> ");
+    console.print(crate::memory::mtrr::type_name(after));
+    console.print("\n");
+    if ok {
+        console.print_colored(
+            "  done: run 'diag fb' again and compare the WC verdict\n",
+            crate::framebuffer::COLOR_GREEN,
+        );
+    } else {
+        console.print_colored(
+            "  failed: no free MTRR range or WC unsupported; framebuffer stays as is\n",
+            crate::framebuffer::COLOR_RED,
+        );
     }
 }
 
