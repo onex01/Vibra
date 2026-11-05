@@ -330,6 +330,16 @@ fn decode_plain_byte(byte: u8) -> Option<crate::keyboard::Key> {
         0x15 => Some(Key::Char('\x15')),
         // Ctrl+Z
         0x1A => Some(Key::Char('\x1A')),
+        // Ctrl+D — удалить символ под курсором (как в редакторе)
+        0x04 => Some(Key::Char('\x04')),
+        // Ctrl+O — сохранить (nano), Ctrl+X — выход
+        0x0F => Some(Key::Char('\x0F')),
+        0x18 => Some(Key::Char('\x18')),
+        // Ctrl+V / Ctrl+Y — страница вниз / вверх
+        0x16 => Some(Key::Char('\x16')),
+        0x19 => Some(Key::Char('\x19')),
+        // Ctrl+W — поиск (зарезервировано редактором)
+        0x17 => Some(Key::Char('\x17')),
         byte if (0x20..=0x7e).contains(&byte) => Some(Key::Char(byte as char)),
         _ => None,
     }
