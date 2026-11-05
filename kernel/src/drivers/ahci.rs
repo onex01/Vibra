@@ -250,7 +250,19 @@ pub fn init() {
             let ipm = (ssts >> 8) & 0x0F; // Interface Power Management
 
             if det != 0x03 || ipm != 0x01 {
-                println!("[AHCI] Port {}: no device (DET={}, IPM={})", i, det, ipm);
+                // DET=0 означает «линка нет»: устройство не отвечает на SATA.
+                // На ноутбуках это почти всегда режим SATA=RAID в прошивке
+                // (встроенный диск виден только через RAID-драйвер) — либо
+                // порт физически пуст. Без этой подсказки «диск не найден»
+                // выглядит как дефект ядра.
+                if det == 0 {
+                    println!(
+                        "[AHCI] Port {}: no SATA link (DET=0). If the internal disk is missing, check BIOS SATA mode: AHCI (not RAID/Intel RST)",
+                        i
+                    );
+                } else {
+                    println!("[AHCI] Port {}: no device (DET={}, IPM={})", i, det, ipm);
+                }
                 continue;
             }
 

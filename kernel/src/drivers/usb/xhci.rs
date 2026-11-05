@@ -1710,22 +1710,23 @@ unsafe fn parse_extended_caps(mmio: u64, hccparams1: u32) -> ExtendedCaps {
             }
             // Supported Protocol: номера портов и скорость протокола.
             2 => {
-                let revision = rd32(mmio + offset + 4);
-                let name = rd32(mmio + offset + 8);
-                let ports = rd32(mmio + offset + 12);
+                // Раскладка Supported Protocol (проверена по QEMU):
+                //   dw0: CAP_ID[7:0], NEXT[15:8], ревизия[31:16]
+                //        (major — биты 24-31, minor — 16-23)
+                //   dw1: имя четырьмя ASCII-байтами ("USB ")
+                //   dw2: первый порт[7:0], число портов[15:8]
+                let name = rd32(mmio + offset + 4);
+                let ports = rd32(mmio + offset + 8);
                 let mut text = String::new();
                 for shift in [0u32, 8, 16, 24] {
                     let byte = ((name >> shift) & 0xFF) as u8;
-                    if byte != 0 {
+                    if byte.is_ascii_graphic() || byte == b' ' {
                         text.push(byte as char);
                     }
                 }
-                // Supported Protocol: dword 1 — minor в битах 0-7,
-                // major в битах 8-15 (раньше брались 24 и 16, отсюда
-                // «32.66» в логе).
                 caps.protocols.push((
-                    ((revision >> 8) & 0xFF) as u8,
-                    (revision & 0xFF) as u8,
+                    ((capability >> 24) & 0xFF) as u8,
+                    ((capability >> 16) & 0xFF) as u8,
                     ((ports >> 0) & 0xFF) as u8,
                     ((ports >> 8) & 0xFF) as u8,
                     text,
@@ -1842,10 +1843,10 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
             );
             for (major, minor, from, count, name) in &extended.protocols {
                 println!(
-                    "[xHCI]   {}.{} {}: ports {}-{}",
+                    "[xHCI]   protocol {}: rev {}.{}, ports {}-{}",
+                    name,
                     major,
                     minor,
-                    name,
                     from,
                     from.saturating_add(count.saturating_sub(1))
                 );

@@ -31,27 +31,39 @@ pub fn diag_usb(console: &mut Console) {
         crate::drivers::usb::xhci::keyboard_status()
     ));
 
-    // Контроллеры USB, которых у нас нет: если флешка воткнута в порт
-    // EHCI/OHCI, её не увидит ни один наш драйвер, и это надо видеть сразу.
+    // Контроллеры USB, которых у нас нет. Ищем по class 0x0C / subclass 0x03
+    // (USB) и различаем по prog_if: 0x00 UHCI, 0x10 OHCI, 0x20 EHCI,
+    // 0x30 xHCI. Раньше здесь стоял subclass 0x20, поэтому EHCI на ноутбуке
+    // не находился и печаталось «none», хотя в логе он есть (8086:9CA6).
     console.print_colored("[controllers without driver]\n", COLOR_YELLOW);
     let mut missing = 0usize;
-    for (class, subclass, name) in [
-        (0x0C, 0x20, "EHCI (USB 2.0)"),
-        (0x0C, 0x10, "OHCI (USB 1.1)"),
-        (0x0C, 0x03, "UHCI (USB 1.1)"),
-    ] {
-        let count = crate::drivers::pci::find_all_devices_by_class(class, subclass).len();
-        // UHCI у нас есть — показываем только те, что не поддержаны.
-        if subclass == 0x03 {
+    for device in crate::drivers::pci::find_all_devices_by_class(0x0C, 0x03) {
+        let prog_if = device.prog_if;
+        let name = match prog_if {
+            0x00 => "UHCI (USB 1.1)",
+            0x10 => "OHCI (USB 1.1)",
+            0x20 => "EHCI (USB 2.0)",
+            0x30 => "xHCI (USB 3.x)",
+            _ => "USB (unknown prog_if)",
+        };
+        // UHCI и xHCI у нас есть; остальные — нет.
+        if prog_if == 0x00 || prog_if == 0x30 {
             continue;
         }
-        if count > 0 {
-            console.print(&format!("  {} device(s): {}\n", count, name));
-            missing += count;
-        }
+        console.print(&format!(
+            "  [{:02x}:{:02x}.{}] {:04x}:{:04x} prog_if {:#04x} -> {}\n",
+            device.bus, device.dev, device.func,
+            device.vendor_id, device.device_id, prog_if, name
+        ));
+        missing += 1;
     }
     if missing == 0 {
         console.print("  none\n");
+    } else {
+        console.print_colored(
+            "  -> a drive in one of these ports cannot appear: no driver\n",
+            COLOR_RED,
+        );
     }
 
     // Расширенные возможности: какие протоколы есть и что с legacy handoff.
@@ -88,6 +100,21 @@ pub fn diag_usb(console: &mut Console) {
         }
     }
 
+    // Какой порт к какому протоколу относится: по xECP видно, где USB3,
+    // а где USB2. Без этого при 15 портах непонятно, куда втыкать флешку.
+    let protocols = crate::drivers::usb::xhci::extended_caps(0)
+        .map(|c| c.protocols)
+        .unwrap_or_default();
+    let protocol_of = |port: u8| -> &'static str {
+        for (major, _minor, from, count, _name) in &protocols {
+            let to = from.saturating_add(count.saturating_sub(1));
+            if port >= *from && port <= to {
+                return if *major >= 3 { "usb3" } else { "usb2" };
+            }
+        }
+        "?"
+    };
+
     console.print_colored("[root ports]\n", COLOR_YELLOW);
     let ports = crate::drivers::usb::xhci::ports();
     if ports.is_empty() {
@@ -106,9 +133,10 @@ pub fn diag_usb(console: &mut Console) {
     }
     for port in &ports {
         console.print(&format!(
-            "  ctrl{} port{:<2} {:#010x} {} {} {} speed {} ({})",
+            "  ctrl{} port{:<2} {:<4} {:#010x} {} {} {} speed {} ({})",
             port.controller,
             port.port,
+            protocol_of(port.port),
             port.portsc,
             if port.connected { "conn" } else { "empty" },
             if port.enabled { "en" } else { "dis" },

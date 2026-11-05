@@ -1264,6 +1264,8 @@ impl Console {
         // Замер меняет тень, поэтому сохраняем её: иначе отложенная
         // перерисовка выведет на экран остатки замерного текста.
         let saved = self.cells.clone();
+        let saved_cursor = (self.cursor_col, self.cursor_row);
+        let saved_painted = self.painted_max;
 
         // Заполняем тень «как после `ls -l`» — по строке текста на каждую
         // строку экрана, — но ничего не печатаем: раньше здесь выводились
@@ -1286,6 +1288,16 @@ impl Console {
         let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
         let us = crate::timer::uptime_us().saturating_sub(us_start);
 
+        // Возвращаем экран как было: замер прокручивал настоящую тень, и без
+        // восстановления содержимое экрана уезжало вверх — именно это
+        // выглядело как «diag fb заливает экран».
+        self.cells = saved;
+        self.painted_max = saved_painted;
+        self.cursor_col = saved_cursor.0;
+        self.cursor_row = saved_cursor.1;
+        self.pending = false;
+        self.redraw_from_cells();
+
         (cycles / lines as u64, us / lines as u64)
     }
 
@@ -1299,6 +1311,12 @@ impl Console {
         if chars == 0 || self.cols == 0 {
             return (0, 0);
         }
+        // Замер рисует символы в реальные ячейки, поэтому тень сохраняем:
+        // иначе после команды на экране остаётся ряд из 'W'.
+        let saved = self.cells.clone();
+        let saved_cursor = (self.cursor_col, self.cursor_row);
+        let saved_painted = self.painted_max;
+
         // Начинаем с чистой строки, чтобы не упираться в автоперенос.
         self.cursor_col = 0;
         self.cursor_row = 0;
@@ -1314,6 +1332,14 @@ impl Console {
         unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
         let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
         let us = crate::timer::uptime_us().saturating_sub(us_start);
+
+        self.cells = saved;
+        self.painted_max = saved_painted;
+        self.cursor_col = saved_cursor.0;
+        self.cursor_row = saved_cursor.1;
+        self.pending = false;
+        self.redraw_from_cells();
+
         (cycles / chars as u64, us / chars as u64)
     }
 
@@ -1356,6 +1382,9 @@ impl Console {
         let blank = crate::display::color_to_native(self.bg_color, self.pixel_format);
         let blank_word = ((blank as u64) << 32) | blank as u64;
 
+        let saved_row: alloc::vec::Vec<TextCell> =
+            self.cells[0..self.cols].to_vec();
+
         // Готовим строку 0 с нужным числом непробельных ячеек.
         let base = 0usize;
         for col in 0..self.cols {
@@ -1371,9 +1400,7 @@ impl Console {
         let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
 
         // Возвращаем строку как была.
-        self.cells[base..base + self.cols]
-            .iter_mut()
-            .for_each(|c| *c = TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color });
+        self.cells[base..base + self.cols].copy_from_slice(&saved_row);
 
         cycles / ITERS as u64
     }

@@ -127,6 +127,7 @@ impl LineEditor {
                             }
                             self.len -= 1;
                             self.cursor -= 1;
+                            self.resync_origin(console);
                             self.redraw_line(console);
                         }
                     }
@@ -165,6 +166,7 @@ impl LineEditor {
                         self.tab_complete(console);
                     }
                     Key::Char(ch) => {
+                        self.resync_origin(console);
                         if ch != '\x01' && ch != '\x05' && ch != '\x0B'
                             && ch != '\x0C' && ch != '\x15' && ch != '\x1A'
                             && ch != '\x03'
@@ -281,6 +283,43 @@ impl LineEditor {
     /// Опирается на `screen_len`/`screen_cursor` — то, что реально на экране.
     /// Иначе после загрузки истории новый `len` больше старого, и backspace
     /// уезжает в prompt — ровно та проблема, из-за которой пропадал `vibra:/>`.
+    /// Убедиться, что экран актуален и позиция начала ввода ещё верна.
+    ///
+    /// После большого вывода отложенная перерисовка сдвигает экран, и
+    /// сохранённые координаты приглашения устаревают: стирание начинает
+    /// бить в другое место, оставляя в строке ввода обрывки предыдущего
+    /// текста. Здесь мы догоняем экран и при необходимости пере-закрепляем
+    /// начало ввода на текущую позицию курсора.
+    fn resync_origin(&mut self, console: &mut Console) {
+        console.flush_if_due(false);
+        let (col, row) = console.cursor_position();
+
+        // Курсор редактора всегда лежит на строке ввода; если он оказался
+        // выше или левее сохранённого начала, значит экран сдвинулся.
+        let expected_row = self.input_row;
+        let in_input_area = row == expected_row
+            || (row == expected_row + 1 && col < self.input_col);
+        if !in_input_area || col < self.input_col {
+            // Пере-закрепляем: считаем, что ввод начинается там, где сейчас
+            // стоит курсор минус уже набранный текст.
+            let consumed = self.screen_len;
+            let total = consumed as isize;
+            let cols = console.fb_cols().max(1) as isize;
+            let mut new_col = col as isize - total;
+            let mut new_row = row;
+            while new_col < 0 {
+                if new_row == 0 {
+                    new_col = 0;
+                    break;
+                }
+                new_row -= 1;
+                new_col += cols;
+            }
+            self.input_col = new_col as usize;
+            self.input_row = new_row;
+        }
+    }
+
     fn redraw_line(&mut self, console: &mut Console) {
         // Стираем всё, что было напечатано после приглашения (включая
         // переносы строк), и возвращаемся в начало ввода.

@@ -378,6 +378,13 @@ pub fn flush_all_files() {
 /// перезаписывал до 256 КиБ boot-лога и 64 КиБ shell-лога на каждую
 /// команду, что на реальном железе добавляло заметную задержку.
 pub fn refresh_files() {
+    // Журнал shell пишется целиком после каждой команды: он небольшой
+    // (64 КиБ кольцо), а порог в 16 КиБ означал, что `cat` показывал
+    // устаревшее содержимое.
+    if session_active() {
+        flush_session_to_file("/var/log/shell.log");
+        RAMFS_SHELL_WRITTEN.store(session_total(), Ordering::Relaxed);
+    }
     refresh_ramfs_logs(false);
 }
 
