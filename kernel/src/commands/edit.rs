@@ -346,10 +346,17 @@ impl Editor {
             console.print_colored(&self.status, COLOR_DARK_GRAY);
         }
 
-        // Курсор — в текстовой области.
+        // Курсор — в текстовой области. Раньше здесь только выставлялась
+        // позиция, но никто не рисовал подчёркивание: в редакторе не было
+        // видно, где находится точка вставки.
         let screen_row = line.saturating_sub(self.top);
         let screen_col = col.saturating_sub(self.left).min(cols.saturating_sub(1));
         console.set_cursor_position(screen_col, screen_row);
+        // draw() начинается с clear(), поэтому старый курсор уже затёрт:
+        // достаточно нарисовать новый. Блочный, а не подчёркивание: под
+        // символом точка вставки была не видна.
+        console.reset_cursor_blink();
+        console.draw_block_cursor();
     }
 
     /// Основной цикл. Возвращает `true`, если файл сохранён при выходе.
@@ -361,6 +368,7 @@ impl Editor {
         self.draw(console);
         loop {
             let Some(key) = crate::serial::poll_key().or_else(keyboard::poll_key) else {
+                console.update_cursor_blink();
                 core::hint::spin_loop();
                 continue;
             };

@@ -69,6 +69,8 @@ impl LineEditor {
         let (col, row) = console.cursor_position();
         self.input_col = col;
         self.input_row = row;
+        // Новая сессия ввода: состояние курсора начинается с чистого листа.
+        console.reset_cursor_blink();
         let mut last_heartbeat_ms = crate::timer::uptime_ms();
         let mut last_log_flush_ms = last_heartbeat_ms;
         let mut last_hotplug_ms = last_heartbeat_ms;
@@ -134,12 +136,14 @@ impl LineEditor {
                     Key::Left => {
                         if self.cursor > 0 {
                             self.cursor -= 1;
+                            self.resync_origin(console);
                             self.redraw_line(console);
                         }
                     }
                     Key::Right => {
                         if self.cursor < self.len {
                             self.cursor += 1;
+                            self.resync_origin(console);
                             self.redraw_line(console);
                         }
                     }
@@ -291,7 +295,9 @@ impl LineEditor {
     /// текста. Здесь мы догоняем экран и при необходимости пере-закрепляем
     /// начало ввода на текущую позицию курсора.
     fn resync_origin(&mut self, console: &mut Console) {
-        console.flush_if_due(false);
+        // Именно принудительно: троттлинг в 40 мс оставлял экран на строку
+        // позади, и все вычисления ниже шли по устаревшим координатам.
+        console.flush_if_due(true);
         let (col, row) = console.cursor_position();
 
         // Курсор редактора всегда лежит на строке ввода; если он оказался
@@ -334,6 +340,10 @@ impl LineEditor {
         let row = self.input_row + cells / console.fb_cols().max(1);
         let col = cells % console.fb_cols().max(1);
         console.set_cursor_position(col, row);
+
+        // Курсор рисуем сразу: иначе он появляется только по таймеру
+        // мигания, и между нажатиями его не видно.
+        console.draw_cursor();
 
         self.screen_len = self.len;
         self.screen_cursor = self.cursor;

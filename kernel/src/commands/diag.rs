@@ -180,8 +180,11 @@ fn diag_fb(console: &mut Console) {
     let slept_us = console_uptime_us().saturating_sub(t0);
 
     let screen_write = console.bench_screen_write(3);
+    // Прокрутка: сдвиг сетки (scratch, без побочных эффектов) и полная
+    // перерисовка из тени (её и делает scroll() на медленном фреймбуфере).
     let (scroll_cycles, _) = console.bench_scroll(40);
-    let (char_cycles, _) = console.bench_print_chars(200);
+    let (repaint_cycles, _) = console.bench_full_repaint(2);
+    let char_cycles = console.bench_char_render(400);
     let staging = console.staging_bytes();
 
     console.print("  clock 20ms=");
@@ -197,15 +200,19 @@ fn diag_fb(console: &mut Console) {
     // прокрутка строки и один символ.
     console.print("  screen=");
     console.print_num((screen_write / 1000) as usize);
-    console.print("k  scroll=");
+    console.print("k  repaint=");
+    console.print_num((repaint_cycles / 1000) as usize);
+    console.print("k  shift=");
     console.print_num((scroll_cycles / 1000) as usize);
     console.print("k  char=");
     console.print_num(char_cycles as usize);
     console.print(" cycles\n");
 
-    // Вердикт: во сколько прокруток экрана обходится одна строка вывода.
-    if screen_write > 0 {
-        let ratio = scroll_cycles / screen_write.max(1);
+    // Вердикт: сколько полных перерисовок экрана приходится на строку.
+    // На медленном фреймбуфере scroll() перерисовывает экран, поэтому
+    // сравниваем с ценой одной перерисовки.
+    if repaint_cycles > 0 {
+        let ratio = repaint_cycles / screen_write.max(1);
         console.print("  scroll/screen = ");
         console.print_num(ratio as usize);
         console.print("x -> ");

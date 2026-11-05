@@ -477,6 +477,21 @@ pub struct Console {
     scale_y: u32,
     // Мигающий курсор
     cursor_blink_state: bool,
+    /// Курсор действительно нарисован в фреймбуфере прямо сейчас.
+    ///
+    /// `cursor_blink_state` — это фаза мигания, а не факт наличия пикселей.
+    /// После `clear`, прокрутки или полной перерисовки пиксели курсора
+    /// исчезают, а фаза остаётся — из-за этого подчёркивание то залипало, то
+    /// стиралось в чужой ячейке. Все пути записи пикселей сбрасывают этот
+    /// флаг, а `undraw_cursor` восстанавливает ячейку из тени.
+    cursor_painted: bool,
+    /// Ячейка, в которой реально нарисовано подчёркивание.
+    ///
+    /// Стирать нужно именно её, а не текущую позицию курсора: между
+    /// `draw_cursor` и `undraw_cursor` курсор успевает сдвинуться, и старое
+    /// подчёркивание оставалось на экране (в строке ввода появлялось
+    /// несколько курсоров).
+    cursor_painted_at: (usize, usize),
     /// Время последнего переключения курсора, мс монотонных часов.
     last_blink_ms: u64,
     // RAM-тень текстовой сетки (для быстрой прокрутки без чтения WC-памяти).
@@ -632,6 +647,8 @@ impl Console {
             scale_x: 0,
             scale_y: 0,
             cursor_blink_state: true,
+            cursor_painted: false,
+            cursor_painted_at: (0, 0),
             last_blink_ms: 0,
             cells: Vec::new(),
             staging: Vec::new(),
@@ -695,6 +712,8 @@ impl Console {
             scale_x: 0,
             scale_y: 0,
             cursor_blink_state: true,
+            cursor_painted: false,
+            cursor_painted_at: (0, 0),
             last_blink_ms: 0,
             cells: Vec::new(),
             staging: Vec::new(),
@@ -805,6 +824,8 @@ impl Console {
         self.cursor_col = 0;
         self.cursor_row = 0;
         self.painted_max = 0;
+        // Курсор залит вместе с экраном.
+        self.cursor_painted = false;
         // Экран только что залит целиком: отложенная перерисовка не нужна.
         // Без этого флага `draw_char_at` продолжал считать экран «отставшим»
         // и не рисовал символы — полноэкранные программы (редактор)
@@ -814,6 +835,15 @@ impl Console {
 
     /// Рисует один символ в позиции (col, row)
     pub fn draw_char_at(&mut self, ch: char, col: usize, row: usize, fg: u32, bg: u32) {
+        // Если в эту ячейку нарисовано подчёркивание курсора, сначала вернём
+        // её содержимое: иначе «ячейка не изменилась» ниже отменит запись, и
+        // подчёркивание останется в фреймбуфере навсегда. Сравнивать нужно с
+        // той ячейкой, где курсор РЕАЛЬНО нарисован, а не с текущей позицией:
+        // `clear_from` двигает позицию до того, как стирает.
+        if self.cursor_painted && self.cursor_painted_at == (col, row) {
+            self.undraw_cursor();
+        }
+
         if col >= self.cols || row >= self.rows {
             return;
         }
@@ -1056,6 +1086,8 @@ impl Console {
             for cell in &mut self.cells[last_row..] {
                 *cell = blank;
             }
+            // Содержимое уехало вверх, вместе с ним и пиксели курсора.
+            self.cursor_painted = false;
             self.pending = true;
             self.flush_if_due(false);
             self.cursor_row = self.rows - 1;
@@ -1065,6 +1097,11 @@ impl Console {
         // RAM-фреймбуфер (QEMU, часть VM): memmove дешевле — одна операция на
         // пиксель вместо сборки глифов. Здесь же оказываемся, когда тени нет
         // (`cells_valid == false`): тогда это единственный корректный путь.
+        //
+        // memmove сдвигает и пиксели курсора, поэтому флаг снимаем: иначе
+        // `undraw_cursor` потом «восстанавливал» бы ячейку там, где курсора
+        // уже нет.
+        self.cursor_painted = false;
         let lines_to_move = FONT_HEIGHT;
         let shift_pixels = lines_to_move * self.pitch;
 
@@ -1251,96 +1288,86 @@ impl Console {
         }
     }
 
-    /// Сколько стоит напечатать `lines` строк обычным путём (`put_char`).
+    /// Сколько стоит сдвинуть текстовую сетку на `lines` строк.
     ///
-    /// Это сквозной замер прокрутки: после заполнения экрана каждая строка
-    /// вызывает `scroll()`, то есть ровно тот путь, который тормозил на
-    /// ноутбуке. Возвращает `(cycles, us)` на строку.
+    /// Работает на **отдельной копии** сетки и не трогает ни живую тень, ни
+    /// фреймбуфер. Раньше здесь заполнялась настоящая `cells` и вызывался
+    /// `scroll()`, который на медленном фреймбуфере перерисовывал экран —
+    /// отсюда и заливка экрана символами `x` после `diag fb`.
     pub fn bench_scroll(&mut self, lines: usize) -> (u64, u64) {
         if lines == 0 || self.cols == 0 || self.rows == 0 {
             return (0, 0);
         }
 
-        // Замер меняет тень, поэтому сохраняем её: иначе отложенная
-        // перерисовка выведет на экран остатки замерного текста.
-        let saved = self.cells.clone();
-        let saved_cursor = (self.cursor_col, self.cursor_row);
-        let saved_painted = self.painted_max;
-
-        // Заполняем тень «как после `ls -l`» — по строке текста на каждую
-        // строку экрана, — но ничего не печатаем: раньше здесь выводились
-        // строки из '7', и команда заливала экран, закрывая свой же вывод.
         let blank = TextCell { ch: b' ', fg: self.fg_color, bg: self.bg_color };
         let cell = TextCell { ch: b'x', fg: self.fg_color, bg: self.bg_color };
+        let mut scratch = alloc::vec![cell; self.cols * self.rows];
         for row in 0..self.rows {
-            let base = row * self.cols;
-            for col in 0..self.cols {
-                self.cells[base + col] = if col + 1 < self.cols { cell } else { blank };
-            }
+            scratch[row * self.cols + self.cols - 1] = blank;
         }
 
+        let columns = self.cols;
+        let rows = self.rows;
         let us_start = crate::timer::uptime_us();
         let start = unsafe { core::arch::x86_64::_rdtsc() };
         for _ in 0..lines {
-            self.scroll();
+            scratch.copy_within(columns.., 0);
+            let last = (rows - 1) * columns;
+            for slot in &mut scratch[last..] {
+                *slot = blank;
+            }
         }
-        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
         let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
         let us = crate::timer::uptime_us().saturating_sub(us_start);
-
-        // Возвращаем экран как было: замер прокручивал настоящую тень, и без
-        // восстановления содержимое экрана уезжало вверх — именно это
-        // выглядело как «diag fb заливает экран».
-        self.cells = saved;
-        self.painted_max = saved_painted;
-        self.cursor_col = saved_cursor.0;
-        self.cursor_row = saved_cursor.1;
-        self.pending = false;
-        self.redraw_from_cells();
 
         (cycles / lines as u64, us / lines as u64)
     }
 
-    /// Стоимость вывода `chars` символов в одну строку (без прокрутки).
+    /// Стоимость отрисовки одного символа в staging (без записи в экран).
     ///
-    /// Отдельно от `bench_scroll`: позволяет понять, что дороже — отрисовка
-    /// символа или прокрутка. На реальном железе это разные пути: символ
-    /// пишется 64 отдельными volatile-записями, а прокрутка — широкими
-    /// копиями из staging.
-    pub fn bench_print_chars(&mut self, chars: usize) -> (u64, u64) {
-        if chars == 0 || self.cols == 0 {
+    /// Ровно то, что происходит на каждый символ вывода. Ничего не меняет:
+    /// пишет в buffer строки, живая тень и фреймбуфер не трогаются.
+    pub fn bench_char_render(&mut self, chars: u32) -> u64 {
+        let words_per_row = self.width / 2;
+        if chars == 0 || words_per_row == 0 || self.staging.len() < FONT_HEIGHT * words_per_row {
+            return 0;
+        }
+        let fg = crate::display::color_to_native(self.fg_color, self.pixel_format);
+        let bg = crate::display::color_to_native(self.bg_color, self.pixel_format);
+        let glyph = &FONT_DATA[b'W' as usize];
+
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        let base = self.staging.as_mut_ptr();
+        for _ in 0..chars {
+            for dy in 0..FONT_HEIGHT {
+                let words = expand_line(glyph[dy], fg, bg);
+                unsafe {
+                    let dst = base.add(dy * words_per_row);
+                    for k in 0..4.min(words_per_row) {
+                        core::ptr::write(dst.add(k), words[k]);
+                    }
+                }
+            }
+        }
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start) / chars as u64
+    }
+
+    /// Стоимость одного полного прохода перерисовки из тени: ровно то, что
+    /// делает `scroll()` на медленном фреймбуфере.
+    pub fn bench_full_repaint(&mut self, iterations: u32) -> (u64, u64) {
+        if iterations == 0 || self.cells_valid.get() == false {
             return (0, 0);
         }
-        // Замер рисует символы в реальные ячейки, поэтому тень сохраняем:
-        // иначе после команды на экране остаётся ряд из 'W'.
-        let saved = self.cells.clone();
-        let saved_cursor = (self.cursor_col, self.cursor_row);
-        let saved_painted = self.painted_max;
-
-        // Начинаем с чистой строки, чтобы не упираться в автоперенос.
-        self.cursor_col = 0;
-        self.cursor_row = 0;
-        let ch = 'W';
-
         let us_start = crate::timer::uptime_us();
         let start = unsafe { core::arch::x86_64::_rdtsc() };
-        for i in 0..chars {
-            let col = i % self.cols;
-            let row = (i / self.cols) % self.rows;
-            self.draw_char_at(ch, col, row, self.fg_color, self.bg_color);
+        for _ in 0..iterations {
+            self.redraw_from_cells();
         }
         unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
         let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
         let us = crate::timer::uptime_us().saturating_sub(us_start);
-
-        self.cells = saved;
-        self.painted_max = saved_painted;
-        self.cursor_col = saved_cursor.0;
-        self.cursor_row = saved_cursor.1;
-        self.pending = false;
-        self.redraw_from_cells();
-
-        (cycles / chars as u64, us / chars as u64)
+        (cycles / iterations as u64, us / iterations as u64)
     }
 
     /// Стоимость записи всего экрана из `staging` во фреймбуфер, в циклах.
@@ -1365,7 +1392,18 @@ impl Console {
             }
         }
         unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
-        unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start) / iterations as u64
+        let cycles = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start) / iterations as u64;
+
+        // Замер затирает весь экран строкой из staging. Восстанавливаем его
+        // целиком: без этого ниже `painted_max` оставались чужие пиксели, и
+        // `draw_char_at` считал пробелы уже нарисованными — отсюда «x» вместо
+        // пробелов в выводе команды.
+        self.cursor_painted = false;
+        self.pending = false;
+        self.painted_max = self.rows.saturating_sub(1);
+        self.redraw_from_cells();
+
+        cycles
     }
 
     /// Стоимость сборки строки при заданной плотности текста.
@@ -1629,6 +1667,9 @@ impl Console {
             }
         }
 
+        // Перерисовали из тени — пикселей курсора на экране больше нет.
+        self.cursor_painted = false;
+
         // WC-записи завершаются асинхронно; барьер делает результат видимым
         // до возврата в вызывающий код (и заодно корректно заканчивает замер).
         unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
@@ -1640,7 +1681,12 @@ impl Console {
     }
 
     /// Рисует блочный курсор в текущей позиции (инвертирует фон)
-    pub fn draw_cursor(&self) {
+    pub fn draw_cursor(&mut self) {
+        // Сначала убрать предыдущий курсор, если он нарисован в другой ячейке:
+        // иначе на экране остаются два подчёркивания.
+        if self.cursor_painted {
+            self.undraw_cursor();
+        }
         if self.cursor_col >= self.cols || self.cursor_row >= self.rows {
             return;
         }
@@ -1661,29 +1707,37 @@ impl Console {
                 write_glyph_row(row_ptr, &words, row_len);
             }
         }
+        self.cursor_painted = true;
+        self.cursor_painted_at = (self.cursor_col, self.cursor_row);
     }
 
-    /// Удаляет underline курсор (рисует bg цвет поверх линии)
-    pub fn undraw_cursor(&self) {
-        if self.cursor_col >= self.cols || self.cursor_row >= self.rows {
+    /// Убирает подчёркивание, восстанавливая ячейку из текстовой тени.
+    ///
+    /// Раньше нижние две пиксельные строки заливались фоном. Если курсор
+    /// стоял на символе, у глифа съедался низ (у `g`, `p`, `y`, `j`), а
+    /// `draw_char_at` не перерисовывал ячейку, потому что тень считала её
+    /// целой — дефект оставался навсегда.
+    pub fn undraw_cursor(&mut self) {
+        if !self.cursor_painted {
             return;
         }
-        let x = self.cursor_col * FONT_WIDTH;
-        let y = self.cursor_row * FONT_HEIGHT;
-        let bg = crate::display::color_to_native(self.bg_color, self.pixel_format);
-        // Стираем 2 нижних строки — тоже пакетно.
-        let words = expand_line(0xFF, bg, bg);
-        let row_len = FONT_WIDTH.min(self.width.saturating_sub(x));
-        for dy in [FONT_HEIGHT - 1, FONT_HEIGHT - 2] {
-            let py = y + dy;
-            if py >= self.height {
-                continue;
-            }
-            unsafe {
-                let row_ptr = self.fb_addr.add(py * self.pitch + x);
-                write_glyph_row(row_ptr, &words, row_len);
-            }
+        let (col, row) = self.cursor_painted_at;
+        self.cursor_painted = false;
+        if col >= self.cols || row >= self.rows {
+            return;
         }
+        // Восстанавливаем ячейку целиком из тени: так возвращается и символ,
+        // который был под курсором.
+        let index = row * self.cols + col;
+        let cell = self.cells.get(index).copied().unwrap_or(TextCell {
+            ch: b' ',
+            fg: self.fg_color,
+            bg: self.bg_color,
+        });
+        // Пишем напрямую: `draw_char_at` счёл бы ячейку неизменной и ничего
+        // не сделал.
+        self.draw_cell_pixels(cell, col, row);
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
     }
 
     /// Обновление мигания курсора — вызывать периодически.
@@ -1693,6 +1747,11 @@ impl Console {
     /// мигал никогда. Теперь используется монотонное время в миллисекундах.
     pub fn update_cursor_blink(&mut self) {
         const BLINK_MS: u64 = 500;
+        // Экран отстал от тени: рисовать подчёркивание сейчас бессмысленно,
+        // ближайшая перерисовка его всё равно затрёт.
+        if self.pending {
+            return;
+        }
         let now = crate::timer::uptime_ms();
         // Первый вызов: рисуем курсор сразу, не ждём полсекунды.
         if self.last_blink_ms == 0 && now > 0 {
@@ -1702,13 +1761,62 @@ impl Console {
         }
         if now.saturating_sub(self.last_blink_ms) >= BLINK_MS {
             self.last_blink_ms = now;
-            self.cursor_blink_state = !self.cursor_blink_state;
-            if self.cursor_blink_state {
-                self.draw_cursor();
-            } else {
+            // Состояние берём по факту: нарисован ли курсор в фреймбуфере.
+            // Раньше переключалась отдельная «фаза», которая расходилась с
+            // пикселями после каждой очистки экрана — отсюда залипшее
+            // подчёркивание в строке ввода.
+            if self.cursor_painted {
                 self.undraw_cursor();
+            } else {
+                self.draw_cursor();
+            }
+            self.cursor_blink_state = self.cursor_painted;
+        }
+    }
+
+    /// Нарисовать блочный курсор: ячейка рисуется с инвертированными цветами.
+    ///
+    /// Подчёркивание в редакторе почти не видно (под `[`, `_`, пробелом его
+    /// не отличить от обычного символа). Блок виден всегда, поэтому
+    /// полноэкранные программы используют именно его.
+    pub fn draw_block_cursor(&mut self) {
+        let (col, row) = (self.cursor_col, self.cursor_row);
+        if col >= self.cols || row >= self.rows {
+            return;
+        }
+        let index = row * self.cols + col;
+        let Some(cell) = self.cells.get(index).copied() else {
+            return;
+        };
+        // Инверсия: символ рисуется цветом фона на цвете символа.
+        self.draw_cell_pixels(cell, col, row);
+        let x = col * FONT_WIDTH;
+        let y = row * FONT_HEIGHT;
+        let glyph = &FONT_DATA[cell.ch as usize];
+        let fg = crate::display::color_to_native(cell.bg, self.pixel_format);
+        let bg = crate::display::color_to_native(cell.fg, self.pixel_format);
+        for dy in 0..FONT_HEIGHT {
+            let py = y + dy;
+            if py >= self.height {
+                break;
+            }
+            let words = expand_line(glyph[dy], fg, bg);
+            let row_len = FONT_WIDTH.min(self.width.saturating_sub(x));
+            unsafe {
+                let row_ptr = self.fb_addr.add(py * self.pitch + x);
+                write_glyph_row(row_ptr, &words, row_len);
             }
         }
+        self.cursor_painted = false;
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+    }
+
+    /// Сбросить состояние курсора: следующее `update_cursor_blink` нарисует
+    /// его сразу. Вызывается при входе в новую «сессию» ввода.
+    pub fn reset_cursor_blink(&mut self) {
+        self.cursor_painted = false;
+        self.cursor_blink_state = false;
+        self.last_blink_ms = 0;
     }
 
     /// Рисует любой CP437 символ (0-255) по коду байта
