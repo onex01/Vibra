@@ -66,11 +66,19 @@ impl LineEditor {
         self.screen_len = 0;
         self.screen_cursor = 0;
         self.prompt_len_cells = prompt_len;
+        // Запоминаем позицию НАЧАЛА ПРИГЛАШЕНИЯ (курсор уже сдвинут за него):
+        // от неё считаются и стирание, и позиция курсора ввода.
         let (col, row) = console.cursor_position();
-        self.input_col = col;
-        self.input_row = row;
+        let cols = console.fb_cols().max(1);
+        let start = col.saturating_sub(self.prompt_len_cells);
+        self.input_row = row - (self.prompt_len_cells.saturating_sub(col)) / cols;
+        self.input_col = start % cols;
         // Новая сессия ввода: состояние курсора начинается с чистого листа.
         console.reset_cursor_blink();
+        // Стираем остаток строки после приглашения: в ней мог остаться текст
+        // предыдущей команды, если та закончила вывод без перевода строки.
+        // Курсор уже стоит сразу после приглашения — `col` и есть начало ввода.
+        console.clear_range(col, row, console.fb_cols().saturating_sub(1), row);
         let mut last_heartbeat_ms = crate::timer::uptime_ms();
         let mut last_log_flush_ms = last_heartbeat_ms;
         let mut last_hotplug_ms = last_heartbeat_ms;
@@ -143,6 +151,82 @@ impl LineEditor {
                     Key::Right => {
                         if self.cursor < self.len {
                             self.cursor += 1;
+                            self.resync_origin(console);
+                            self.redraw_line(console);
+                        }
+                    }
+                    Key::Home => {
+                        if self.cursor != 0 {
+                            self.cursor = 0;
+                            self.resync_origin(console);
+                            self.redraw_line(console);
+                        }
+                    }
+                    Key::End => {
+                        if self.cursor != self.len {
+                            self.cursor = self.len;
+                            self.resync_origin(console);
+                            self.redraw_line(console);
+                        }
+                    }
+                    // Delete — удалить символ под курсором (как в любом
+                    // редакторе строки). Раньше клавиша игнорировалась.
+                    Key::Delete => {
+                        if self.cursor < self.len {
+                            for i in self.cursor + 1..self.len {
+                                self.buffer[i - 1] = self.buffer[i];
+                            }
+                            self.len -= 1;
+                            self.resync_origin(console);
+                            self.redraw_line(console);
+                        }
+                    }
+                    // Insert в строке ввода не нужен: режим вставки всегда.
+                    Key::Insert => {}
+                    // Ctrl+влево/вправо — переход по словам.
+                    Key::WordLeft => {
+                        while self.cursor > 0
+                            && self.buffer[self.cursor - 1] == b' '
+                        {
+                            self.cursor -= 1;
+                        }
+                        while self.cursor > 0
+                            && self.buffer[self.cursor - 1] != b' '
+                        {
+                            self.cursor -= 1;
+                        }
+                        self.resync_origin(console);
+                        self.redraw_line(console);
+                    }
+                    Key::WordRight => {
+                        while self.cursor < self.len && self.buffer[self.cursor] != b' ' {
+                            self.cursor += 1;
+                        }
+                        while self.cursor < self.len && self.buffer[self.cursor] == b' ' {
+                            self.cursor += 1;
+                        }
+                        self.resync_origin(console);
+                        self.redraw_line(console);
+                    }
+                    // PageUp/PageDown листают историю: в строке ввода
+                    // «страницы» — это записи истории.
+                    Key::PageUp => {
+                        if self.history_count > 0 && self.history_idx > 0 {
+                            self.history_idx -= 1;
+                            self.load_from_history(self.history_idx);
+                            self.resync_origin(console);
+                            self.redraw_line(console);
+                        }
+                    }
+                    Key::PageDown => {
+                        if self.history_idx < self.history_count {
+                            self.history_idx += 1;
+                            if self.history_idx == self.history_count {
+                                self.len = 0;
+                                self.cursor = 0;
+                            } else {
+                                self.load_from_history(self.history_idx);
+                            }
                             self.resync_origin(console);
                             self.redraw_line(console);
                         }
@@ -327,18 +411,34 @@ impl LineEditor {
     }
 
     fn redraw_line(&mut self, console: &mut Console) {
-        // Стираем всё, что было напечатано после приглашения (включая
-        // переносы строк), и возвращаемся в начало ввода.
-        console.clear_from(self.input_col, self.input_row);
+        // Стираем ровно то, что было напечатано: от начала ввода до конца
+        // прошлого текста. Раньше конец брался из текущей позиции курсора, а
+        // она уже сдвинута — стиралось меньше, и в строке оставались обрывки.
+        // Начало ввода — это КОНЕЦ приглашения: стирать от `input_col`
+        // нельзя, там ещё стоит сам prompt, и первая буква команды съедалась.
+        let cols = console.fb_cols().max(1);
+        let begin = self.input_col + self.prompt_len_cells;
+        let begin_row = self.input_row + begin / cols;
+        let begin_col = begin % cols;
+        let end = begin + self.screen_len.max(self.len);
+        console.clear_range(
+            begin_col,
+            begin_row,
+            end % cols,
+            begin_row + end / cols,
+        );
 
         if let Ok(text) = core::str::from_utf8(&self.buffer[..self.len]) {
             console.print(text);
         }
 
         // Ставим курсор туда, где он должен быть по логике редактора.
-        let cells = self.prompt_len_cells + self.cursor;
-        let row = self.input_row + cells / console.fb_cols().max(1);
-        let col = cells % console.fb_cols().max(1);
+        // Считаем от реального начала ввода (`input_col`), а не от длины
+        // приглашения: если приглашение переносилось, это разные вещи.
+        let cols = console.fb_cols().max(1);
+        let cells = self.input_col + self.prompt_len_cells + self.cursor;
+        let row = self.input_row + cells / cols;
+        let col = cells % cols;
         console.set_cursor_position(col, row);
 
         // Курсор рисуем сразу: иначе он появляется только по таймеру

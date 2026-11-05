@@ -251,6 +251,48 @@ impl Editor {
         self.place_cursor(&starts, line, len);
     }
 
+    /// Сместиться на `delta` строк, сохранив колонку.
+    fn move_lines(&mut self, delta: isize) {
+        let starts = self.line_starts();
+        let line = self.cursor_line(&starts);
+        let col = self.cursor_col(&starts, line);
+        let target = (line as isize + delta).clamp(0, starts.len().saturating_sub(1) as isize);
+        self.place_cursor(&starts, target as usize, col);
+    }
+
+    /// Ближайшая граница слова слева от курсора в текущей строке.
+    fn word_left(&mut self) {
+        let starts = self.line_starts();
+        let line = self.cursor_line(&starts);
+        let start = starts[line];
+        let mut col = self.cursor_col(&starts, line);
+        let text = &self.text[start..start + self.line_len(&starts, line)];
+        while col > 0 && !text[col - 1].is_ascii_alphanumeric() && text[col - 1] != b'_' {
+            col -= 1;
+        }
+        while col > 0 && (text[col - 1].is_ascii_alphanumeric() || text[col - 1] == b'_') {
+            col -= 1;
+        }
+        self.place_cursor(&starts, line, col);
+    }
+
+    /// Ближайшая граница слова справа от курсора.
+    fn word_right(&mut self) {
+        let starts = self.line_starts();
+        let line = self.cursor_line(&starts);
+        let start = starts[line];
+        let len = self.line_len(&starts, line);
+        let mut col = self.cursor_col(&starts, line);
+        let text = &self.text[start..start + len];
+        while col < len && (text[col].is_ascii_alphanumeric() || text[col] == b'_') {
+            col += 1;
+        }
+        while col < len && !text[col].is_ascii_alphanumeric() && text[col] != b'_' {
+            col += 1;
+        }
+        self.place_cursor(&starts, line, col);
+    }
+
     fn save(&mut self) {
         match fs::write_file(&self.path, &self.text) {
             Ok(()) => {
@@ -439,6 +481,23 @@ impl Editor {
                 }
                 Key::Up => self.move_up(),
                 Key::Down => self.move_down(),
+                Key::Home => self.move_home(),
+                Key::End => self.move_end(),
+                Key::WordLeft => self.word_left(),
+                Key::WordRight => self.word_right(),
+                // Insert/Delete: Insert вставлять нечего, Delete удаляет символ
+                // под курсором.
+                Key::Delete => self.delete_at(),
+                Key::Insert => {}
+                // Страницы: экран минус строка статуса.
+                Key::PageUp => {
+                    let rows = Self::text_rows(console) as isize;
+                    self.move_lines(-(rows.max(1)));
+                }
+                Key::PageDown => {
+                    let rows = Self::text_rows(console) as isize;
+                    self.move_lines(rows.max(1));
+                }
                 _ => redraw = false,
             }
 

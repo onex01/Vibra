@@ -46,6 +46,9 @@ static SERIAL_HEAD: AtomicU16 = AtomicU16::new(0);
 static SERIAL_TAIL: AtomicU16 = AtomicU16::new(0);
 #[cfg(feature = "serial-debug")]
 static SERIAL_ESCAPE_STATE: AtomicU8 = AtomicU8::new(0);
+/// Число в escape-последовательности вида `ESC [ 5 ~`.
+#[cfg(feature = "serial-debug")]
+static SERIAL_NUMBER: AtomicU16 = AtomicU16::new(0);
 
 #[inline]
 unsafe fn outb(port: u16, value: u8) {
@@ -296,10 +299,31 @@ fn decode_serial_byte(byte: u8) -> Option<crate::keyboard::Key> {
             b'B' => Some(Key::Down),
             b'C' => Some(Key::Right),
             b'D' => Some(Key::Left),
-            b'H' => Some(Key::Char('\x01')),
-            b'F' => Some(Key::Char('\x05')),
+            b'H' => Some(Key::Home),
+            b'F' => Some(Key::End),
+            // xterm: PgUp = ESC[5~, PgDn = ESC[6~, Del = ESC[3~, Ins = ESC[2~
+            b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' => {
+                SERIAL_ESCAPE_STATE.store(4, Ordering::Relaxed);
+                SERIAL_NUMBER.store((byte - b'0') as u16, Ordering::Relaxed);
+                None
+            }
             _ => None,
         },
+        // Пришла цифра после ESC[, ждём `~`.
+        4 => {
+            let number = SERIAL_NUMBER.load(Ordering::Relaxed);
+            SERIAL_ESCAPE_STATE.store(0, Ordering::Relaxed);
+            if byte != b'~' {
+                return None;
+            }
+            match number {
+                2 => Some(Key::Insert),
+                3 => Some(Key::Delete),
+                5 => Some(Key::PageUp),
+                6 => Some(Key::PageDown),
+                _ => None,
+            }
+        }
         _ if byte == 0x1B => {
             SERIAL_ESCAPE_STATE.store(1, Ordering::Relaxed);
             None

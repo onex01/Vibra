@@ -1088,6 +1088,12 @@ impl Console {
             }
             // Содержимое уехало вверх, вместе с ним и пиксели курсора.
             self.cursor_painted = false;
+            // Экран сдвинулся: сдвинулась и картинка на нём, поэтому
+            // перерисовывать нужно ВЕСЬ экран. Без этого нижняя строка
+            // оставалась со старым текстом (она ниже `last_used_row`, а
+            // `painted_max` её не покрывал) — потом поверх неё печаталось
+            // приглашение, и в строке ввода появлялись обрывки.
+            self.painted_max = self.rows.saturating_sub(1);
             self.pending = true;
             self.flush_if_due(false);
             self.cursor_row = self.rows - 1;
@@ -1102,6 +1108,7 @@ impl Console {
         // `undraw_cursor` потом «восстанавливал» бы ячейку там, где курсора
         // уже нет.
         self.cursor_painted = false;
+        self.painted_max = self.rows.saturating_sub(1);
         let lines_to_move = FONT_HEIGHT;
         let shift_pixels = lines_to_move * self.pitch;
 
@@ -1687,6 +1694,10 @@ impl Console {
         if self.cursor_painted {
             self.undraw_cursor();
         }
+        crate::serial::debugcon_println(format_args!(
+            "[CUR] draw col={} row={}",
+            self.cursor_col, self.cursor_row
+        ));
         if self.cursor_col >= self.cols || self.cursor_row >= self.rows {
             return;
         }
@@ -1921,6 +1932,29 @@ impl Console {
     /// Нужно редактору строки: перерисовка через `\x08` ломается на переносе
     /// строки (backspace не переходит на предыдущую строку), из-за чего в
     /// приглашении оставались обрывки текста.
+    /// Стереть область от `(col, row)` до `(end_col, end_row)` включительно.
+    ///
+    /// Границы задаются явно: раньше конец брался из текущей позиции курсора,
+    /// а она к моменту стирания уже сдвинута — в результате стиралось меньше,
+    /// чем было напечатано, и в строке ввода оставались обрывки.
+    pub fn clear_range(&mut self, col: usize, row: usize, end_col: usize, end_row: usize) {
+        self.set_cursor_position(col, row);
+        let mut c = col;
+        let mut r = row;
+        while r < end_row || (r == end_row && c <= end_col) {
+            self.draw_char_at(' ', c, r, self.fg_color, self.bg_color);
+            c += 1;
+            if c >= self.cols {
+                c = 0;
+                r += 1;
+            }
+            if r >= self.rows {
+                break;
+            }
+        }
+        self.set_cursor_position(col, row);
+    }
+
     pub fn clear_from(&mut self, col: usize, row: usize) {
         let (end_col, end_row) = (self.cursor_col, self.cursor_row);
         self.set_cursor_position(col, row);

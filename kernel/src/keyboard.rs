@@ -24,6 +24,21 @@ pub enum Key {
     Right,
     Up,
     Down,
+    /// Insert (E0 52).
+    Insert,
+    /// Delete (E0 53).
+    Delete,
+    /// Home (E0 47) / Ctrl+A в编辑ре — начало строки.
+    Home,
+    /// End (E0 4F).
+    End,
+    /// Page Up (E0 49).
+    PageUp,
+    /// Page Down (E0 51).
+    PageDown,
+    /// Ctrl+стрелка: переход по словам (в shell — по словам строки).
+    WordLeft,
+    WordRight,
     Unknown,
 }
 
@@ -159,10 +174,16 @@ impl KeyboardState {
                 return None;
             }
             return match code {
-                0x4B => Some(Key::Left),
-                0x4D => Some(Key::Right),
+                0x4B => Some(if self.ctrl { Key::WordLeft } else { Key::Left }),
+                0x4D => Some(if self.ctrl { Key::WordRight } else { Key::Right }),
                 0x48 => Some(Key::Up),
                 0x50 => Some(Key::Down),
+                0x47 => Some(Key::Home),
+                0x4F => Some(Key::End),
+                0x49 => Some(Key::PageUp),
+                0x51 => Some(Key::PageDown),
+                0x52 => Some(Key::Insert),
+                0x53 => Some(Key::Delete),
                 0x1C => Some(Key::Enter), // keypad Enter
                 _ => None,
             };
@@ -217,10 +238,16 @@ impl KeyboardState {
                 return None;
             }
             return match sc {
-                0x6B => Some(Key::Left),
-                0x74 => Some(Key::Right),
+                0x6B => Some(if self.ctrl { Key::WordLeft } else { Key::Left }),
+                0x74 => Some(if self.ctrl { Key::WordRight } else { Key::Right }),
                 0x75 => Some(Key::Up),
                 0x72 => Some(Key::Down),
+                0x6C => Some(Key::Home),
+                0x69 => Some(Key::End),
+                0x7D => Some(Key::PageUp),
+                0x7A => Some(Key::PageDown),
+                0x70 => Some(Key::Insert),
+                0x71 => Some(Key::Delete),
                 0x5A => Some(Key::Enter), // keypad Enter
                 _ => None,
             };
