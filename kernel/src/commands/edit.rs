@@ -54,6 +54,26 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     }
 
     let mut text = if exists { fs::read_file(name).unwrap_or_default() } else { Vec::new() };
+    // Файлы в этой системе пишутся с CRLF (boot.log, shell.log). В редакторе
+    // '\r' — управляющий символ, он не даёт перевода строки и рисуется как
+    // '·', из-за чего весь лог выглядел одной строкой. Приводим к '\n'.
+    if text.contains(&b'\r') {
+        let mut normalized = Vec::with_capacity(text.len());
+        let mut index = 0;
+        while index < text.len() {
+            if text[index] == b'\r' {
+                if index + 1 < text.len() && text[index + 1] == b'\n' {
+                    index += 1;
+                    continue;
+                }
+                normalized.push(b'\n');
+            } else {
+                normalized.push(text[index]);
+            }
+            index += 1;
+        }
+        text = normalized;
+    }
     if text.len() > MAX_FILE {
         console.print_colored(
             &format!("File is larger than {} KiB, opening the first part\n", MAX_FILE / 1024),
@@ -73,6 +93,11 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
     };
     editor.set_text(text);
     editor.run_loop(console);
+
+    // Полноэкранная программа обязана вернуть экран в нормальное состояние:
+    // иначе приглашение печатается в той же строке, где остался курсор, и
+    // накладывается на последний текст файла.
+    console.clear();
 
     CmdResult::Ok
 }
@@ -240,9 +265,17 @@ impl Editor {
 
     // ----- отрисовка -----
 
-    /// Высота области текста: последняя строка занята статусом.
+    /// Высота области текста.
+    ///
+    /// Резервируются две строки: последняя под статус и ещё одна, потому что
+    /// строка ровно во всю ширину экрана переносит курсор на следующую.
     fn text_rows(console: &Console) -> usize {
-        console.fb_rows().saturating_sub(1).max(1)
+        console.fb_rows().saturating_sub(2).max(1)
+    }
+
+    /// Строка статуса — последняя на экране.
+    fn status_row(console: &Console) -> usize {
+        console.fb_rows().saturating_sub(1)
     }
 
     fn draw(&mut self, console: &mut Console) {
@@ -276,6 +309,10 @@ impl Editor {
             let len = self.line_len(&starts, index);
             let from = self.left.min(len);
             let to = (self.left + cols).min(len);
+            // Каждая строка файла — отдельная строка экрана. Без явной
+            // установки курсора `print` продолжал печатать в той же строке,
+            // и весь файл слипался в одну простыню поверх самого себя.
+            console.set_cursor_position(0, offset);
             if let Ok(text) = core::str::from_utf8(&self.text[start + from..start + to]) {
                 // Заменяем управляющие символы: иначе они портят экран.
                 let mut cleaned = String::with_capacity(text.len());
@@ -286,8 +323,10 @@ impl Editor {
             }
         }
 
-        // Статус: имя, позиция, признак изменений, подсказка.
-        let status_row = console.fb_rows().saturating_sub(1);
+        // Статус: имя, позиция, признак изменений, подсказка. Отдельная
+        // строка внизу: текст занимает 0..rows-1, поэтому последняя строка
+        // файла не перекрывается статусом.
+        let status_row = Self::status_row(console);
         console.set_cursor_position(0, status_row);
         let marker = if self.modified { "*" } else { " " };
         let mut status = format!(

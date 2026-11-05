@@ -1,6 +1,6 @@
 // USB-инвентарь для `diag usb`.
 
-use crate::framebuffer::{Console, COLOR_YELLOW};
+use crate::framebuffer::{Console, COLOR_RED, COLOR_YELLOW};
 use alloc::format;
 
 /// Контроллеры, устройства, накопители и состояние приёмника boot-лога.
@@ -54,6 +54,40 @@ pub fn diag_usb(console: &mut Console) {
         console.print("  none\n");
     }
 
+    // Расширенные возможности: какие протоколы есть и что с legacy handoff.
+    // Без этого «0 connected» невозможно истолковать: непонятно, какие порты
+    // вообще USB3, а какие USB2, и не держит ли контроллер прошивка.
+    if let Some(caps) = crate::drivers::usb::xhci::extended_caps(0) {
+        console.print_colored("[xECP]\n", COLOR_YELLOW);
+        if caps.xecp_offset == 0 {
+            console.print("  none\n");
+        } else {
+            console.print(&format!(
+                "  offset {:#x}, legacy support {}, bios_owned {}, os_owned {}\n",
+                caps.xecp_offset,
+                caps.legacy_support,
+                caps.bios_owned,
+                caps.os_owned
+            ));
+            for (major, minor, from, count, name) in &caps.protocols {
+                console.print(&format!(
+                    "  {}.{} {} ports {}-{}\n",
+                    major,
+                    minor,
+                    name,
+                    from,
+                    from.saturating_add(count.saturating_sub(1))
+                ));
+            }
+            if caps.bios_owned {
+                console.print_colored(
+                    "  -> firmware still owns the controller: ports may read as empty\n",
+                    COLOR_RED,
+                );
+            }
+        }
+    }
+
     console.print_colored("[root ports]\n", COLOR_YELLOW);
     let ports = crate::drivers::usb::xhci::ports();
     if ports.is_empty() {
@@ -72,11 +106,12 @@ pub fn diag_usb(console: &mut Console) {
     }
     for port in &ports {
         console.print(&format!(
-            "  ctrl{} port{:<2} {} {} {} speed {} ({})",
+            "  ctrl{} port{:<2} {:#010x} {} {} {} speed {} ({})",
             port.controller,
             port.port,
-            if port.connected { "connected" } else { "empty" },
-            if port.enabled { "enabled" } else { "disabled" },
+            port.portsc,
+            if port.connected { "conn" } else { "empty" },
+            if port.enabled { "en" } else { "dis" },
             if port.powered { "powered" } else { "unpowered" },
             port.speed,
             crate::drivers::usb::xhci::speed_name(port.speed)

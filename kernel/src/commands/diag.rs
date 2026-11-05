@@ -132,188 +132,96 @@ fn diag_display(console: &mut Console) {
 /// команду: видно и режим памяти, и сколько микросекунд стоит один проход
 /// перерисовки (ровно то, что делает каждая прокрутка).
 fn diag_fb(console: &mut Console) {
-    use crate::framebuffer::COLOR_YELLOW;
+    use crate::framebuffer::{COLOR_GREEN, COLOR_RED, COLOR_YELLOW};
 
-    console.print_colored("[FRAMEBUFFER]\n", COLOR_YELLOW);
-    console.print("  size:      ");
+    // Вывод намеренно короткий: каждая строка — ещё одна прокрутка на
+    // реальном железе, а по прокрутке мы и меряем. Раньше команда печатала
+    // десятки строк и сама себя заливала.
+    let (pat_ok, mtrr_type, wc_pages, wc_already, wc_unmapped, leaf_flags) =
+        console.write_combining_state();
+
+    console.print_colored("[FB]\n", COLOR_YELLOW);
+    console.print("  geo ");
     console.print_num(console.fb_width());
     console.print("x");
     console.print_num(console.fb_height());
-    console.print("  pitch ");
+    console.print(" pitch ");
     console.print_num(console.fb_pitch());
-    console.print(" words, ");
+    console.print(", cells ");
     console.print_num(console.fb_cols());
     console.print("x");
     console.print_num(console.fb_rows());
-    console.print(" cells\n");
+    console.print("\n");
 
-    let (pat_ok, mtrr_type, wc_pages, wc_already, wc_unmapped, leaf_flags) =
-        console.write_combining_state();
-    console.print("  PAT:       ");
-    console.print(if pat_ok { "write-combining index programmed" } else { "not programmed" });
-    console.print("\n  MTRR:      ");
+    console.print("  PAT ");
+    console.print(if pat_ok { "WC" } else { "plain" });
+    console.print("  MTRR ");
     console.print(crate::memory::mtrr::type_name(mtrr_type));
-    if mtrr_type == 0 {
+    if crate::memory::mtrr::is_locked() {
+        console.print(" (locked)");
+    }
+    console.print("  pages ");
+    console.print_num(wc_pages + wc_already);
+    console.print("/");
+    console.print_num(wc_pages + wc_already + wc_unmapped);
+    console.print(", leaf ");
+    console.print_num((leaf_flags & 0xff) as usize);
+    console.print("\n");
+    if mtrr_type == 0 && !crate::memory::mtrr::is_locked() {
         console.print_colored(
-            "  -> UC overrides PAT: writes cannot be combined",
-            crate::framebuffer::COLOR_RED,
+            "  -> MTRR is UC: 'diag mtrr wc' may help\n",
+            COLOR_RED,
         );
     }
-    console.print("\n  WC:        changed ");
-    console.print_num(wc_pages);
-    console.print(", already ");
-    console.print_num(wc_already);
-    console.print(", unmapped ");
-    console.print_num(wc_unmapped);
-    console.print("  (leaf flags ");
-    console.print_num((leaf_flags & 0xff) as usize);
-    console.print(")\n");
-    if wc_pages + wc_already > 0 {
-        console.print("  -> writes are combined (WC)\n");
-    } else {
-        console.print("  -> WC NOT applied: each pixel is a separate transaction\n");
-    }
 
-    // Какие диапазоны MTRR действуют и что покрывает фреймбуфер.
-    console.print(&crate::memory::mtrr::report());
-
-    // Проверка самих часов: если 20 мс ожидания меряются как не 20, то и
-    // замер прокрутки ниже недостоверен.
+    // Часы: если 20 мс меряются не как 20, числам ниже верить нельзя.
     let t0 = console_uptime_us();
     crate::timer::sleep_ms(20);
     let slept_us = console_uptime_us().saturating_sub(t0);
-    console.print("  clock:     20 ms sleep measured as ");
-    console.print_num(slept_us as usize);
-    console.print(" us (");
-    console.print(crate::timer::current_source().name());
-    console.print(")\n");
 
-    if let Some(hz) = crate::timer::tsc_hz() {
-        console.print("  tsc:       ");
-        console.print_num((hz / 1_000_000) as usize);
-        console.print(" MHz\n");
-    }
-
-    // Нижняя граница: сколько стоит просто переписать весь экран.
     let screen_write = console.bench_screen_write(3);
-    console.print("  write screen: ");
-    console.print_num(screen_write as usize);
-    console.print(" cycles (");
-    console.print_num((screen_write / 1000) as usize);
-    console.print("k)\n");
+    let (scroll_cycles, _) = console.bench_scroll(40);
+    let (char_cycles, _) = console.bench_print_chars(200);
+    let staging = console.staging_bytes();
 
-    // Стоимость сборки строки при разной плотности текста.
-    let dense0 = console.bench_row_density(0);
-    let dense_half = console.bench_row_density(console.fb_cols() / 2);
-    let dense_full = console.bench_row_density(console.fb_cols());
-    console.print("  build row: empty ");
-    console.print_num(dense0 as usize);
-    console.print(", half ");
-    console.print_num(dense_half as usize);
-    console.print(", full ");
-    console.print_num(dense_full as usize);
+    console.print("  clock 20ms=");
+    console.print_num(slept_us as usize);
+    console.print("us  staging=");
+    console.print_num(staging);
+    if staging == 0 {
+        console.print_colored(" (SLOW PATH)", COLOR_RED);
+    }
+    console.print("\n");
+
+    // Ключевые числа в одну строку: сколько стоит запись всего экрана,
+    // прокрутка строки и один символ.
+    console.print("  screen=");
+    console.print_num((screen_write / 1000) as usize);
+    console.print("k  scroll=");
+    console.print_num((scroll_cycles / 1000) as usize);
+    console.print("k  char=");
+    console.print_num(char_cycles as usize);
     console.print(" cycles\n");
 
-    // Быстрый путь требует staging-буфера: без него каждая ячейка пишется
-    // по пикселю, и прокрутка стоит в разы дороже.
-    console.print("  staging:   ");
-    console.print_num(console.staging_bytes());
-    console.print(" bytes");
-    if console.staging_bytes() == 0 {
-        console.print_colored("  -> SLOW PATH (per-pixel writes)", crate::framebuffer::COLOR_RED);
-    } else {
-        console.print("  (fast path: one wide copy per pixel row)");
-    }
-    console.print("\n");
-
-    // Разбор по частям: сборка строки против её записи.
-    let (build_c, fb_copy_c, ram_copy_c) = console.bench_row_build_and_copy(200);
-    console.print("  build row: ");
-    console.print_num(build_c as usize);
-    console.print(" cycles, copy->fb ");
-    console.print_num(fb_copy_c as usize);
-    console.print(", copy->ram ");
-    console.print_num(ram_copy_c as usize);
-    console.print("\n");
-
-    // Вердикт по write-combining: сравниваем стоимость копии строки в RAM и
-    // во фреймбуфер. На RAM это ~1 цикл/байт; если во фреймбуфер выходит
-    // десятки циклов на байт — память осталась uncached, и PAT/MTRR не
-    // сработали (типичная причина «тормозит, когда экран заполнен»).
-    let (_fb_c, ram_c) = console.bench_row_copy(200);
-    let width_bytes = console.fb_width() * 4;
-    // Для вердикта берём запись всего экрана: она проходит все 4 МиБ и не
-    // может быть «схлопнута» повтором одной и той же строки.
-    let screen_bytes = (console.fb_width() * 4 * console.fb_height()) as u64;
-    if screen_bytes > 0 && screen_write > 0 {
-        let per_byte_x10 = screen_write * 10 / screen_bytes;
-        console.print("  WC verdict: ");
-        console.print_num((per_byte_x10 / 10) as usize);
-        console.print(".");
-        console.print_num((per_byte_x10 % 10) as usize);
-        console.print(" cycles/byte for a full-screen write (row copy in RAM ");
-        console.print_num((ram_c * 10 / width_bytes as u64 / 10) as usize);
-        console.print(")  -> ");
-        if per_byte_x10 <= 30 {
-            console.print_colored("cached/combined, OK\n", crate::framebuffer::COLOR_GREEN);
+    // Вердикт: во сколько прокруток экрана обходится одна строка вывода.
+    if screen_write > 0 {
+        let ratio = scroll_cycles / screen_write.max(1);
+        console.print("  scroll/screen = ");
+        console.print_num(ratio as usize);
+        console.print("x -> ");
+        if ratio <= 2 {
+            console.print_colored("OK\n", COLOR_GREEN);
         } else {
             console.print_colored(
-                "UNCACHED: framebuffer writes are not combined\n",
-                crate::framebuffer::COLOR_RED,
+                "each output line repaints the screen more than twice\n",
+                COLOR_RED,
             );
         }
     }
 
-    // Отдельно: одна строка в RAM против той же строки во фреймбуфер.
-    let (fb_c, ram_c) = console.bench_row_copy(200);
-    console.print("  row copy:  fb ");
-    console.print_num(fb_c as usize);
-    console.print(" cycles, ram ");
-    console.print_num(ram_c as usize);
-    console.print(" cycles  (ratio x");
-    console.print_num((fb_c / ram_c.max(1)) as usize);
-    console.print(")\n");
-
-    // Пустая тень: столько стоит прокрутка, когда экран почти пуст.
-    let (c_empty, us_empty) = console.bench_redraw(3);
-    console.print("  redraw (empty):  ");
-    console.print_num(us_empty as usize);
-    console.print(" us / ");
-    console.print_num(c_empty as usize);
-    console.print(" cycles\n");
-
-    // Замер заполненного экрана — без печати на экран: `bench_row_density`
-    // собирает строку в staging и ничего не выводит. Раньше здесь печатались
-    // строки из '7', и весь экран заливало мусором, закрывая вывод команды.
-    let (c_full, us_full) = console.bench_redraw(3);
-    console.print("  redraw (half full): ");
-    console.print_num(us_full as usize);
-    console.print(" us / ");
-    console.print_num(c_full as usize);
-    console.print(" cycles\n");
-
-    // Что дороже: отрисовка одного символа или прокрутка строки.
-    let (char_cycles, _) = console.bench_print_chars(400);
-    console.print("  draw char: ");
-    console.print_num(char_cycles as usize);
-    console.print(" cycles/char\n");
-
-    // Прокрутка: замер без вывода на экран (scroll() напрямую). Раньше здесь
-    // печатались строки, и экран заливало текстом.
-    let (scroll_cycles, scroll_us) = console.bench_scroll(60);
-    console.print("  scroll:    ");
-    console.print_num(scroll_us as usize);
-    console.print(" us / ");
-    console.print_num(scroll_cycles as usize);
-    console.print(" cycles per line\n");
-
-    if us_full > us_empty.saturating_mul(2).max(1) {
-        console.print_colored(
-            "  -> repaint cost grows with screen fill: this is the scroll cost\n",
-            crate::framebuffer::COLOR_YELLOW,
-        );
-    }
-
+    console.print("  mtrr ranges: ");
+    console.print_num(crate::memory::mtrr::variable_count());
+    console.print(" (details: diag mtrr)\n");
 }
 
 /// MTRR: что действует сейчас и (по запросу) перевод фреймбуфера в WC.

@@ -344,7 +344,9 @@ struct Controller {
     devices: Vec<UsbDeviceInfo>,
     /// Сколько страниц scratchpad зарезервировано (нужно для Address Device).
     scratchpad_pages: usize,
-    /// Пришло событие PORT_STATUS_CHANGE: нужно сверить порты.
+    /// Разобранные расширенные возможности (xECP) — для `diag usb`.
+    extended: ExtendedCaps,
+    /// Пришло событие PORT_STATUS_CHANGE: нужно сверять порты.
     ///
     /// Само событие CSC очищает (`port_clear_changes`), и раньше это значило,
     /// что `poll_hotplug` никогда не видит изменений: `poll_keyboard`
@@ -1367,15 +1369,19 @@ pub fn poll_hotplug() -> (usize, usize) {
 
             for port in 1..=ctrl.max_ports {
                 let portsc = unsafe { rd32(ctrl.port_reg(port)) };
-                // CSC — write-1-to-clear, поэтому решение принимаем по
-                // прочитанному значению, а не после очистки.
-                if portsc & PORTSC_CSC == 0 && !rescan {
+                // CSC — write-1-to-clear, и его успевает снять обработчик
+                // событий. Поэтому состояние сверяем по факту: подключён ли
+                // порт сейчас и знаем ли мы об устройстве на нём. Лишние
+                // 15 MMIO-чтений раз в 500 мс дешевле пропущенной флешки.
+                let connected_now = portsc & PORTSC_CCS != 0;
+                let known_now = ctrl.devices.iter().any(|d| d.port == port);
+                if portsc & PORTSC_CSC == 0 && !rescan && connected_now == known_now {
                     continue;
                 }
                 unsafe { ctrl.port_clear_changes(port) };
 
-                let connected = portsc & PORTSC_CCS != 0;
-                let known = ctrl.devices.iter().any(|d| d.port == port);
+                let connected = connected_now;
+                let known = known_now;
 
                 if connected && !known {
                     match unsafe { ctrl.reset_port(port) } {
@@ -1419,6 +1425,31 @@ pub fn poll_hotplug() -> (usize, usize) {
     }
 
     (added, removed)
+}
+
+/// Расширенные возможности контроллера (xECP), нужные для диагностики.
+#[derive(Clone, Default)]
+pub struct ExtendedCaps {
+    /// Смещение xECP от базы MMIO (0 — расширенных возможностей нет).
+    pub xecp_offset: u32,
+    /// Найден ли USB Legacy Support и остался ли он за BIOS.
+    pub legacy_support: bool,
+    pub bios_owned: bool,
+    pub os_owned: bool,
+    /// Протоколы: `(major, minor, port_from, port_count, name)`.
+    pub protocols: Vec<(u8, u8, u8, u8, String)>,
+}
+
+/// Разобрать xECP и запомнить протоколы портов.
+///
+/// Зачем: номер порта сам по себе ничего не говорит, а `PORTSC` для USB2 и
+/// USB3 портов имеет разные значения PSI. Без этой таблицы `diag usb`
+/// показывал `speed 0 (unknown)` и нельзя было понять, в какой половине
+/// списка портов вообще ждать флешку.
+pub fn extended_caps(controller: usize) -> Option<ExtendedCaps> {
+    let controllers = XHCI.try_lock()?;
+    let ctrl = controllers.get(controller)?;
+    Some(ctrl.extended.clone())
 }
 
 /// Состояние корневого порта для диагностики.
@@ -1658,6 +1689,61 @@ pub fn keyboard_status() -> String {
     text
 }
 
+/// Разобрать xECP: список протоколов и статус legacy handoff.
+unsafe fn parse_extended_caps(mmio: u64, hccparams1: u32) -> ExtendedCaps {
+    let mut caps = ExtendedCaps::default();
+    let mut offset = (((hccparams1 >> 16) & 0xFFFF) as u64) * 4;
+    caps.xecp_offset = offset as u32;
+
+    let mut guard = 0;
+    while offset != 0 && guard < 32 {
+        let capability = rd32(mmio + offset);
+        let id = capability & 0xFF;
+        let next = (((capability >> 8) & 0xFF) as u64) * 4;
+
+        match id {
+            // USB Legacy Support: биты 16 / 24 — BIOS/OS owned.
+            1 => {
+                caps.legacy_support = true;
+                caps.bios_owned = capability & (1 << 16) != 0;
+                caps.os_owned = capability & (1 << 24) != 0;
+            }
+            // Supported Protocol: номера портов и скорость протокола.
+            2 => {
+                let revision = rd32(mmio + offset + 4);
+                let name = rd32(mmio + offset + 8);
+                let ports = rd32(mmio + offset + 12);
+                let mut text = String::new();
+                for shift in [0u32, 8, 16, 24] {
+                    let byte = ((name >> shift) & 0xFF) as u8;
+                    if byte != 0 {
+                        text.push(byte as char);
+                    }
+                }
+                // Supported Protocol: dword 1 — minor в битах 0-7,
+                // major в битах 8-15 (раньше брались 24 и 16, отсюда
+                // «32.66» в логе).
+                caps.protocols.push((
+                    ((revision >> 8) & 0xFF) as u8,
+                    (revision & 0xFF) as u8,
+                    ((ports >> 0) & 0xFF) as u8,
+                    ((ports >> 8) & 0xFF) as u8,
+                    text,
+                ));
+            }
+            _ => {}
+        }
+
+        if next == 0 {
+            break;
+        }
+        offset += next;
+        guard += 1;
+    }
+
+    caps
+}
+
 /// BIOS → OS handoff для USB Legacy Support (extended capability ID 1).
 unsafe fn bios_handoff(mmio: u64, hccparams1: u32) {
     let mut offset = (((hccparams1 >> 16) & 0xFFFF) as u64) * 4;
@@ -1745,6 +1831,28 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
             dboff,
             rtsoff
         );
+
+        let extended = parse_extended_caps(mmio_virt, hccparams1);
+        if extended.xecp_offset != 0 {
+            println!(
+                "[xHCI] xECP at {:#x}: {} protocol(s), legacy support {}",
+                extended.xecp_offset,
+                extended.protocols.len(),
+                if extended.legacy_support { "yes" } else { "no" }
+            );
+            for (major, minor, from, count, name) in &extended.protocols {
+                println!(
+                    "[xHCI]   {}.{} {}: ports {}-{}",
+                    major,
+                    minor,
+                    name,
+                    from,
+                    from.saturating_add(count.saturating_sub(1))
+                );
+            }
+        } else {
+            println!("[xHCI] no xECP (no supported protocol info)");
+        }
 
         bios_handoff(mmio_virt, hccparams1);
 
@@ -1860,6 +1968,7 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
             devices: Vec::new(),
             scratchpad_pages: scratchpad_count,
             rescan: false,
+            extended,
             enumerated: false,
         };
 
@@ -1876,6 +1985,27 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
 
 /// Перечисляет подключённые порты и настраивает найденные устройства.
 unsafe fn enumerate_ports(ctrl: &mut Controller, controller_index: usize) {
+    // После сброса контроллера порты USB3 не сразу показывают подключение:
+    // приёмник должен завершить detection, на реальном железе это десятки-сотни
+    // миллисекунд. В QEMU готово мгновенно, поэтому раньше дефект не
+    // проявлялся: на ноутбуке все 15 портов читались как «empty».
+    let deadline = crate::timer::uptime_ms().saturating_add(1000);
+    loop {
+        let connected = (1..=ctrl.max_ports)
+            .filter(|port| rd32(ctrl.port_reg(*port)) & PORTSC_CCS != 0)
+            .count();
+        if connected > 0 || crate::timer::uptime_ms() >= deadline {
+            if connected == 0 {
+                println!(
+                    "[xHCI] no port reports a device after 1s (max_ports={})",
+                    ctrl.max_ports
+                );
+            }
+            break;
+        }
+        crate::timer::sleep_ms(10);
+    }
+
     for port in 1..=ctrl.max_ports {
         let portsc = rd32(ctrl.port_reg(port));
         if portsc & PORTSC_CCS == 0 {
