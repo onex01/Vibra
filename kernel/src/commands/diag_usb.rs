@@ -218,6 +218,12 @@ pub fn diag_usb(console: &mut Console) {
             port.speed,
             crate::drivers::usb::xhci::speed_name(port.speed)
         ));
+        // Расшифровка PORTSC: видно, порт обесточен, в RxDetect или
+        // в нерабочем состоянии.
+        console.print(&format!(
+            " [{}]",
+            crate::drivers::usb::xhci::describe_portsc(port.portsc)
+        ));
         match port.device {
             Some((vendor, product, kind)) => console.print(&format!(
                 " -> {:04x}:{:04x} {}\n",

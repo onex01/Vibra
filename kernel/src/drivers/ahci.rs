@@ -221,12 +221,22 @@ pub fn init() {
         let pi = hba_read32(HBA_PI);
         println!("[AHCI] PI: {:#032b}", pi);
 
-        // HBA Reset (GHCR bit 0) — нужен для инициализации
+        // AHCI Enable выставляется ПЕРВЫМ, до сброса.
+        //
+        // GHC.AE=0 означает, что контроллер работает в legacy IDE-режиме;
+        // в этом режиме GHC.HR зарезервирован, а регистры портов ведут себя
+        // иначе — порты отвечают DET=0 при живом диске. Ровно это и было на
+        // T450: Linux видел диск (он сам включает AE), а Vibra — нет.
         let ghc = hba_read32(HBA_GHC);
-        if ghc & GHC_HR == 0 {
-            // First init: reset HBA
+        let ae_was_set = ghc & GHC_AE != 0;
+        hba_write32(HBA_GHC, ghc | GHC_AE | GHC_IE);
+        if !ae_was_set {
+            println!("[AHCI] GHC.AE was 0 (IDE/legacy mode): AHCI enable set");
+        }
+
+        // HBA Reset (GHCR bit 0) — нужен для инициализации.
+        if hba_read32(HBA_GHC) & GHC_HR == 0 {
             hba_write32(HBA_GHC, GHC_HR);
-            // Ждём пока reset завершится
             let mut timeout = 1_000_000u32;
             while hba_read32(HBA_GHC) & GHC_HR != 0 && timeout > 0 {
                 timeout -= 1;
@@ -236,7 +246,7 @@ pub fn init() {
             }
         }
 
-        // Включаем AHCI-режим и прерывания.
+        // Сброс сбрасывает AE, поэтому выставляем его снова.
         hba_write32(HBA_GHC, hba_read32(HBA_GHC) | GHC_AE | GHC_IE);
 
         // Сканируем порты
@@ -246,22 +256,38 @@ pub fn init() {
             let i = i as u32;
 
             let ssts = port_read32(i, PORT_SSTS);
-            let det = ssts & 0x0F; // Device Detection
-            let ipm = (ssts >> 8) & 0x0F; // Interface Power Management
+            let mut det = ssts & 0x0F; // Device Detection
+            let mut ipm = (ssts >> 8) & 0x0F; // Interface Power Management
+
+            // DET != 3 — линк не поднят. Прежде чем объявлять порт пустым,
+            // даём ему COMRESET: если прошивка оставила порт в промежуточном
+            // состоянии или линк не поднялся после инициализации, одного
+            // сброса достаточно. Раньше COMRESET делался только внутри
+            // `identify_device`, то есть уже после проверки DET, и порт с
+            // DET=0 отбрасывался, не получив ни одной попытки.
+            if det != 0x03 || ipm != 0x01 {
+                println!(
+                    "[AHCI] Port {}: DET={} IPM={}, issuing COMRESET",
+                    i, det, ipm
+                );
+                comreset(i);
+                crate::timer::sleep_ms(100);
+                let retry = port_read32(i, PORT_SSTS);
+                det = retry & 0x0F;
+                ipm = (retry >> 8) & 0x0F;
+            }
 
             if det != 0x03 || ipm != 0x01 {
-                // DET=0 означает «линка нет»: устройство не отвечает на SATA.
-                // На ноутбуках это почти всегда режим SATA=RAID в прошивке
-                // (встроенный диск виден только через RAID-драйвер) — либо
-                // порт физически пуст. Без этой подсказки «диск не найден»
-                // выглядит как дефект ядра.
                 if det == 0 {
                     println!(
-                        "[AHCI] Port {}: no SATA link (DET=0). If the internal disk is missing, check BIOS SATA mode: AHCI (not RAID/Intel RST)",
+                        "[AHCI] Port {}: no SATA link after COMRESET (DET=0), port is empty or disabled in firmware",
                         i
                     );
                 } else {
-                    println!("[AHCI] Port {}: no device (DET={}, IPM={})", i, det, ipm);
+                    println!(
+                        "[AHCI] Port {}: no device after COMRESET (DET={}, IPM={})",
+                        i, det, ipm
+                    );
                 }
                 continue;
             }
@@ -403,13 +429,27 @@ unsafe fn comreset(port: u32) {
     // DET = 0: вернуть линк в рабочее состояние.
     port_write32(port, PORT_SCTL, sctl & !0xF);
 
-    // Ждём DET=3 (device present, link up) — по времени, а не по итерациям.
-    let deadline = crate::timer::uptime_ms() + 1000;
-    while crate::timer::uptime_ms() < deadline {
-        if port_read32(port, PORT_SSTS) & 0xF == 3 {
-            break;
+    // Ждём DET=3 (device present, link up).
+    //
+    // AHCI инициализируется на Step 7, а таймер — на Step 8, поэтому
+    // `uptime_ms()` здесь ещё нулевой: цикл по времени был бы бесконечным
+    // (именно так загрузка и зависала на первом порту без диска).
+    // Пока часов нет, ограничиваем ожидание числом итераций.
+    if crate::timer::source_hz() > 0 {
+        let deadline = crate::timer::uptime_ms() + 1000;
+        while crate::timer::uptime_ms() < deadline {
+            if port_read32(port, PORT_SSTS) & 0xF == 3 {
+                return;
+            }
+            crate::timer::sleep_ms(1);
         }
-        crate::timer::sleep_ms(1);
+    } else {
+        for _ in 0..500_000 {
+            if port_read32(port, PORT_SSTS) & 0xF == 3 {
+                return;
+            }
+            core::hint::spin_loop();
+        }
     }
 }
 

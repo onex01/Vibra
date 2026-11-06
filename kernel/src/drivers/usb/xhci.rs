@@ -96,6 +96,45 @@ fn ep0_max_packet(speed: u32) -> u16 {
 /// Максимум данных в одном bulk TRB (17-битное поле длины TRB).
 const MAX_BULK_CHUNK: usize = 32 * 1024;
 
+/// Расшифровка PORTSC для диагностики.
+///
+/// Голый `0x2a0` ничего не говорит: это `PP=1`, `PLS=5 (RxDetect)`, `CCS=0`,
+/// то есть порт запитан, но подключения не видит. Без текста приходится
+/// держать таблицу битов в голове.
+pub fn describe_portsc(portsc: u32) -> String {
+    use alloc::format;
+    let pls = (portsc >> 5) & 0xF;
+    let pls_name = match pls {
+        0 => "U0",
+        1 => "U1",
+        2 => "U2",
+        3 => "U3/Suspend",
+        4 => "Disabled",
+        5 => "RxDetect",
+        6 => "Inactive",
+        7 => "Polling",
+        8 => "Recovery",
+        9 => "HotReset",
+        10 => "Compliance",
+        11 => "Test",
+        15 => "Resume",
+        _ => "reserved",
+    };
+    let mut text = format!("PLS={}({})", pls, pls_name);
+    if portsc & PORTSC_CCS != 0 {
+        text.push_str(" CCS");
+    }
+    if portsc & PORTSC_PED != 0 {
+        text.push_str(" PED");
+    }
+    if portsc & PORTSC_PP != 0 {
+        text.push_str(" PP");
+    } else {
+        text.push_str(" UNPOWERED");
+    }
+    text
+}
+
 pub fn speed_name(speed: u32) -> &'static str {
     match speed {
         SPEED_FULL => "full",
@@ -185,6 +224,20 @@ fn alloc_dma(size: usize) -> Option<(u64, u64)> {
 fn delay(spins: u32) {
     for _ in 0..spins {
         core::hint::spin_loop();
+    }
+}
+
+/// Пауза в миллисекундах.
+///
+/// `init_controller` вызывается на Step 7, а таймер инициализируется на
+/// Step 8, поэтому `sleep_ms` доступен не всегда. Тогда падаем обратно на
+/// прокрутку: для инициализации портов точность не нужна, а зависнуть на
+/// неинициализированных часах нельзя.
+fn sleep_or_spin(ms: u64) {
+    if crate::timer::source_hz() > 0 {
+        crate::timer::sleep_ms(ms);
+    } else {
+        delay((ms as u32).saturating_mul(100_000));
     }
 }
 
@@ -1839,6 +1892,7 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
         let hcsparams1 = rd32(mmio_virt + 0x04);
         let hcsparams2 = rd32(mmio_virt + 0x08);
         let hccparams1 = rd32(mmio_virt + 0x10);
+        let ppc = hccparams1 & (1 << 3) != 0;
         let dboff = rd32(mmio_virt + 0x14) as u64;
         let rtsoff = rd32(mmio_virt + 0x18) as u64;
 
@@ -1854,14 +1908,15 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
         let db = mmio_virt + dboff;
 
         println!(
-            "[xHCI] {:#x}: v{}.{} slots={} ports={} DBOFF={:#x} RTSOFF={:#x}",
+            "[xHCI] {:#x}: v{}.{} slots={} ports={} DBOFF={:#x} RTSOFF={:#x} PPC={}",
             bar_phys,
             hci_version >> 8,
             hci_version & 0xFF,
             max_slots,
             max_ports,
             dboff,
-            rtsoff
+            rtsoff,
+            ppc as u8
         );
 
         let extended = parse_extended_caps(mmio_virt, hccparams1);
@@ -1984,6 +2039,37 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
         if !running {
             println!("[xHCI] {:#x}: controller did not start", bar_phys);
             return false;
+        }
+
+        // Питание портов после запуска.
+        //
+        // HCCPARAMS1.PPC=1 значит, что питанием управляет ПО, и после
+        // HCRESET оно выключено. Без PORT_POWER порты остаются обесточены,
+        // а CCS читается как 0 — ровно это было на T450: все 15 портов
+        // «пусты», хотя Linux видит на них камеру, Bluetooth и флешку.
+        if ppc {
+            let mut powered = 0usize;
+            for port in 1..=max_ports {
+                let reg = op + 0x400 + (port as u64 - 1) * 0x10;
+                let portsc = rd32(reg);
+                if portsc & PORTSC_PP != 0 {
+                    powered += 1;
+                    continue;
+                }
+                wr32(reg, (portsc & !PORTSC_RW1C) | PORTSC_PP);
+                sleep_or_spin(20);
+                if rd32(reg) & PORTSC_PP != 0 {
+                    powered += 1;
+                }
+            }
+            println!("[xHCI] port power: {}/{} on", powered, max_ports);
+            if powered < max_ports as usize {
+                println!(
+                    "[xHCI] warning: {} port(s) still unpowered after PORT_POWER",
+                    max_ports as usize - powered
+                );
+            }
+            sleep_or_spin(100);
         }
 
         let controller = Controller {

@@ -3,8 +3,9 @@
 > Короткая версия: xHCI, UHCI и EHCI проходят lifecycle в QEMU; USB mass
 > storage читается и пишется через VFS. На T450 флешка, по данным Linux,
 > висит на **xHCI**, а EHCI держит только внутренний хаб `8087:8001`;
-> драйвер EHCI есть с `rc.25`, 64-битная раскладка — с `rc.25.1`, на железе
-> ещё не подтверждено (см. [verified-hardware.md](verified-hardware.md)).
+> драйвер EHCI есть с `rc.25`, 64-битная раскладка подтверждена на железе
+> в `rc.25.1` (`64bit=yes`, хаб `8087:8001 -> hub`). Флешка не видна из-за
+> xHCI: все 15 портов `CCS=0` (см. [verified-hardware.md](verified-hardware.md)).
 
 ## Контроллеры
 
@@ -150,6 +151,25 @@ make ehci-test                # EHCI-диск: монтирование, чте�
 
 QEMU умеет EHCI: `-device usb-ehci,id=ehci -device usb-storage,bus=ehci.0`.
 Это стенд `make ehci-test`.
+
+## xHCI на реальном железе: питание портов
+
+`diag usb` на T450 (rc.25.1) показал по всем 15 портам одно и то же:
+
+```text
+ctrl0 port1 usb2 0x000002a0 empty dis powered speed 0 (unknown) -> not enumerated
+```
+
+`0x2a0` — это `PP=1` (питание есть), `PLS=5` (RxDetect, ожидание
+подключения), `CCS=0` (подключения нет). Контроллер работает, но не видит
+ни камеры, ни Bluetooth, ни флешки, хотя Linux видит все три.
+
+В rc.25.2 добавлено:
+
+- чтение `HCCPARAMS1.PPC` и включение питания портов (`PORT_POWER`), если
+  питанием управляет ПО;
+- расшифровка `PORTSC` в `diag usb` (`PLS` с именем состояния,
+  `CCS`/`PED`/`PP`/`UNPOWERED`).
 
 ## Что ещё не сделано
 
