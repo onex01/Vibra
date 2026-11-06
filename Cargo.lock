@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "vibra-kernel"
-version = "0.2.0-rc.25.6"
+version = "0.2.0-rc.25.7"
 dependencies = [
  "limine",
  "spin",

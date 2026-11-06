@@ -636,15 +636,14 @@ fn drain_controller(state: &mut KeyboardState) -> usize {
 }
 
 pub fn poll_key() -> Option<Key> {
-    // USB HID (xHCI) опрашивается до отключения прерываний: MMIO-ожидания
-    // не должны идти с выключенным IRQ.
-    crate::drivers::usb::xhci::poll_keyboard();
-    // UHCI: клавиатуры на USB2-портах (Intel/AMD чипсеты с EHCI-компаньоном).
-    crate::drivers::usb::uhci::poll_keyboard();
-
+    // PS/2 опрашивается ПЕРВЫМ: это два чтения портов (микросекунды), и
+    // ввод не должен зависеть от состояния USB. Раньше первым шёл xHCI,
+    // а он может надолго уйти в ожидание события на неотвечающем
+    // устройстве — и клавиатура «умирала» целиком, хотя i8042 в порядке.
+    //
     // Лок делится с ISR — берём его только с выключенными прерываниями,
     // иначе IRQ1 во время удержания лока приведёт к дедлоку.
-    crate::interrupts::without_interrupts(|| {
+    let ps2 = crate::interrupts::without_interrupts(|| {
         // Отложенные клавиши идут раньше новых: их порядок задан вводом.
         if let Some(key) = pop_back() {
             return Some(key);
@@ -665,6 +664,24 @@ pub fn poll_key() -> Option<Key> {
         // Polling fallback: работает, даже если IRQ1 не доставляется.
         drain_controller(&mut state);
         state.next_key()
+    });
+
+    if ps2.is_some() {
+        return ps2;
+    }
+
+    // Только если PS/2 ничего не дал: USB HID. MMIO-ожидания идут уже без
+    // выключенных прерываний.
+    crate::drivers::usb::xhci::poll_keyboard();
+    // UHCI: клавиатуры на USB2-портах (Intel/AMD чипсеты с EHCI-компаньоном).
+    crate::drivers::usb::uhci::poll_keyboard();
+
+    crate::interrupts::without_interrupts(|| {
+        let mut hid_q = HID_QUEUE.lock();
+        if !hid_q.is_empty() {
+            return Some(hid_q.remove(0));
+        }
+        None
     })
 }
 

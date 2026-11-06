@@ -197,7 +197,18 @@ impl UsbDisk {
         // Allocation length 18, остальные поля нулевые.
         self.bot(&[0x03, 0, 0, 0, 18, 0], Some(&mut sense), true)
             .ok()?;
-        Some(sense[2] & 0x0F)
+        // Формат ответа задан в старших битах байта 0:
+        //   0x70/0x71 — fixed format, sense key в байте 2;
+        //   0x72/0x73 — descriptor format, sense key в байте 1.
+        // Дешёвые контроллеры отвечают вторым, и без этой ветки
+        // UNIT ATTENTION (0x06) читался как 0x00 и не повторялся.
+        let response = sense[0] & 0x7F;
+        let key = if response >= 0x72 {
+            sense[1] & 0x0F
+        } else {
+            sense[2] & 0x0F
+        };
+        Some(key)
     }
 
     /// Один цикл Bulk-Only Transport.

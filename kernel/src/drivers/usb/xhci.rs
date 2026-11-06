@@ -95,6 +95,18 @@ fn ep0_max_packet(speed: u32) -> u16 {
     }
 }
 
+/// Таймауты USB-операций, в миллисекундах.
+///
+/// Это не «сколько ждать в среднем», а верхняя граница, после которой
+/// устройство считается неотвечающим. Раньше здесь были бюджеты итераций
+/// (2M/4M/20M), и они зависели от `opt-level` и стоимости MMIO.
+const COMMAND_TIMEOUT_MS: u64 = 200;
+const CONTROL_TIMEOUT_MS: u64 = 300;
+const BULK_TIMEOUT_MS: u64 = 500;
+const PORT_RESET_TIMEOUT_MS: u64 = 500;
+const CONTROLLER_TIMEOUT_MS: u64 = 1_000;
+const LEGACY_HANDOFF_TIMEOUT_MS: u64 = 1_000;
+
 /// Максимум данных в одном bulk TRB (17-битное поле длины TRB).
 const MAX_BULK_CHUNK: usize = 32 * 1024;
 
@@ -229,6 +241,44 @@ fn delay(spins: u32) {
     }
 }
 
+/// Ожидание по времени, а не по числу итераций.
+///
+/// Число итераций не является единицей времени: при смене `opt-level`
+/// (а в этом проекте это уже ломало NVMe) 5 000 000 прокруток превращаются
+/// то в 15 мс, то в 150. На реальном железе MMIO-чтение порта стоит
+/// микросекунды, и итерационный бюджет незаметно растягивается в секунды —
+/// именно это делало загрузку «долгой на этапах xHCI» и задерживало ввод.
+///
+/// `cap` остаётся только предохранителем от зависания при неработающем
+/// таймере; он заведомо больше любого разумного времени ожидания.
+fn deadline_ms(ms: u64) -> Deadline {
+    Deadline {
+        started: crate::timer::uptime_ms(),
+        budget_ms: ms,
+        spins: 0,
+        cap: ms.saturating_mul(2_000).saturating_add(200_000),
+    }
+}
+
+struct Deadline {
+    started: u64,
+    budget_ms: u64,
+    spins: u64,
+    cap: u64,
+}
+
+impl Deadline {
+    #[inline]
+    fn expired(&mut self) -> bool {
+        self.spins = self.spins.saturating_add(1);
+        // Часы ещё не инициализированы (ранний boot): остаётся только счётчик.
+        if crate::timer::source_hz() == 0 {
+            return self.spins > self.cap;
+        }
+        crate::timer::uptime_ms().saturating_sub(self.started) > self.budget_ms
+    }
+}
+
 /// Пауза в миллисекундах.
 ///
 /// `init_controller` вызывается на Step 7, а таймер инициализируется на
@@ -239,7 +289,9 @@ fn sleep_or_spin(ms: u64) {
     if crate::timer::source_hz() > 0 {
         crate::timer::sleep_ms(ms);
     } else {
-        delay((ms as u32).saturating_mul(100_000));
+        // Часы не готовы (ранний boot). Прокрутка не должна длиться
+        // секундами: 20 мс на порт × 15 портов — это уже загрузка.
+        delay(((ms as u32).saturating_mul(100_000)).min(200_000));
     }
 }
 
@@ -473,7 +525,11 @@ impl Controller {
             .push(param, status, (trb_type << 10) | ((slot as u32) << 24));
         self.doorbell(0, 0);
 
-        for _ in 0..2_000_000 {
+        let mut deadline = deadline_ms(COMMAND_TIMEOUT_MS);
+        loop {
+            if deadline.expired() {
+                return None;
+            }
             if let Some(event) = self.next_event() {
                 match event.trb_type() {
                     TRB_COMMAND_COMPLETION => {
@@ -559,11 +615,14 @@ impl Controller {
         &mut self,
         slot: u8,
         dci: u8,
-        limit: u32,
+        timeout_ms: u64,
     ) -> Option<(u32, usize)> {
-        for _ in 0..limit {
+        let mut deadline = deadline_ms(timeout_ms);
+        loop {
+            if deadline.expired() {
+                return None;
+            }
             let Some(event) = self.next_event() else {
-                core::hint::spin_loop();
                 continue;
             };
             if event.trb_type() == TRB_TRANSFER_EVENT
@@ -574,7 +633,6 @@ impl Controller {
             }
             self.dispatch_event(event);
         }
-        None
     }
 }
 
@@ -629,7 +687,7 @@ unsafe fn control_transfer_raw(
     ring.push(0, 0, (TRB_STATUS_STAGE << 10) | (1 << 5) | status_dir);
 
     ctrl.doorbell(slot, 1);
-    match ctrl.wait_transfer_event(slot, 1, 4_000_000) {
+    match ctrl.wait_transfer_event(slot, 1, CONTROL_TIMEOUT_MS) {
         Some((code, _)) if code == CC_SUCCESS || code == CC_SHORT_PACKET => Ok(len),
         Some((code, _)) if code == CC_STALL => Err(UsbError::Stall),
         Some(_) => Err(UsbError::TransferFailed),
@@ -1009,14 +1067,21 @@ impl Controller {
                 (portsc & !(PORTSC_RW1C | PORTSC_PR | PORTSC_WPR)) | reset_bit,
             );
 
+            // Ожидание по времени: итерации не единица времени, а порт
+            // сбрасывается от единиц до сотен миллисекунд в зависимости
+            // от устройства и контроллера.
+            let mut deadline = deadline_ms(PORT_RESET_TIMEOUT_MS);
             let mut completed = false;
-            for _ in 0..2_000_000 {
+            loop {
                 let value = rd32(reg);
                 if value & PORTSC_PRC != 0 || (value & PORTSC_PR == 0 && value & PORTSC_PED != 0) {
                     completed = true;
                     break;
                 }
-                delay(50);
+                if deadline.expired() {
+                    break;
+                }
+                core::hint::spin_loop();
             }
 
             if completed {
@@ -1778,7 +1843,7 @@ unsafe fn bulk_chunk(
     ring.push(phys, data.len() as u32, trb_control);
     ctrl.doorbell(slot, dci as u32);
 
-    let mut event = ctrl.wait_transfer_event(slot, dci, 20_000_000);
+    let mut event = ctrl.wait_transfer_event(slot, dci, BULK_TIMEOUT_MS);
 
     // Кольцо возвращаем устройству в любом случае.
     ctrl.storage[device_index].endpoint(dir_in).ring = Some(ring);
@@ -1800,7 +1865,7 @@ unsafe fn bulk_chunk(
             };
             retry_ring.push(phys, data.len() as u32, trb_control);
             ctrl.doorbell(slot, dci as u32);
-            event = ctrl.wait_transfer_event(slot, dci, 20_000_000);
+            event = ctrl.wait_transfer_event(slot, dci, BULK_TIMEOUT_MS);
             ctrl.storage[device_index].endpoint(dir_in).ring = Some(retry_ring);
             result = event;
         }
@@ -1956,13 +2021,14 @@ unsafe fn bios_handoff(mmio: u64, hccparams1: u32) {
                 // BIOS владеет контроллером — забираем ownership.
                 value |= 1 << 24;
                 wr32(legsup, value);
-                for _ in 0..2_000_000 {
-                    value = rd32(legsup);
-                    if value & (1 << 16) == 0 {
+                let mut deadline = deadline_ms(LEGACY_HANDOFF_TIMEOUT_MS);
+                while rd32(legsup) & (1 << 16) != 0 {
+                    if deadline.expired() {
                         break;
                     }
                     core::hint::spin_loop();
                 }
+                value = rd32(legsup);
                 // Отключаем SMI, иначе прошивка продолжит вмешиваться.
                 wr32(legsup + 4, 0);
             }
@@ -2106,8 +2172,9 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
         // 1. Останавливаем контроллер, если он запущен.
         if rd32(op + USBSTS) & USBSTS_HCH == 0 {
             wr32(op + USBCMD, rd32(op + USBCMD) & !USBCMD_RS);
-            for _ in 0..2_000_000 {
-                if rd32(op + USBSTS) & USBSTS_HCH != 0 {
+            let mut deadline = deadline_ms(CONTROLLER_TIMEOUT_MS);
+            while rd32(op + USBSTS) & USBSTS_HCH == 0 {
+                if deadline.expired() {
                     break;
                 }
                 core::hint::spin_loop();
@@ -2116,20 +2183,17 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
 
         // 2. Reset
         wr32(op + USBCMD, rd32(op + USBCMD) | USBCMD_HCRST);
-        let mut reset_ok = false;
-        for _ in 0..4_000_000 {
-            if rd32(op + USBCMD) & USBCMD_HCRST == 0 {
-                reset_ok = true;
-                break;
+        let mut deadline = deadline_ms(CONTROLLER_TIMEOUT_MS);
+        while rd32(op + USBCMD) & USBCMD_HCRST != 0 {
+            if deadline.expired() {
+                println!("[xHCI] {:#x}: reset timeout (HCRST stuck)", bar_phys);
+                return false;
             }
             core::hint::spin_loop();
         }
-        if !reset_ok {
-            println!("[xHCI] {:#x}: reset timeout (HCRST stuck)", bar_phys);
-            return false;
-        }
-        for _ in 0..4_000_000 {
-            if rd32(op + USBSTS) & USBSTS_CNR == 0 {
+        let mut deadline = deadline_ms(CONTROLLER_TIMEOUT_MS);
+        while rd32(op + USBSTS) & USBSTS_CNR != 0 {
+            if deadline.expired() {
                 break;
             }
             core::hint::spin_loop();
@@ -2188,10 +2252,14 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
         wr32(op + CONFIG, max_slots as u32);
         wr32(op + USBSTS, rd32(op + USBSTS)); // clear pending status bits
         wr32(op + USBCMD, rd32(op + USBCMD) | USBCMD_RS);
+        let mut deadline = deadline_ms(CONTROLLER_TIMEOUT_MS);
         let mut running = false;
-        for _ in 0..4_000_000 {
+        loop {
             if rd32(op + USBSTS) & USBSTS_HCH == 0 {
                 running = true;
+                break;
+            }
+            if deadline.expired() {
                 break;
             }
             core::hint::spin_loop();

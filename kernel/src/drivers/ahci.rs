@@ -235,8 +235,12 @@ pub fn init() {
         }
 
         // HBA Reset (GHCR bit 0) — нужен для инициализации.
+        //
+        // AE в этой записи обязателен: затирая его, мы возвращаем контроллер
+        // в legacy IDE-режим, где HR зарезервирован и сброс просто
+        // игнорируется. Раньше здесь писалось только GHC_HR.
         if hba_read32(HBA_GHC) & GHC_HR == 0 {
-            hba_write32(HBA_GHC, GHC_HR);
+            hba_write32(HBA_GHC, hba_read32(HBA_GHC) | GHC_HR);
             let mut timeout = 1_000_000u32;
             while hba_read32(HBA_GHC) & GHC_HR != 0 && timeout > 0 {
                 timeout -= 1;
@@ -1215,13 +1219,12 @@ fn identify_once(port_num: u32) -> Option<DiskInfo> {
 
         // Ждём завершения по времени: см. комментарий в начале identify_once.
         let cmd_deadline = crate::timer::uptime_ms() + 2000;
-        let mut finished = false;
         while port_read32(port_num, PORT_CI) & 1 != 0 {
             if crate::timer::uptime_ms() >= cmd_deadline {
                 break;
             }
         }
-        finished = port_read32(port_num, PORT_CI) & 1 == 0;
+        let finished = port_read32(port_num, PORT_CI) & 1 == 0;
 
         alloc::alloc::dealloc(ct_ptr, ct_layout);
 

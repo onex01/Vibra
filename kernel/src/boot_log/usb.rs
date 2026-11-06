@@ -576,7 +576,7 @@ fn flush_sink(slot: &Mutex<Option<Sink>>, panic: bool, shell: bool) {
         return;
     };
 
-    let ok = write_pending(sink, panic);
+    let (ok, more) = write_pending(sink, panic);
 
     // Неудача — это именно отказ записи, а не «нечего писать»: пустое
     // кольцо тоже не двигает курсор, и путать их нельзя, иначе приёмник
@@ -594,10 +594,22 @@ fn flush_sink(slot: &Mutex<Option<Sink>>, panic: bool, shell: bool) {
     } else {
         sink.write_failures = 0;
     }
+    // `more` намеренно не используется для цикла: следующую порцию заберёт
+    // следующий вызов checkpoint(). Так один вызов ограничен по времени.
+    let _ = more;
 }
 
-/// Возвращает `false`, если запись на диск не удалась.
-fn write_pending(sink: &mut Sink, panic: bool) -> bool {
+
+/// Записать не больше одной порции.
+///
+/// Возвращает `(ok, more)`: `ok == false` — запись не удалась,
+/// `more == true` — в кольце остались непрочитанные данные.
+///
+/// Ограничение «одна порция за вызов» принципиально: одна порция — это
+/// несколько SCSI-команд, и даже на медленном носителе это сотни
+/// миллисекунд, а не десятки секунд. Путь ввода вызывает этот код, и он
+/// не должен ждать, пока выгрузится всё кольцо.
+fn write_pending(sink: &mut Sink, panic: bool) -> (bool, bool) {
     let buffer: &mut [u8] = unsafe {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(CHUNK_BUF) as *mut u8, CHUNK)
     };
@@ -618,22 +630,22 @@ fn write_pending(sink: &mut Sink, panic: bool) -> bool {
         sink.cursor = first;
     }
 
-    let mut batches = 0;
     loop {
         let (count, next) = read(sink.cursor, buffer);
         if count == 0 {
-            break;
+            // Кольцо пусто — работы больше нет.
+            return (true, false);
         }
         if !write_bytes(sink, &buffer[..count]) {
-            return false;
+            return (false, true);
         }
         sink.cursor = next;
-        batches += 1;
-        if panic && batches >= 1 {
-            break;
+        // При панике пишем максимум одну порцию: время ограничено.
+        // В обычном режиме — тоже одну, остальное заберёт следующий вызов.
+        if panic || count > 0 {
+            return (true, true);
         }
     }
-    true
 }
 
 /// Записывает порцию лога; `false` — запись прекращена (переполнение/ошибка).

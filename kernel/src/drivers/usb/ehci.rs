@@ -886,12 +886,6 @@ impl Controller {
         let mut protocol = descriptor[6];
         if class == 0x09 {
             kind = "hub";
-        } else if crate::drivers::usb::xhci::has_uas_interface(&interfaces) {
-            kind = "uas";
-            println!(
-                "[EHCI] addr {}: device speaks UAS (protocol 0x62), Bulk-Only is not supported",
-                address
-            );
         } else if let Some(interface) = find_storage_interface(&interfaces) {
             class = interface.class;
             subclass = interface.subclass;
@@ -899,6 +893,15 @@ impl Controller {
             if self.setup_storage(address, port, speed, high_speed, vendor, product, &interface) {
                 kind = "storage";
             }
+        } else if crate::drivers::usb::xhci::has_uas_interface(&interfaces) {
+            // UAS проверяем ПОСЛЕ Bulk-Only: устройство может выставлять оба
+            // интерфейса, и тогда рабочий путь — BOT. Обратный порядок
+            // (как было) отбрасывал такие накопители целиком.
+            kind = "uas";
+            println!(
+                "[EHCI] addr {}: device speaks UAS (protocol 0x62), Bulk-Only is not supported",
+                address
+            );
         }
 
         println!(
