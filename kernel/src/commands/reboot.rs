@@ -13,7 +13,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
 
     // Сохраняем лог в единственный файл и на VIBRALOG (если подключён).
     crate::boot_log::flush_to_file("/var/log/boot.log");
-    crate::boot_log::checkpoint();
+    crate::boot_log::checkpoint_now();
 
     if let Err(error) = crate::acpi::power::reset() {
         console.print_colored("ACPI reset failed: ", COLOR_RED);

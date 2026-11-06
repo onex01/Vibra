@@ -124,7 +124,7 @@ fn flush(console: &mut Console) -> CmdResult {
     let shell_before = crate::boot_log::usb::shell_written();
 
     crate::boot_log::flush_all_files();
-    crate::boot_log::checkpoint();
+    crate::boot_log::checkpoint_now();
 
     let boot_after = crate::boot_log::usb::written();
     let shell_after = crate::boot_log::usb::shell_written();

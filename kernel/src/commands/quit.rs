@@ -16,7 +16,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
     // Сохраняем лог до выключения питания: после S5 прочитать его будет
     // нечем, а последние строки — самые важные для диагностики.
     crate::boot_log::flush_to_file("/var/log/boot.log");
-    crate::boot_log::checkpoint();
+    crate::boot_log::checkpoint_now();
 
     match crate::acpi::power::power_off() {
         Err(reason) => {

@@ -78,7 +78,17 @@ struct Sink {
     cursor: usize,
     /// true — журнал shell, false — boot-лог.
     shell: bool,
+    /// Сколько раз подряд запись не удалась.
+    ///
+    /// Носитель может принимать команды, но отвергать запись (например,
+    /// флешка в режиме только чтения или с повреждённой ФС). Тогда каждый
+    /// `checkpoint()` упирается в таймаут записи и тормозит ввод. После
+    /// нескольких подряд неудач приёмник отключается совсем.
+    write_failures: u32,
 }
+
+/// Сколько подряд неудачных записей терпим, прежде чем отключить приёмник.
+const MAX_WRITE_FAILURES: u32 = 3;
 
 static BOOT_SINK: Mutex<Option<Sink>> = Mutex::new(None);
 static SHELL_SINK: Mutex<Option<Sink>> = Mutex::new(None);
@@ -313,6 +323,7 @@ fn prepare(mut fs: Fat32Fs, file: &str, shell: bool) -> Option<Sink> {
         written: 0,
         cursor: 0,
         shell,
+        write_failures: 0,
     })
 }
 
@@ -565,10 +576,28 @@ fn flush_sink(slot: &Mutex<Option<Sink>>, panic: bool, shell: bool) {
         return;
     };
 
-    write_pending(sink, panic);
+    let ok = write_pending(sink, panic);
+
+    // Неудача — это именно отказ записи, а не «нечего писать»: пустое
+    // кольцо тоже не двигает курсор, и путать их нельзя, иначе приёмник
+    // отключался бы при простое.
+    if !ok {
+        sink.write_failures = sink.write_failures.saturating_add(1);
+        if sink.write_failures >= MAX_WRITE_FAILURES {
+            let what = if shell { "SHELL.LOG" } else { "VIBRA.LOG" };
+            *guard = None;
+            crate::println!(
+                "[LOG] {}: disk writes keep failing, log sink disabled",
+                what
+            );
+        }
+    } else {
+        sink.write_failures = 0;
+    }
 }
 
-fn write_pending(sink: &mut Sink, panic: bool) {
+/// Возвращает `false`, если запись на диск не удалась.
+fn write_pending(sink: &mut Sink, panic: bool) -> bool {
     let buffer: &mut [u8] = unsafe {
         core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(CHUNK_BUF) as *mut u8, CHUNK)
     };
@@ -596,7 +625,7 @@ fn write_pending(sink: &mut Sink, panic: bool) {
             break;
         }
         if !write_bytes(sink, &buffer[..count]) {
-            break;
+            return false;
         }
         sink.cursor = next;
         batches += 1;
@@ -604,6 +633,7 @@ fn write_pending(sink: &mut Sink, panic: bool) {
             break;
         }
     }
+    true
 }
 
 /// Записывает порцию лога; `false` — запись прекращена (переполнение/ошибка).

@@ -828,6 +828,17 @@ fn find_keyboard_interface(interfaces: &[InterfaceInfo]) -> Option<InterfaceInfo
     })
 }
 
+/// Есть ли у устройства интерфейс UAS (class 8, subclass 6, protocol 0x62).
+///
+/// UAS мы не поддерживаем: он требует другого транспорта (USB Attached SCSI),
+/// а не Bulk-Only. Но отличить «устройство не найдено» от «устройство есть,
+/// но говорит на UAS» важно: иначе флешка просто исчезает без объяснения.
+pub(crate) fn has_uas_interface(interfaces: &[InterfaceInfo]) -> bool {
+    interfaces
+        .iter()
+        .any(|i| i.class == 8 && i.subclass == 6 && i.protocol == 0x62)
+}
+
 /// USB Mass Storage, Bulk-Only Transport: class 8, subclass 6, protocol 0x50.
 pub(crate) fn find_storage_interface(interfaces: &[InterfaceInfo]) -> Option<InterfaceInfo> {
     interfaces.iter().copied().find(|i| {
@@ -1186,6 +1197,15 @@ unsafe fn enumerate_device(
             if setup_storage(ctrl, slot, speed, port, vendor, product, &interface) {
                 kind = "storage";
             }
+        } else if has_uas_interface(&interfaces) {
+            // UAS-накопитель: интерфейс class 8 есть, но говорит он на
+            // USB Attached SCSI, а не на Bulk-Only. Молча пропускать нельзя —
+            // «флешка не найдена» без причины невозможно отладить.
+            kind = "uas";
+            println!(
+                "[xHCI] slot {}: device speaks UAS (protocol 0x62), Bulk-Only is not supported",
+                slot
+            );
         }
     }
 

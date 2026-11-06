@@ -121,25 +121,83 @@ impl UsbDisk {
         self.execute(&[0x00, 0, 0, 0, 0, 0], None, true).map(|_| ())
     }
 
-    /// Выполняет SCSI-команду с однократным recovery при ошибке шины.
+    /// Выполняет SCSI-команду с повторами и recovery.
+    ///
+    /// Повтор нужен не из-за сбоев шины, а из-за штатного поведения SCSI:
+    /// сразу после включения питания или сброса устройство отвечает
+    /// CHECK CONDITION с sense key UNIT ATTENTION (0x6). Это не ошибка —
+    /// команду надо просто повторить. Без этого первый же READ(10) после
+    /// загрузки возвращал ошибку, ФС определялась как `unknown`, а разделы
+    /// не читались; после переподключения флешка уже была «прогрета», и всё
+    /// работало. Ровно этот симптом и наблюдался на ноутбуке.
     fn execute(
         &mut self,
         cdb: &[u8],
         buf: Option<&mut [u8]>,
         dir_in: bool,
     ) -> Result<(), FsError> {
-        let mut data = buf;
-        match self.bot(cdb, data.as_deref_mut(), dir_in) {
-            Ok(()) => Ok(()),
-            Err(first) => {
-                // Recovery: Bulk-Only Reset + очистка halt'ов, затем повтор.
-                let _ = super::resolve_stall(self.host, self.controller, self.slot);
-                match self.bot(cdb, data, dir_in) {
-                    Ok(()) => Ok(()),
-                    Err(_) => Err(first),
+        // UNIT ATTENTION и NOT READY — повторяемые: устройство просыпается.
+        const MAX_ATTEMPTS: u32 = 5;
+        let mut attempt = 0u32;
+        let mut reset_done = false;
+
+        loop {
+            // Данные нужны на каждой попытке: срез восстанавливаем из указателя.
+            let result = match buf {
+                Some(ref buffer) => {
+                    let ptr = buffer.as_ptr() as *mut u8;
+                    let len = buffer.len();
+                    let slice = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+                    self.bot(cdb, Some(slice), dir_in)
                 }
+                None => self.bot(cdb, None, dir_in),
+            };
+
+            let Err(error) = result else {
+                return Ok(());
+            };
+            attempt += 1;
+
+            // Причина важнее кода ошибки. CSW со статусом «failed» — это ещё
+            // не сбой шины: устройство могло просто ответить UNIT ATTENTION
+            // после включения. Такое лечится повтором, а не сбросом канала.
+            let key = self.request_sense().unwrap_or(0);
+            let retryable = matches!(key, 0x02 | 0x06);
+
+            if !retryable && !reset_done {
+                // Настоящий сбой BOT-сессии: восстанавливаем канал и пробуем
+                // ещё раз, прежде чем сдаваться.
+                reset_done = true;
+                let _ = super::resolve_stall(self.host, self.controller, self.slot);
+                continue;
             }
+
+            if attempt >= MAX_ATTEMPTS || (!retryable && reset_done) {
+                if key != 0 {
+                    println!(
+                        "[USB-STORAGE] ctrl{} slot{}: command {:#04x} failed, sense key {:#04x}",
+                        self.controller, self.slot, cdb[0], key
+                    );
+                }
+                return Err(error);
+            }
+
+            // REQUEST SENSE снимает UNIT ATTENTION, но устройству нужно
+            // время «проснуться»: пауза растёт с каждой попыткой.
+            crate::timer::sleep_ms(50 * attempt as u64);
         }
+    }
+
+    /// REQUEST SENSE (0x03): узнать причину прошлой ошибки.
+    ///
+    /// Ответ в фиксированном формате: байт 0 — код ответа, байт 2 — sense
+    /// key в младших 4 битах. Для классификации повтора этого достаточно.
+    fn request_sense(&mut self) -> Option<u8> {
+        let mut sense = [0u8; 18];
+        // Allocation length 18, остальные поля нулевые.
+        self.bot(&[0x03, 0, 0, 0, 18, 0], Some(&mut sense), true)
+            .ok()?;
+        Some(sense[2] & 0x0F)
     }
 
     /// Один цикл Bulk-Only Transport.

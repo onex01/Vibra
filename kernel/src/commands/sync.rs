@@ -29,7 +29,7 @@ pub fn run(_args: &[&str], console: &mut Console) -> CmdResult {
 
     // Логи живут отдельно от VFS-таблицы: сбрасываем их всегда.
     crate::boot_log::flush_all_files();
-    crate::boot_log::checkpoint();
+    crate::boot_log::checkpoint_now();
 
     if errors == 0 {
         console.print_colored("sync: done\n", COLOR_GREEN);

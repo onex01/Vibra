@@ -82,12 +82,6 @@ impl LineEditor {
         let mut last_heartbeat_ms = crate::timer::uptime_ms();
         let mut last_log_flush_ms = last_heartbeat_ms;
         let mut last_hotplug_ms = last_heartbeat_ms;
-        // Интервал записи лога. Если носитель отвечает медленно (USB-
-        // накопитель), запись растягивается на сотни миллисекунд и
-        // превращается в «залипание» клавиатуры: ввод ждёт её в этом же
-        // цикле. Тогда интервал растёт, вместо того чтобы тормозить ввод.
-        let mut log_flush_interval_ms: u64 = 1_000;
-        let mut log_slow_reported = false;
 
         loop {
             let now_ms = crate::timer::uptime_ms();
@@ -331,25 +325,11 @@ impl LineEditor {
 
             if next_key.is_none() {
                 let now_ms = crate::timer::uptime_ms();
-                // Лог пишется только когда ввод простаивает, и с замером:
-                // медленный носитель не должен задерживать клавиатуру.
-                if now_ms.wrapping_sub(last_log_flush_ms) >= log_flush_interval_ms {
-                    let started = crate::timer::uptime_ms();
+                // Лог пишется только когда ввод простаивает: `checkpoint`
+                // сам решает, пора ли обращаться к медленному носителю.
+                if now_ms.wrapping_sub(last_log_flush_ms) >= 1_000 {
+                    last_log_flush_ms = now_ms;
                     crate::boot_log::checkpoint();
-                    let took = crate::timer::uptime_ms().saturating_sub(started);
-                    last_log_flush_ms = crate::timer::uptime_ms();
-                    if took > 100 {
-                        log_flush_interval_ms = (log_flush_interval_ms * 2).min(15_000);
-                        if !log_slow_reported {
-                            log_slow_reported = true;
-                            crate::println!(
-                                "[LOG] checkpoint took {} ms: flash writes are slow, backing off",
-                                took
-                            );
-                        }
-                    } else if log_flush_interval_ms > 1_000 && took < 20 {
-                        log_flush_interval_ms = 1_000;
-                    }
                 }
                 if now_ms.wrapping_sub(last_heartbeat_ms) >= 5_000 {
                     crate::serial::debugcon_println(format_args!(

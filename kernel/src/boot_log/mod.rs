@@ -281,14 +281,60 @@ fn checkpoint_raw_disk() {
 #[cfg(not(feature = "boot-log-to-disk"))]
 fn checkpoint_raw_disk() {}
 
+/// Интервал между записями лога на USB-носитель.
+///
+/// Носитель может быть медленным (флешка отвечает сотнями миллисекунд на
+/// команду), а `checkpoint()` вызывается часто — после каждой команды shell
+/// и раз в секунду из простоя. Без троттлинга каждая команда ждала запись
+/// лога, и ввод выглядел «залипшим».
+static NEXT_USB_FLUSH_MS: AtomicUsize = AtomicUsize::new(0);
+static USB_FLUSH_INTERVAL_MS: AtomicUsize = AtomicUsize::new(1_000);
+
 /// Сбросить накопленный лог на носители (checkpoint).
 ///
 /// Вызывается на ключевых шагах boot, раз в секунду из idle-цикла shell
-/// и из обработчика паники (`panic_flush`).
+/// и после каждой команды. Запись на USB троттлится: если она оказалась
+/// медленной, следующий сброс откладывается, а не тормозит вызвавшего.
 pub fn checkpoint() {
+    checkpoint_raw_disk();
+    usb_flush_throttled();
+    refresh_ramfs_logs(false);
+}
+
+/// Запись на USB с самонастройкой интервала.
+fn usb_flush_throttled() {
+    let now = crate::timer::uptime_ms() as usize;
+    if now < NEXT_USB_FLUSH_MS.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let started = crate::timer::uptime_ms();
+    usb::flush(false);
+    let took = crate::timer::uptime_ms().saturating_sub(started) as usize;
+
+    let mut interval = USB_FLUSH_INTERVAL_MS.load(Ordering::Relaxed);
+    if took > 100 {
+        // Медленный носитель: отступаем, вместо того чтобы копить задержку
+        // на каждом вызове. Верхняя граница — 15 с, чтобы лог всё же шёл.
+        interval = (interval * 2).min(15_000);
+        USB_FLUSH_INTERVAL_MS.store(interval, Ordering::Relaxed);
+    } else if took < 20 && interval > 1_000 {
+        // Носитель снова быстрый — возвращаемся к обычному темпу.
+        USB_FLUSH_INTERVAL_MS.store(1_000, Ordering::Relaxed);
+        interval = 1_000;
+    }
+    NEXT_USB_FLUSH_MS.store(now.saturating_add(interval), Ordering::Relaxed);
+}
+
+/// Немедленный сброс лога без троттлинга.
+///
+/// Нужен там, где данные обязательно должны попасть на носитель до
+/// выключения: `quit`, `reboot`, `sync`.
+pub fn checkpoint_now() {
     checkpoint_raw_disk();
     usb::flush(false);
     refresh_ramfs_logs(false);
+    NEXT_USB_FLUSH_MS.store(0, Ordering::Relaxed);
 }
 
 /// Запись лога при панике: без аллокаций, максимум одна порция.
