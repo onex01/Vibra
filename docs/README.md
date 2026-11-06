@@ -102,6 +102,8 @@ ISO, UEFI/USB образы, `SHA256SUMS` и GitHub Release. Подробност
 - `memory.md` — модель памяти и известные риски.
 - `testing.md` — матрица QEMU-проверок и критерии приёмки.
 - `verified-hardware.md` — отчёт о прогоне на реальной машине (заполнен для ThinkPad T450).
+- `hardware/README.md` — как снять паспорт железа под Linux (`scripts/hw-probe.sh`).
+- `hardware/matrix.md` — сводная таблица тестовых машин.
 - `usb_and_boot.md` — QEMU/UEFI-процедуры и статус USB.
 - `roadmap.md` — измеримые критерии версий.
 - `usb_progress.md` — инженерные заметки: xHCI/UHCI/storage/EHCI.

@@ -161,6 +161,7 @@ sudo dnf install make qemu-system-x86 mtools dosfstools wget tar xz-utils xorris
 ./build.sh iso            собрать гибридный BIOS/UEFI ISO
 ./build.sh iso-smoke      загрузить ISO в UEFI (OVMF) и BIOS (SeaBIOS)
 ./build.sh uefi-usb       собрать GPT-образ с EFI System Partition
+./scripts/hw-probe.sh     снять паспорт железа под Linux (для отладки драйверов)
 ./build.sh check          сборка debug/release-конфигураций + бюджет предупреждений
 ./build.sh debug          собрать и запустить QEMU
 ./build.sh run-serial-file  QEMU с serial-логом в файл (без ввода в stdio)
@@ -215,6 +216,7 @@ docs/      актуальные ограничения, архитектура �
 - [vktst](docs/vktst.md)
 - [Сборка и релиз](docs/release.md)
 - [USB и загрузка](docs/usb_and_boot.md)
+- [Тестовые машины](docs/hardware/matrix.md)
 - [Дорожная карта](docs/roadmap.md)
 - [Changelog](CHANGELOG.md)
 

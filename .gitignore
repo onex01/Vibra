@@ -9,3 +9,7 @@ __pycache__/
 *.pyc
 # Локальные cargo/rustup home (CI и изолированные сборки)
 .ci/
+
+# Отчёты scripts/hw-probe.sh (машинные паспорта не коммитим по умолчанию)
+hw-probe-*/
+hw-probe-*.tar.gz
