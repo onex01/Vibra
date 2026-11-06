@@ -30,6 +30,7 @@ use spin::Mutex;
 // --- Регистры (смещения от operational base) ---
 const USBCMD: u64 = 0x00;
 const USBSTS: u64 = 0x04;
+const CTRLDSSEGMENT: u64 = 0x10;
 const ASYNCLISTADDR: u64 = 0x18;
 const CONFIGFLAG: u64 = 0x40;
 const PORTSC: u64 = 0x44;
@@ -79,6 +80,14 @@ const TD_ERROR: u32 = (1 << 2) | (1 << 3) | (1 << 4);
 const MAX_TRANSFER: usize = 16 * 1024;
 const BULK_BUF: usize = 64 * 1024;
 const CONTROL_DATA_MAX: usize = 4096;
+
+/// Таймаут control-передачи. 2 с на реальном железе означает, что цикл
+/// ввода стоит две секунды на каждой неудаче; рабочее устройство отвечает
+/// на порядки быстрее.
+const CONTROL_TIMEOUT_MS: u64 = 500;
+/// Таймаут одной bulk-передачи: чтение сектора бывает медленным, но не
+/// секундами.
+const BULK_TIMEOUT_MS: u64 = 2_000;
 
 #[inline]
 unsafe fn rd32(addr: u64) -> u32 {
@@ -152,11 +161,16 @@ unsafe impl Send for Dma {}
 // Структуры расписания
 // ==========================================
 
-/// Queue Head — 48 байт, выравнивание 32.
-#[repr(C, align(32))]
+/// Queue Head.
+///
+/// Массив намеренно больше 32-битной раскладки (48 байт): при включённой
+/// 64-битной адресации контроллер читает ещё `bufptr_hi[5]` (68 байт).
+/// Старшие слова остаются нулями (память нулевая), то есть все адреса
+/// лежат в младших 4 ГиБ.
+#[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct Qh {
-    words: [u32; 12],
+    words: [u32; 20],
 }
 
 impl Qh {
@@ -223,11 +237,16 @@ fn start(&mut self, first_qtd: u32) {
     }
 }
 
-/// Transfer Descriptor — 32 байта, выравнивание 32.
-#[repr(C, align(32))]
+/// Transfer Descriptor.
+///
+/// Как и `Qh`: 32-битная раскладка — 32 байта, 64-битная — 52 байта со
+/// `bufptr_hi[5]`. Пять лишних слов нужны, иначе контроллер читает за
+/// концом структуры и берёт мусор как старшую половину адреса — transfer
+/// уходит в никуда и завершается таймаутом.
+#[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct Qtd {
-    words: [u32; 8],
+    words: [u32; 13],
 }
 
 impl Qtd {
@@ -240,7 +259,7 @@ impl Qtd {
         buffer_phys: u32,
         len: usize,
     ) -> Qtd {
-        let mut words = [0u32; 8];
+        let mut words = [0u32; 13];
         words[0] = next;
         words[1] = 1; // alternate next: terminate
         words[2] = TD_ACTIVE
@@ -336,6 +355,15 @@ struct Controller {
     data: Dma,
     root: Dma,
     next_address: u8,
+    /// `HCCPARAMS[0]`: контроллер читает структуры в расширенной
+    /// (64-битной) раскладке.
+    addr64: bool,
+    /// Сколько раз перечисление порта уже провалилось. Порт не трогаем
+    /// повторно, пока не придёт новый CSC: иначе неудача повторяется из
+    /// цикла ввода каждые полсекунды и превращается в «залипание» клавиатуры.
+    port_failures: [u8; 16],
+    /// Причина последней неудачи — для `diag usb`.
+    port_reason: [&'static str; 16],
     devices: Vec<DeviceState>,
     storage: Vec<StorageState>,
 }
@@ -548,14 +576,21 @@ impl Controller {
             }
         }
 
-        let qtd_dma =
-            Dma::allocate(3 * core::mem::size_of::<Qtd>(), 32).ok_or(UsbError::NoMemory)?;
+        let qtd_dma = Dma::allocate(
+            3 * core::mem::size_of::<Qtd>(),
+            core::mem::align_of::<Qtd>(),
+        )
+        .ok_or(UsbError::NoMemory)?;
         let qtds = qtd_dma.ptr as *mut Qtd;
         let base = qtd_dma.phys;
+        // Шаг между qTD — размер структуры, а не былое «32 байта»:
+        // в 64-битной раскладке он другой, и жёсткие смещения ломали цепочку.
+        let stride = core::mem::size_of::<Qtd>() as u32;
+        let (second, third) = (base + stride, base + 2 * stride);
 
         // 0: SETUP, 1: DATA (если есть), 2: STATUS.
         let q0 = Qtd::build(
-            if len > 0 { base + 32 } else { base + 64 },
+            if len > 0 { second } else { third },
             PID_SETUP,
             8,
             0,
@@ -564,7 +599,7 @@ impl Controller {
             8,
         );
         let q1 = Qtd::build(
-            base + 64,
+            third,
             if dir_in { PID_IN } else { PID_OUT },
             len,
             1,
@@ -588,7 +623,7 @@ impl Controller {
         (*self.head_qh()).set_horizontal(qh_phys);
         core::arch::asm!("sfence", options(nostack, preserves_flags));
 
-        let result = wait_qtd(qtds.add(2), 2_000);
+        let result = wait_qtd(qtds.add(2), CONTROL_TIMEOUT_MS);
 
         // Снять QH со списка до освобождения qTD.
         (*self.head_qh()).set_horizontal(head_phys);
@@ -659,8 +694,11 @@ impl Controller {
                 core::ptr::copy_nonoverlapping(data.as_ptr().add(done), self.root.ptr, chunk);
             }
 
-            let qtd_dma =
-                Dma::allocate(core::mem::size_of::<Qtd>(), 32).ok_or(UsbError::NoMemory)?;
+            let qtd_dma = Dma::allocate(
+                core::mem::size_of::<Qtd>(),
+                core::mem::align_of::<Qtd>(),
+            )
+            .ok_or(UsbError::NoMemory)?;
             let qtd = qtd_dma.ptr as *mut Qtd;
             let qtd_value = Qtd::build(
                 1,
@@ -680,7 +718,7 @@ impl Controller {
             (*self.head_qh()).set_horizontal(qh_phys);
             core::arch::asm!("sfence", options(nostack, preserves_flags));
 
-            let result = wait_qtd(qtd, 5_000);
+            let result = wait_qtd(qtd, BULK_TIMEOUT_MS);
 
             (*self.head_qh()).set_horizontal(head_phys);
             (*qh).terminate();
@@ -720,10 +758,13 @@ impl Controller {
         Ok(done)
     }
 
-    unsafe fn enumerate_port(&mut self, port: u8) -> bool {
+    /// Сбросить порт и перечислить устройство на нём.
+    ///
+    /// Возвращает причину отказа, чтобы `diag usb` и лог говорили, на каком
+    /// шаге сорвалось, а не просто «не получилось».
+    unsafe fn enumerate_port(&mut self, port: u8) -> Result<(), &'static str> {
         let Some(speed) = self.reset_port(port) else {
-            println!("[EHCI] port {}: reset failed", port);
-            return false;
+            return Err("port reset failed");
         };
         let high_speed = speed == 3;
         println!(
@@ -739,8 +780,7 @@ impl Controller {
             .control_raw(0, ep0_max_packet, high_speed, 0x80, 6, 0x0100, 0, Some(&mut short))
             .is_err()
         {
-            println!("[EHCI] port {}: GET_DESCRIPTOR(8) failed", port);
-            return false;
+            return Err("GET_DESCRIPTOR(8) at address 0 failed");
         }
         if ep0_max_packet == 8 {
             ep0_max_packet = match short[7] {
@@ -755,8 +795,7 @@ impl Controller {
             .control_raw(0, ep0_max_packet, high_speed, 0x00, 5, address as u16, 0, None)
             .is_err()
         {
-            println!("[EHCI] port {}: SET_ADDRESS failed", port);
-            return false;
+            return Err("SET_ADDRESS failed");
         }
         delay_ms(2);
 
@@ -774,8 +813,7 @@ impl Controller {
             )
             .is_err()
         {
-            println!("[EHCI] addr {}: GET_DESCRIPTOR(device) failed", address);
-            return false;
+            return Err("GET_DESCRIPTOR(device) failed");
         }
         let vendor = u16::from_le_bytes([descriptor[8], descriptor[9]]);
         let product = u16::from_le_bytes([descriptor[10], descriptor[11]]);
@@ -797,13 +835,11 @@ impl Controller {
             )
             .is_err()
         {
-            println!("[EHCI] addr {}: GET_DESCRIPTOR(config header) failed", address);
-            return false;
+            return Err("GET_DESCRIPTOR(config header) failed");
         }
         let total = u16::from_le_bytes([header[2], header[3]]) as usize;
         if total < 9 || total > CONTROL_DATA_MAX {
-            println!("[EHCI] addr {}: config length {} is invalid", address, total);
-            return false;
+            return Err("config descriptor length is invalid");
         }
         let mut config = alloc::vec![0u8; total];
         if self
@@ -819,8 +855,7 @@ impl Controller {
             )
             .is_err()
         {
-            println!("[EHCI] addr {}: GET_DESCRIPTOR(config) failed", address);
-            return false;
+            return Err("GET_DESCRIPTOR(config) failed");
         }
         let config_value = config[5];
         let mut interfaces = Vec::new();
@@ -839,15 +874,19 @@ impl Controller {
             )
             .is_err()
         {
-            println!("[EHCI] addr {}: SET_CONFIGURATION failed", address);
-            return false;
+            return Err("SET_CONFIGURATION failed");
         }
 
+        // Класс 09 — хаб. Перечислить его самого мы можем (и это уже
+        // полезно: видно, что порт занят хабом, а не пуст), но устройства
+        // за ним потребуют hub class requests — это rc.25.1.
         let mut kind = "unsupported";
         let mut class = descriptor[4];
         let mut subclass = descriptor[5];
         let mut protocol = descriptor[6];
-        if let Some(interface) = find_storage_interface(&interfaces) {
+        if class == 0x09 {
+            kind = "hub";
+        } else if let Some(interface) = find_storage_interface(&interfaces) {
             class = interface.class;
             subclass = interface.subclass;
             protocol = interface.protocol;
@@ -860,6 +899,13 @@ impl Controller {
             "[EHCI] addr {}: {:04x}:{:04x} class {:02x}/{:02x}/{:02x} -> {}",
             address, vendor, product, class, subclass, protocol, kind
         );
+        if kind == "hub" {
+            println!(
+                "[EHCI] port {}: devices behind this hub are not reachable yet \
+                 (class 09 needs hub requests)",
+                port
+            );
+        }
         self.devices.push(DeviceState {
             port,
             address,
@@ -873,7 +919,7 @@ impl Controller {
             protocol,
             kind,
         });
-        true
+        Ok(())
     }
 
     unsafe fn setup_storage(
@@ -890,10 +936,14 @@ impl Controller {
             println!("[EHCI] addr {}: storage without bulk endpoints", address);
             return false;
         };
-        let Some(in_qh) = Dma::allocate(core::mem::size_of::<Qh>(), 32) else {
+        let Some(in_qh) =
+            Dma::allocate(core::mem::size_of::<Qh>(), core::mem::align_of::<Qh>())
+        else {
             return false;
         };
-        let Some(out_qh) = Dma::allocate(core::mem::size_of::<Qh>(), 32) else {
+        let Some(out_qh) =
+            Dma::allocate(core::mem::size_of::<Qh>(), core::mem::align_of::<Qh>())
+        else {
             return false;
         };
         let max_packet = if high_speed {
@@ -972,20 +1022,30 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
             println!("[EHCI] {:#x}: no ports", bar_phys);
             return false;
         }
+        // HCCPARAMS[0] — 64-битная адресация. От неё зависит раскладка
+        // QH/qTD: при включённом бите контроллер читает дополнительные
+        // `bufptr_hi[5]` и берёт оттуда старшую половину адреса.
+        let addr64 = hcc_params & 1 != 0;
         println!(
-            "[EHCI] {:#x}: v{}.{} ports={} PPC={}",
+            "[EHCI] {:#x}: v{}.{} ports={} PPC={} 64bit={} EECP={:#x}",
             bar_phys,
             version >> 8,
             version & 0xFF,
             ports,
-            (hcs_params >> 4) & 1
+            (hcs_params >> 4) & 1,
+            if addr64 { "yes" } else { "no" },
+            ((hcc_params >> 8) & 0xFF) as u64 * 4
         );
 
-        let Some(head) = Dma::allocate(core::mem::size_of::<Qh>(), 32) else {
+        let Some(head) =
+            Dma::allocate(core::mem::size_of::<Qh>(), core::mem::align_of::<Qh>())
+        else {
             println!("[EHCI] {:#x}: no low memory for async head", bar_phys);
             return false;
         };
-        let Some(ctrl_qh) = Dma::allocate(core::mem::size_of::<Qh>(), 32) else {
+        let Some(ctrl_qh) =
+            Dma::allocate(core::mem::size_of::<Qh>(), core::mem::align_of::<Qh>())
+        else {
             return false;
         };
         let Some(setup) = Dma::allocate(64, 64) else {
@@ -1008,6 +1068,9 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
             data,
             root,
             next_address: 0,
+            addr64,
+            port_failures: [0; 16],
+            port_reason: [""; 16],
             devices: Vec::new(),
             storage: Vec::new(),
         };
@@ -1015,6 +1078,12 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
         if !controller.reset() {
             println!("[EHCI] {:#x}: reset timeout", bar_phys);
             return false;
+        }
+
+        if addr64 {
+            // Все DMA-буферы ниже 4 ГиБ, поэтому сегмент нулевой. Без этой
+            // записи контроллер может подставить в адрес мусор из регистра.
+            wr32(controller.op + CTRLDSSEGMENT, 0);
         }
 
         let eecp = ((hcc_params >> 8) & 0xFF) as u64 * 4;
@@ -1046,26 +1115,83 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
     }
 }
 
+impl Controller {
+    /// Разобрать состояние одного порта.
+    ///
+    /// `force` игнорирует счётчик неудач (явный запрос из `diag usb`).
+    /// Возвращает `(подключено, отключено)` для этого порта.
+    unsafe fn service_port(&mut self, port: u8, force: bool) -> (usize, usize) {
+        let value = rd32(self.port_reg(port));
+        let connected = value & PORT_CCS != 0;
+        let csc = value & PORT_CSC != 0;
+        let known = self.devices.iter().any(|entry| entry.port == port);
+
+        if !csc && connected == known {
+            return (0, 0);
+        }
+        self.clear_port_changes(port);
+
+        // Новое физическое событие: порт переподключили, значит попытку
+        // перечисления надо разрешить заново.
+        if csc {
+            self.port_failures[port as usize] = 0;
+            self.port_reason[port as usize] = "";
+        }
+
+        if connected && !known {
+            if self.port_failures[port as usize] > 0 && !force {
+                // Уже пробовали и сорвались: не повторяем на каждом опросе,
+                // иначе блокирующее перечисление превращается в залипание
+                // клавиатуры. Ждём нового CSC (вынул/вставил).
+                return (0, 0);
+            }
+            println!("[EHCI] hotplug: port {} connected", port);
+            return match self.enumerate_port(port) {
+                Ok(()) => {
+                    self.port_failures[port as usize] = 0;
+                    self.port_reason[port as usize] = "";
+                    (1, 0)
+                }
+                Err(reason) => {
+                    self.port_failures[port as usize] =
+                        self.port_failures[port as usize].saturating_add(1);
+                    self.port_reason[port as usize] = reason;
+                    println!(
+                        "[EHCI] port {}: enumeration failed ({}) — not retrying until replug",
+                        port, reason
+                    );
+                    (0, 0)
+                }
+            };
+        }
+
+        if !connected && known {
+            self.remove_port(port);
+            println!("[EHCI] hotplug: port {} disconnected", port);
+            return (0, 1);
+        }
+
+        (0, 0)
+    }
+}
+
 /// Перечислить устройства на всех портах. Вызывается после `timer::init()`.
 pub fn enumerate_now() {
     let mut controllers = EHCI.lock();
-    for index in 0..controllers.len() {
-        let controller = &mut controllers[index];
-        let ports = controller.ports;
-        for port in 1..=ports {
-            let value = unsafe { rd32(controller.port_reg(port)) };
-            let connected = value & PORT_CCS != 0;
-            let known = controller.devices.iter().any(|entry| entry.port == port);
-            if connected && !known {
-                unsafe {
-                    controller.enumerate_port(port);
-                }
+    for controller in controllers.iter_mut() {
+        for port in 1..=controller.ports {
+            unsafe {
+                controller.service_port(port, false);
             }
         }
     }
 }
 
 /// Обработать hotplug. Возвращает `(подключено, отключено)`.
+///
+/// Неудачная попытка запоминается по порту и больше не повторяется до
+/// следующего события подключения: цикл ввода вызывает эту функцию каждые
+/// 500 мс, а перечисление блокирующее.
 pub fn poll_hotplug() -> (usize, usize) {
     let mut controllers = match EHCI.try_lock() {
         Some(guard) => guard,
@@ -1073,30 +1199,64 @@ pub fn poll_hotplug() -> (usize, usize) {
     };
     let mut added = 0usize;
     let mut removed = 0usize;
-    for index in 0..controllers.len() {
-        let controller = &mut controllers[index];
-        let ports = controller.ports;
-        for port in 1..=ports {
-            let value = unsafe { rd32(controller.port_reg(port)) };
-            let connected = value & PORT_CCS != 0;
-            let known = controller.devices.iter().any(|entry| entry.port == port);
-            if value & PORT_CSC == 0 && connected == known {
-                continue;
-            }
-            unsafe { controller.clear_port_changes(port) };
-            if connected && !known {
-                println!("[EHCI] hotplug: port {} connected", port);
-                if unsafe { controller.enumerate_port(port) } {
-                    added += 1;
-                }
-            } else if !connected && known {
-                controller.remove_port(port);
-                println!("[EHCI] hotplug: port {} disconnected", port);
-                removed += 1;
-            }
+    for controller in controllers.iter_mut() {
+        for port in 1..=controller.ports {
+            let (plus, minus) = unsafe { controller.service_port(port, false) };
+            added += plus;
+            removed += minus;
         }
     }
     (added, removed)
+}
+
+/// Принудительно повторить перечисление портов, где оно сорвалось.
+pub fn retry_failed() -> usize {
+    let mut controllers = EHCI.lock();
+    let mut attempted = 0usize;
+    for controller in controllers.iter_mut() {
+        for port in 1..=controller.ports {
+            if controller.port_failures[port as usize] == 0 {
+                continue;
+            }
+            controller.port_failures[port as usize] = 0;
+            attempted += 1;
+            unsafe {
+                controller.service_port(port, true);
+            }
+        }
+    }
+    attempted
+}
+
+/// Состояние портов для `diag usb`: причина последней неудачи.
+pub fn port_failures() -> Vec<(u8, u8, &'static str)> {
+    let controllers = match EHCI.try_lock() {
+        Some(guard) => guard,
+        None => return Vec::new(),
+    };
+    let mut result = Vec::new();
+    for controller in controllers.iter() {
+        for port in 1..=controller.ports {
+            let failures = controller.port_failures[port as usize];
+            if failures == 0 {
+                continue;
+            }
+            result.push((port, failures, controller.port_reason[port as usize]));
+        }
+    }
+    result
+}
+
+/// 64-битная адресация контроллеров (для `diag usb`).
+pub fn addressing() -> Vec<(bool, usize)> {
+    let controllers = match EHCI.try_lock() {
+        Some(guard) => guard,
+        None => return Vec::new(),
+    };
+    controllers
+        .iter()
+        .map(|controller| (controller.addr64, controller.devices.len()))
+        .collect()
 }
 
 /// Снимок корневых портов для `diag usb`.

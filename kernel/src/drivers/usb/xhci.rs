@@ -355,6 +355,10 @@ struct Controller {
     rescan: bool,
     /// Перечисление портов уже выполнено.
     enumerated: bool,
+    /// Неудачные перечисления по портам. Порт с ненулевым счётчиком не
+    /// трогаем, пока не придёт новый CSC: перечисление блокирующее, а
+    /// опрос идёт из цикла ввода каждые 500 мс.
+    port_fail: [u8; 32],
 }
 
 
@@ -1376,15 +1380,25 @@ pub fn poll_hotplug() -> (usize, usize) {
                 // 15 MMIO-чтений раз в 500 мс дешевле пропущенной флешки.
                 let connected_now = portsc & PORTSC_CCS != 0;
                 let known_now = ctrl.devices.iter().any(|d| d.port == port);
-                if portsc & PORTSC_CSC == 0 && !rescan && connected_now == known_now {
+                let csc = portsc & PORTSC_CSC != 0;
+                if !csc && !rescan && connected_now == known_now {
                     continue;
                 }
                 unsafe { ctrl.port_clear_changes(port) };
+                let slot = port as usize % 32;
+                if csc {
+                    ctrl.port_fail[slot] = 0;
+                }
 
                 let connected = connected_now;
                 let known = known_now;
 
                 if connected && !known {
+                    if ctrl.port_fail[slot] > 0 {
+                        // Уже пробовали и не вышло: не блокируем ввод
+                        // повторами каждые полсекунды.
+                        continue;
+                    }
                     match unsafe { ctrl.reset_port(port) } {
                         Some(speed) => {
                             crate::println!(
@@ -1394,9 +1408,19 @@ pub fn poll_hotplug() -> (usize, usize) {
                                 speed_name(speed)
                             );
                             unsafe { enumerate_device(ctrl, index, port, speed) };
-                            added += 1;
+                            if ctrl.devices.iter().any(|d| d.port == port) {
+                                added += 1;
+                            } else {
+                                ctrl.port_fail[slot] =
+                                    ctrl.port_fail[slot].saturating_add(1);
+                                crate::println!(
+                                    "[xHCI] port {}: enumeration failed — not retrying until replug",
+                                    port
+                                );
+                            }
                         }
                         None => {
+                            ctrl.port_fail[slot] = ctrl.port_fail[slot].saturating_add(1);
                             crate::println!("[xHCI] hotplug: port {} reset failed", port);
                         }
                     }
@@ -1412,6 +1436,25 @@ pub fn poll_hotplug() -> (usize, usize) {
     };
 
     (added, removed)
+}
+
+/// Сбросить счётчики неудачных перечислений, чтобы `diag usb retry` мог
+/// повторить попытку не дожидаясь переподключения устройства.
+pub fn retry_failed() -> usize {
+    let mut controllers = match XHCI.try_lock() {
+        Some(guard) => guard,
+        None => return 0,
+    };
+    let mut cleared = 0usize;
+    for ctrl in controllers.iter_mut() {
+        for fail in ctrl.port_fail.iter_mut() {
+            if *fail != 0 {
+                *fail = 0;
+                cleared += 1;
+            }
+        }
+    }
+    cleared
 }
 
 /// Расширенные возможности контроллера (xECP), нужные для диагностики.
@@ -1957,6 +2000,7 @@ pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
             devices: Vec::new(),
             scratchpad_pages: scratchpad_count,
             rescan: false,
+            port_fail: [0; 32],
             extended,
             enumerated: false,
         };

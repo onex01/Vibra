@@ -29,6 +29,34 @@ pub fn diag_usb(console: &mut Console) {
         "  controllers: {}\n",
         crate::drivers::usb::ehci::controller_count()
     ));
+    // Раскладка структур EHCI зависит от HCCPARAMS[0]; здесь же видно,
+    // сколько устройств на контроллере перечислено.
+    for (index, (addr64, devices)) in crate::drivers::usb::ehci::addressing()
+        .into_iter()
+        .enumerate()
+    {
+        console.print(&format!(
+            "  ctrl{}: 64-bit addressing {}, device(s) {}\n",
+            index,
+            if addr64 { "on" } else { "off" },
+            devices
+        ));
+    }
+    // Порт, на котором перечисление сорвалось: причина и число попыток.
+    // Повторных попыток нет, пока флешку не переподключат — иначе цикл
+    // ввода блокировался бы на каждой неудаче.
+    for (port, failures, reason) in crate::drivers::usb::ehci::port_failures() {
+        console.print_colored(
+            &format!("  port {}: {} failed attempt(s): {}\n", port, failures, reason),
+            COLOR_RED,
+        );
+    }
+    if !crate::drivers::usb::ehci::port_failures().is_empty() {
+        console.print_colored(
+            "  -> replug the device, or run 'diag usb retry'\n",
+            COLOR_YELLOW,
+        );
+    }
     let ehci_ports = crate::drivers::usb::ehci::ports();
     if ehci_ports.is_empty() {
         console.print("  no EHCI controller\n");

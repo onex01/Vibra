@@ -39,7 +39,20 @@ pub fn run(args: &[&str], console: &mut Console) -> CmdResult {
             console.print(&crate::acpi::power::describe());
             console.print("\n");
         }
-        "usb" => diag_usb(console),
+        "usb" => {
+            // `diag usb retry` — повторить перечисление портов EHCI, где
+            // оно сорвалось (не ждать переподключения флешки).
+            if args.get(1) == Some(&"retry") {
+                let attempted = crate::drivers::usb::ehci::retry_failed();
+                let cleared = crate::drivers::usb::xhci::retry_failed();
+                console.print(&alloc::format!(
+                    "[USB] retry: {} port(s) attempted, {} xHCI counter(s) cleared\n",
+                    attempted,
+                    cleared
+                ));
+            }
+            diag_usb(console)
+        }
         "disk" | "blk" => {
             diag_ahci_ports(console);
             diag_disk(console)
