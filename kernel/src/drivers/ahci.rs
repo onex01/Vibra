@@ -588,6 +588,12 @@ pub fn read_sectors(port_num: u32, lba: u64, count: u16, buffer: &mut [u8]) -> b
             return false;
         }
 
+        // Барьер компилятора: буфер заполнен через DMA, и обычная загрузка
+        // не должна оказаться выше ожидания завершения команды. Отдельного
+        // прохода по буферу не нужно — читает его вызывающий, уже после
+        // возврата из функции.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+
         true
     }
 }
@@ -1236,8 +1242,20 @@ fn identify_once(port_num: u32) -> Option<DiskInfo> {
             return None;
         }
 
-        // Парсим данные IDENTIFY (256 слов по 16 бит)
-        let data = core::slice::from_raw_parts(id_buf as *const u16, 256);
+        // Перечитываем ответ «свежим» чтением и сразу отпускаем буфер.
+        //
+        // Буфер заполняет устройство через DMA, а не CPU. Обычная загрузка
+        // может быть поднята компилятором выше ожидания завершения команды,
+        // и тогда парсится то, что лежало в памяти до передачи — нули. Именно
+        // это давало «IDENTIFY returned 0 sectors» на живом диске (T450), при
+        // этом TFD показывал DRDY без ошибок.
+        // Здесь же закрыт use-after-free: раньше срез `data` читался после
+        // dealloc, и диагностика печатала мусор из уже освобождённой кучи.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        let mut words = [0u16; 256];
+        core::ptr::copy_nonoverlapping(id_buf as *const u16, words.as_mut_ptr(), 256);
+        alloc::alloc::dealloc(id_buf, id_buf_layout);
+        let data = &words;
 
         // Секторов (LBA48) — слова 100..103
         let total_sectors = (data[100] as u64)
@@ -1274,8 +1292,6 @@ fn identify_once(port_num: u32) -> Option<DiskInfo> {
             512
         };
 
-        alloc::alloc::dealloc(id_buf, id_buf_layout);
-
         if total_sectors == 0 {
             // Показываем ключевые слова IDENTIFY: по ним видно, ответил ли
             // диск вообще (word 0 = 0x0040 у ATA) и что он заявил.
@@ -1287,10 +1303,14 @@ fn identify_once(port_num: u32) -> Option<DiskInfo> {
             let is = port_read32(port_num, PORT_IS);
             let serr = port_read32(port_num, PORT_SERR);
             let ssts = port_read32(port_num, PORT_SSTS);
+            // PRDBC — сколько байт контроллер реально перенёс. Ноль при
+            // DRDY означает, что данные не доехали (проблема PRD), а не
+            // «диск без секторов».
+            let prdbc = (*cmd_list).prdbc;
             println!(
-                "[AHCI] Port {}: TFD={:#x} IS={:#x} SERR={:#x} SSTS={:#x} (DET={} IPM={} SPD={})",
+                "[AHCI] Port {}: TFD={:#x} IS={:#x} SERR={:#x} SSTS={:#x} (DET={} IPM={} SPD={}) PRDBC={}",
                 port_num, tfd, is, serr, ssts,
-                ssts & 0xF, (ssts >> 8) & 0xF, (ssts >> 4) & 0xF
+                ssts & 0xF, (ssts >> 8) & 0xF, (ssts >> 4) & 0xF, prdbc
             );
         }
 

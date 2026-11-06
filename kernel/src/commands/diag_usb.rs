@@ -98,6 +98,41 @@ pub fn diag_usb(console: &mut Console) {
         ));
     }
 
+    // Маршрутизация USB2-портов на чипсетах Intel.
+    //
+    // У Intel EHCI в PCI-конфигурации есть регистры маршрутизации: от них
+    // зависит, видит ли порт EHCI или xHCI. Linux выставляет их сам, а ядро
+    // без этого видит «пустые» порты у обоих контроллеров одновременно —
+    // ровно то, что наблюдается на T450 (xHCI: 15 портов CCS=0, EHCI: только
+    // внутренний хаб).
+    console.print_colored("[usb2 port routing]\n", COLOR_YELLOW);
+    let mut routing_rows = 0usize;
+    for device in crate::drivers::pci::find_all_devices_by_class(0x0C, 0x03) {
+        if device.prog_if != 0x20 && device.prog_if != 0x30 {
+            continue;
+        }
+        let mut line = alloc::format!(
+            "  [{:02x}:{:02x}.{}] ",
+            device.bus, device.dev, device.func
+        );
+        // 0x80..0x8C — регионы маршрутизации Intel (USB3PR, USB2PR,
+        // USBPHYCFG). У не-Intel там может быть что угодно, поэтому
+        // печатаем как есть, без трактовки.
+        for offset in [0x80u8, 0x84, 0x88, 0x8C] {
+            let value = unsafe {
+                crate::drivers::pci::pci_read_u32_config(
+                    device.bus, device.dev, device.func, offset,
+                )
+            };
+            line.push_str(&alloc::format!("{:#04x}:{:#010x} ", offset, value));
+        }
+        console.print(&alloc::format!("{}\n", line.trim_end()));
+        routing_rows += 1;
+    }
+    if routing_rows == 0 {
+        console.print("  none\n");
+    }
+
     console.print_colored("[xHCI]\n", COLOR_YELLOW);
     console.print(&format!(
         "  controllers: {}\n  keyboard:    {}\n",
