@@ -118,7 +118,7 @@ pub fn diag_usb(console: &mut Console) {
         // 0x80..0x8C — регионы маршрутизации Intel (USB3PR, USB2PR,
         // USBPHYCFG). У не-Intel там может быть что угодно, поэтому
         // печатаем как есть, без трактовки.
-        for offset in [0x80u8, 0x84, 0x88, 0x8C] {
+        for offset in [0x80u8, 0x84, 0x88, 0x8C, 0xD0, 0xD4, 0xD8, 0xDC] {
             let value = unsafe {
                 crate::drivers::pci::pci_read_u32_config(
                     device.bus, device.dev, device.func, offset,

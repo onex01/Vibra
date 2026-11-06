@@ -260,6 +260,21 @@ pub fn init() {
                     (hci_version, port_count)
                 };
 
+                // Маршрутизация портов Intel: без неё USB2-порты
+                // остаются у EHCI, и xHCI видит их пустыми (CCS=0).
+                // Делается до reset: регистры PCI, reset MMIO их не трогает.
+                if pci_dev.vendor_id == 0x8086 {
+                    if let Some((before2, after2, before3, after3)) =
+                        crate::drivers::usb::xhci::enable_intel_port_routing(
+                            pci_dev.bus, pci_dev.dev, pci_dev.func,
+                        )
+                    {
+                        println!(
+                            "[xHCI] Intel port routing: USB2PR {:#010x} -> {:#010x}, USB3_PSSEN {:#010x} -> {:#010x}",
+                            before2, after2, before3, after3
+                        );
+                    }
+                }
                 if crate::drivers::usb::xhci::init_controller(bar0_phys, mmio_virt) {
                     found.push(UsbController {
                         vendor: pci_dev.vendor_id,

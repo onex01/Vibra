@@ -1872,6 +1872,56 @@ unsafe fn bios_handoff(mmio: u64, hccparams1: u32) {
     }
 }
 
+/// Регистры маршрутизации портов Intel в PCI-конфигурации xHCI.
+///
+/// На чипсетах Intel USB2-порт физически может быть отдан либо EHCI, либо
+/// xHCI. По умолчанию прошивка отдаёт их EHCI (исторически «главному»
+/// контроллеру USB2), поэтому xHCI видит свои порты пустыми: `CCS=0` при
+/// `PP=1` и `PLS=5 (RxDetect)`.
+///
+/// Linux делает это в `usb_enable_intel_xhci_ports()` и благодаря этому
+/// видит на T450 флешку, камеру и Bluetooth именно на xHCI.
+const USB_INTEL_XUSB2PR: u8 = 0xD0;
+const USB_INTEL_USB2PRM: u8 = 0xD4;
+const USB_INTEL_USB3_PSSEN: u8 = 0xD8;
+const USB_INTEL_USB3PRM: u8 = 0xDC;
+
+/// Отдать все переключаемые USB2/USB3-порты контроллеру xHCI.
+///
+/// Возвращает `(было, стало)` по регистру USB2PR для лога.
+pub fn enable_intel_port_routing(bus: u8, dev: u8, func: u8) -> Option<(u32, u32, u32, u32)> {
+    unsafe {
+        let before2 = crate::drivers::pci::pci_read_u32_config(
+            bus, dev, func, USB_INTEL_XUSB2PR,
+        );
+        let mask2 = crate::drivers::pci::pci_read_u32_config(bus, dev, func, USB_INTEL_USB2PRM);
+        let before3 = crate::drivers::pci::pci_read_u32_config(
+            bus, dev, func, USB_INTEL_USB3_PSSEN,
+        );
+        let mask3 = crate::drivers::pci::pci_read_u32_config(bus, dev, func, USB_INTEL_USB3PRM);
+
+        // Маска 0 у обоих регистров означает, что маршрутизации здесь нет
+        // (не Intel PCH или порты не переключаются). Тогда не пишем ничего:
+        // 0xD0..0xDC у чужих контроллеров заняты под другое.
+        if mask2 == 0 && mask3 == 0 {
+            return None;
+        }
+
+        // Значения те же, что у Linux: все 16 линий USB2 и 4 линии USB3.
+        // Контроллер сам оставит только реализованные биты.
+        crate::drivers::pci::pci_write_u32_config(bus, dev, func, USB_INTEL_XUSB2PR, 0x0000_FFFF);
+        crate::drivers::pci::pci_write_u32_config(bus, dev, func, USB_INTEL_USB3_PSSEN, 0x0000_000F);
+
+        let after2 = crate::drivers::pci::pci_read_u32_config(
+            bus, dev, func, USB_INTEL_XUSB2PR,
+        );
+        let after3 = crate::drivers::pci::pci_read_u32_config(
+            bus, dev, func, USB_INTEL_USB3_PSSEN,
+        );
+        Some((before2, after2, before3, after3))
+    }
+}
+
 /// Полная инициализация контроллера и перечисление портов.
 pub fn init_controller(bar_phys: u64, mmio_virt: u64) -> bool {
     unsafe {

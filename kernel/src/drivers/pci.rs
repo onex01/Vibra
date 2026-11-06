@@ -461,6 +461,14 @@ pub unsafe fn pci_read_u32_config(bus: u8, dev: u8, func: u8, offset: u8) -> u32
     pci_read_u32(bus, dev, func, offset)
 }
 
+/// Записать 32-битное значение в PCI конфигурационное пространство.
+///
+/// Смещение обязано быть выровнено по 4: контроллер игнорирует младшие
+/// два бита, и запись «как будто» по 0xD1 молча уйдёт в 0xD0.
+pub unsafe fn pci_write_u32_config(bus: u8, dev: u8, func: u8, offset: u8, value: u32) {
+    pci_write_u32(bus, dev, func, offset & 0xFC, value);
+}
+
 /// Включить Bus Master (bit 2) для PCI устройства — необходимо для DMA
 pub unsafe fn enable_bus_master(bus: u8, dev: u8, func: u8) {
     // 0x04 — command (16 бит) + status (16 бит, W1C). Читать/писать 32 бита

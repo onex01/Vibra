@@ -171,6 +171,25 @@ ctrl0 port1 usb2 0x000002a0 empty dis powered speed 0 (unknown) -> not enumerate
 - расшифровка `PORTSC` в `diag usb` (`PLS` с именем состояния,
   `CCS`/`PED`/`PP`/`UNPOWERED`).
 
+## Маршрутизация портов Intel
+
+На чипсетах Intel USB2-линия физически может принадлежать либо EHCI, либо
+xHCI, и прошивка по умолчанию отдаёт её EHCI. Переключается это
+регистрами PCI-конфигурации самого xHCI:
+
+| Смещение | Регистр | Значение в Linux на T450 |
+|---|---|---|
+| `0xD0` | `XUSB2PR` | `0x000007ff` (11 линий USB2 на xHCI) |
+| `0xD4` | `USB2PRM` | `0x000004ff` (маска переключаемых) |
+| `0xD8` | `USB3_PSSEN` | `0x0000000f` (4 линии SuperSpeed) |
+| `0xDC` | `USB3PRM` | `0x0000000f` (маска переключаемых) |
+
+Linux делает это в `usb_enable_intel_xhci_ports()`. Без записи этих
+регистров xHCI видит свои порты пустыми (`CCS=0` при `PP=1` и
+`PLS=5 (RxDetect)`), а EHCI при этом держит внутренний хаб — ровно то, что
+наблюдалось на T450. `enable_intel_port_routing()` делает то же самое с
+`rc.25.4`.
+
 ## Что ещё не сделано
 
 - OHCI (USB 1.1, NEC/AMD/VIA) — не начато.
