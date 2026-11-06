@@ -31,7 +31,7 @@ shopt -s nullglob
 
 trap 'printf "failed: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
-readonly SCRIPT_VERSION="1.0"
+readonly SCRIPT_VERSION="1.1"
 usage() {
     sed -n '/^# Использование:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     printf 'Версия скрипта: %s\n' "$SCRIPT_VERSION"
@@ -152,13 +152,44 @@ dmi_field() {
     fi
 }
 
+# DMI-заполнители: OEM-платы (в том числе серверные сборки) часто оставляют
+# в полях «Default string», «To be filled by O.E.M.» и подобное. Такое
+# значение бесполезно и в таблице, и в имени каталога.
+dmi_meaningful() {
+    tr -d '\n' <<<"$1" | tr '[:upper:]' '[:lower:]' |
+        grep -qvE '^(|default string|to be filled by o\.e\.m\.?|system product name|system version|not specified|unknown|none|not applicable|o\.e\.m\.?|type1productconfigid|chassis manufacture)$'
+}
+
 sys_vendor="$(dmi_field sys_vendor)"
 product_name="$(dmi_field product_name)"
+product_version="$(dmi_field product_version)"
+board_vendor="$(dmi_field board_vendor)"
 board_name="$(dmi_field board_name)"
 bios_vendor="$(dmi_field bios_vendor)"
 bios_version="$(dmi_field bios_version)"
 bios_date="$(dmi_field bios_date)"
-machine_label="$(printf '%s %s' "$sys_vendor" "$product_name" | sed 's/^ *//; s/ *$//')"
+
+# Имя машины: первое осмысленное из «производитель + модель», затем модель,
+# затем плата, затем версия продукта. Пусто — unknown-machine.
+machine_label=""
+for candidate in \
+    "$(dmi_meaningful "$sys_vendor" && printf '%s' "$sys_vendor")" \
+    "$(dmi_meaningful "$product_name" && printf '%s' "$product_name")" \
+    "$(dmi_meaningful "$board_vendor" && printf '%s' "$board_vendor")" \
+    "$(dmi_meaningful "$board_name" && printf '%s' "$board_name")" \
+    "$(dmi_meaningful "$product_version" && printf '%s' "$product_version")"; do
+    [[ -n "$candidate" ]] || continue
+    machine_label="$(sed 's/^ *//; s/ *$//' <<<"$candidate")"
+    break
+done
+# Производитель + модель, если различаются: так видно и бренд, и плату.
+if dmi_meaningful "$sys_vendor" && dmi_meaningful "$product_name"; then
+    vendor_clean="$(sed 's/^ *//; s/ *$//' <<<"$sys_vendor")"
+    product_clean="$(sed 's/^ *//; s/ *$//' <<<"$product_name")"
+    if [[ "${vendor_clean,,}" != "${product_clean,,}" ]]; then
+        machine_label="$vendor_clean $product_clean"
+    fi
+fi
 [[ -n "$machine_label" ]] || machine_label="unknown-machine"
 
 if [[ -z "$out_dir" ]]; then
@@ -311,7 +342,7 @@ if [[ "$want_raw" -eq 1 ]]; then
                 bDeviceProtocol speed version busnum devnum maxchild bNumInterfaces \
                 product manufacturer serial removable; do
                 [[ -r "$dev/$attr" ]] || continue
-                printf '  %-16s %s\n' "$attr" "$(tr -d '\n' <"$dev/$attr" 2>/dev/null)"
+                printf '  %-16s %s\n' "$attr" "$(sysfs_attr "$dev" "$attr")"
             done
         } >>"$raw_dir/usb-sysfs.txt"
     done
@@ -525,7 +556,7 @@ if [[ "$want_raw" -eq 1 ]]; then
             printf '===== %s =====\n' "$host"
             for attr in proc_name unique_id version_str host_busy can_queue; do
                 [[ -r "$host/$attr" ]] || continue
-                printf '  %-14s %s\n' "$attr" "$(tr -d '\n' <"$host/$attr" 2>/dev/null)"
+                printf '  %-14s %s\n' "$attr" "$(sysfs_attr "$host" "$attr")"
             done
         } >>"$raw_dir/scsi-hosts.txt"
     done
@@ -574,7 +605,7 @@ if [[ "$want_raw" -eq 1 ]]; then
             printf '===== %s =====\n' "$card"
             for attr in status enabled modes; do
                 [[ -r "$card/$attr" ]] || continue
-                printf '  %-8s %s\n' "$attr" "$(tr '\n' ' ' <"$card/$attr" 2>/dev/null)"
+                printf '  %-8s %s\n' "$attr" "$(sysfs_attr "$card" "$attr" | tr '\n' ' ')"
             done
         } >>"$raw_dir/drm.txt"
     done
@@ -588,7 +619,7 @@ if [[ "$want_raw" -eq 1 ]]; then
             printf '===== %s =====\n' "$fb"
             for attr in name bits_per_pixel stride virtual_size modes; do
                 [[ -r "$fb/$attr" ]] || continue
-                printf '  %-16s %s\n' "$attr" "$(tr '\n' ' ' <"$fb/$attr" 2>/dev/null)"
+                printf '  %-16s %s\n' "$attr" "$(sysfs_attr "$fb" "$attr" | tr '\n' ' ')"
             done
         } >>"$raw_dir/fb.txt"
     done
@@ -605,7 +636,7 @@ if [[ "$want_raw" -eq 1 ]]; then
             printf '===== %s =====\n' "$name"
             for attr in address address_len type carrier speed duplex mtu operstate; do
                 [[ -r "$net/$attr" ]] || continue
-                printf '  %-12s %s\n' "$attr" "$(tr -d '\n' <"$net/$attr" 2>/dev/null)"
+                printf '  %-12s %s\n' "$attr" "$(sysfs_attr "$net" "$attr")"
             done
         } >>"$raw_dir/net.txt"
     done
