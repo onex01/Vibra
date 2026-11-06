@@ -82,13 +82,15 @@ impl LineEditor {
         let mut last_heartbeat_ms = crate::timer::uptime_ms();
         let mut last_log_flush_ms = last_heartbeat_ms;
         let mut last_hotplug_ms = last_heartbeat_ms;
+        // Интервал записи лога. Если носитель отвечает медленно (USB-
+        // накопитель), запись растягивается на сотни миллисекунд и
+        // превращается в «залипание» клавиатуры: ввод ждёт её в этом же
+        // цикле. Тогда интервал растёт, вместо того чтобы тормозить ввод.
+        let mut log_flush_interval_ms: u64 = 1_000;
+        let mut log_slow_reported = false;
 
         loop {
             let now_ms = crate::timer::uptime_ms();
-            if now_ms.saturating_sub(last_log_flush_ms) >= 1000 {
-                last_log_flush_ms = now_ms;
-                crate::boot_log::checkpoint();
-            }
             // Hotplug опрашивается из цикла ввода: только здесь ядро
             // проводит время в ожидании, прерывание PORTSC само по себе
             // устройство не перечисляет.
@@ -96,8 +98,6 @@ impl LineEditor {
                 last_hotplug_ms = now_ms;
                 let (added, removed) = crate::drivers::usb::poll_hotplug();
                 if added > 0 || removed > 0 {
-                    // Сообщение печатается до строки ввода, чтобы не
-                    // испортить набираемый текст.
                     console.put_char('\n');
                     console.print_colored(
                         "[USB] port change: ",
@@ -110,8 +110,10 @@ impl LineEditor {
                         console.print("disconnected, ");
                     }
                     console.print("run 'disks' to rescan\n");
-                    self.screen_len = 0;
-                    self.screen_cursor = 0;
+                    // Приглашение и набранный текст возвращаем на место.
+                    // Раньше строка ввода пропадала после сообщения и shell
+                    // выглядел повешенным, хотя продолжал читать ввод.
+                    self.reprint_input(console);
                 }
             }
 
@@ -329,6 +331,26 @@ impl LineEditor {
 
             if next_key.is_none() {
                 let now_ms = crate::timer::uptime_ms();
+                // Лог пишется только когда ввод простаивает, и с замером:
+                // медленный носитель не должен задерживать клавиатуру.
+                if now_ms.wrapping_sub(last_log_flush_ms) >= log_flush_interval_ms {
+                    let started = crate::timer::uptime_ms();
+                    crate::boot_log::checkpoint();
+                    let took = crate::timer::uptime_ms().saturating_sub(started);
+                    last_log_flush_ms = crate::timer::uptime_ms();
+                    if took > 100 {
+                        log_flush_interval_ms = (log_flush_interval_ms * 2).min(15_000);
+                        if !log_slow_reported {
+                            log_slow_reported = true;
+                            crate::println!(
+                                "[LOG] checkpoint took {} ms: flash writes are slow, backing off",
+                                took
+                            );
+                        }
+                    } else if log_flush_interval_ms > 1_000 && took < 20 {
+                        log_flush_interval_ms = 1_000;
+                    }
+                }
                 if now_ms.wrapping_sub(last_heartbeat_ms) >= 5_000 {
                     crate::serial::debugcon_println(format_args!(
                         "[HEARTBEAT] uptime={}s ticks={} clock={}",
@@ -408,6 +430,25 @@ impl LineEditor {
             self.input_col = new_col as usize;
             self.input_row = new_row;
         }
+    }
+
+    /// Вернуть приглашение и набранный текст после служебного сообщения.
+    ///
+    /// Служебные строки (подключение USB, предупреждения) печатаются посреди
+    /// ввода, поэтому после них нужно заново нарисовать приглашение и
+    /// восстановить начало строки ввода — иначе shell выглядит зависшим.
+    fn reprint_input(&mut self, console: &mut Console) {
+        self.print_prompt(console);
+        let (col, row) = console.cursor_position();
+        let cols = console.fb_cols().max(1);
+        // Те же формулы, что и при входе в read_line: курсор стоит сразу
+        // после приглашения, начало ввода — на `prompt_len_cells` раньше.
+        let start = col.saturating_sub(self.prompt_len_cells);
+        self.input_row = row - (self.prompt_len_cells.saturating_sub(col)) / cols;
+        self.input_col = start % cols;
+        self.screen_len = 0;
+        self.screen_cursor = 0;
+        self.redraw_line(console);
     }
 
     fn redraw_line(&mut self, console: &mut Console) {

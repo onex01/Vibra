@@ -30,6 +30,8 @@ const TRB_ENABLE_SLOT: u32 = 9;
 const TRB_ADDRESS_DEVICE: u32 = 11;
 const TRB_CONFIGURE_ENDPOINT: u32 = 12;
 const TRB_EVALUATE_CONTEXT: u32 = 13;
+const TRB_RESET_ENDPOINT: u32 = 14;
+const TRB_SET_TR_DEQUEUE: u32 = 16;
 const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_COMMAND_COMPLETION: u32 = 33;
 const TRB_PORT_STATUS_CHANGE: u32 = 34;
@@ -453,7 +455,22 @@ impl Controller {
 
     /// Отправляет команду в command ring и ждёт Command Completion Event.
     unsafe fn command(&mut self, param: u64, trb_type: u32, slot: u8) -> Option<Event> {
-        self.cmd.push(param, 0, (trb_type << 10) | ((slot as u32) << 24));
+        self.command_full(param, 0, trb_type, slot)
+    }
+
+    /// Команда с явным полем status.
+    ///
+    /// Нужна для команд над endpoint'ом: Endpoint ID лежит именно там
+    /// (биты 20:16), и без него Reset Endpoint не знает, что сбрасывать.
+    unsafe fn command_full(
+        &mut self,
+        param: u64,
+        status: u32,
+        trb_type: u32,
+        slot: u8,
+    ) -> Option<Event> {
+        self.cmd
+            .push(param, status, (trb_type << 10) | ((slot as u32) << 24));
         self.doorbell(0, 0);
 
         for _ in 0..2_000_000 {
@@ -916,6 +933,48 @@ unsafe fn configure_endpoints(
 }
 
 impl Controller {
+    /// Вернуть endpoint в рабочее состояние после сбойной передачи.
+    ///
+    /// Без этого один неудачный transfer оставляет endpoint в состоянии
+    /// Halted: контроллер отвечает ошибкой на все последующие команды, и
+    /// накопитель «отваливается до переподключения». Именно это видел
+    /// пользователь на T450: чтение работает, потом I/O error, потом после
+    /// повторного монтирования снова работает.
+    ///
+    /// Reset Endpoint переводит endpoint в Running, Set TR Dequeue Pointer
+    /// сообщает, с какого TRB продолжать.
+    unsafe fn recover_endpoint(&mut self, device_index: usize, dir_in: bool) -> bool {
+        let slot = self.storage[device_index].slot;
+        let dci = self.storage[device_index].endpoint(dir_in).dci;
+        let Some(ring) = self.storage[device_index].endpoint(dir_in).ring.as_ref() else {
+            return false;
+        };
+        let dequeue = ring.phys + ring.index as u64 * TRB_SIZE as u64;
+        let dcs = ring.cycle as u64;
+
+        // Reset Endpoint: Endpoint ID в битах 20:16 поля status.
+        let reset = self.command_full(0, (dci as u32) << 16, TRB_RESET_ENDPOINT, slot);
+        let reset_ok = matches!(reset, Some(event) if event.completion_code() == CC_SUCCESS);
+
+        // Set TR Dequeue Pointer: адрес следующего TRB плюс бит DCS.
+        let dequeue_trb = self.command_full(
+            dequeue | dcs,
+            (dci as u32) << 16,
+            TRB_SET_TR_DEQUEUE,
+            slot,
+        );
+        let dequeue_ok =
+            matches!(dequeue_trb, Some(event) if event.completion_code() == CC_SUCCESS);
+
+        if !reset_ok || !dequeue_ok {
+            println!(
+                "[xHCI] slot {} dci {}: endpoint recovery failed (reset={}, dequeue={})",
+                slot, dci, reset_ok as u8, dequeue_ok as u8
+            );
+        }
+        reset_ok && dequeue_ok
+    }
+
     /// Сброс порта. Возвращает скорость (PORTSC bits 10-13).
     unsafe fn reset_port(&mut self, port: u8) -> Option<u32> {
         let reg = self.port_reg(port);
@@ -1699,18 +1758,49 @@ unsafe fn bulk_chunk(
     ring.push(phys, data.len() as u32, trb_control);
     ctrl.doorbell(slot, dci as u32);
 
-    let event = ctrl.wait_transfer_event(slot, dci, 20_000_000);
+    let mut event = ctrl.wait_transfer_event(slot, dci, 20_000_000);
 
     // Кольцо возвращаем устройству в любом случае.
     ctrl.storage[device_index].endpoint(dir_in).ring = Some(ring);
 
-    let Some((code, residual)) = event else {
+    let mut result = event.map(|(code, residual)| (code, residual));
+    let failed = match result {
+        None => true,
+        Some((code, _)) => code != CC_SUCCESS && code != CC_SHORT_PACKET,
+    };
+
+    if failed {
+        // Один сбой оставляет endpoint в Halted. Пробуем вернуть его и
+        // повторить передачу: иначе накопитель «отваливается» до
+        // переподключения, хотя устройство в порядке.
+        if ctrl.recover_endpoint(device_index, dir_in) {
+            let mut retry_ring = match ctrl.storage[device_index].endpoint(dir_in).ring.take() {
+                Some(value) => value,
+                None => return Err(UsbError::NoDevice),
+            };
+            retry_ring.push(phys, data.len() as u32, trb_control);
+            ctrl.doorbell(slot, dci as u32);
+            event = ctrl.wait_transfer_event(slot, dci, 20_000_000);
+            ctrl.storage[device_index].endpoint(dir_in).ring = Some(retry_ring);
+            result = event;
+        }
+    }
+
+    let Some((code, residual)) = result else {
         return Err(UsbError::Timeout);
     };
     if code == CC_STALL {
         return Err(UsbError::Stall);
     }
     if code != CC_SUCCESS && code != CC_SHORT_PACKET {
+        // Код завершения в лог: без него «I/O error» не с чем сопоставить.
+        crate::println!(
+            "[xHCI] slot {} dci {}: bulk {} failed, completion code {}",
+            slot,
+            dci,
+            if dir_in { "IN" } else { "OUT" },
+            code
+        );
         return Err(UsbError::TransferFailed);
     }
 
